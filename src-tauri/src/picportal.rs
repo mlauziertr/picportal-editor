@@ -1217,7 +1217,7 @@ fn load_queue(path: &Path) -> Result<QueueFile, String> {
     let temporary = path.with_extension("json.tmp");
     let backup = path.with_extension("json.bak");
     let mut invalid_queue = None;
-    for candidate in [path, temporary.as_path(), backup.as_path()] {
+    for candidate in [temporary.as_path(), path, backup.as_path()] {
         if !candidate.is_file() {
             continue;
         }
@@ -1484,7 +1484,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("picportal-queue.json");
         let temporary = path.with_extension("json.tmp");
-        let queue = QueueFile {
+        let canonical_queue = QueueFile {
             items: vec![QueueItem {
                 path: "export.jpg".into(),
                 api_base_url: PRODUCTION_API_BASE_URL.into(),
@@ -1493,16 +1493,31 @@ mod tests {
                 source_sha256: "source".into(),
                 state: "uploading".into(),
                 photo_id: None,
-                upload_id: Some("upload".into()),
-                upload_offset: 128,
+                upload_id: Some("old-upload".into()),
+                upload_offset: 64,
                 last_error: None,
             }],
         };
-        fs::write(&temporary, serde_json::to_vec(&queue).expect("queue JSON"))
-            .expect("temporary queue");
+        let temporary_queue = QueueFile {
+            items: vec![QueueItem {
+                upload_id: Some("new-upload".into()),
+                upload_offset: 128,
+                ..canonical_queue.items[0].clone()
+            }],
+        };
+        fs::write(
+            &path,
+            serde_json::to_vec(&canonical_queue).expect("canonical queue JSON"),
+        )
+        .expect("canonical queue");
+        fs::write(
+            &temporary,
+            serde_json::to_vec(&temporary_queue).expect("temporary queue JSON"),
+        )
+        .expect("temporary queue");
 
         let restored = load_queue(&path).expect("recover queue");
-        assert_eq!(restored.items[0].upload_id.as_deref(), Some("upload"));
+        assert_eq!(restored.items[0].upload_id.as_deref(), Some("new-upload"));
         assert_eq!(restored.items[0].upload_offset, 128);
     }
 }
