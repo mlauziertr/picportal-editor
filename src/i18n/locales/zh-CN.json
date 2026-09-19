@@ -1224,7 +1224,7 @@
     "culling": {
       "actionDelete": "移至回收站",
       "actionRateSuggestions": "应用建议星级",
-      "actionRateZero": "将评分设为 1 星",
+      "actionRateZero": "将评分设为 0 星",
       "actionReject": "标记为已拒绝（红色标签）",
       "analysisOverlay": "★{{rating}} · {{eyeState}} · {{eyeMethod}}",
       "analyzeEyes": "在本地分析眼睛状态（启发式）",

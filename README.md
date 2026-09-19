@@ -890,6 +890,10 @@ sudo dnf install libgphoto2-devel pkgconf-pkg-config
 
 After installing the system dependencies, download the corresponding `_tethering` build from the [Releases](https://github.com/CyberTimon/RapidRAW/releases) page, or run/build from source using the `tethering` feature flag.
 
+## PicPortal Publishing
+
+PicPortal publishing starts only when you explicitly select exported JPEG, PNG, or WebP files and choose a destination gallery. Face and eye analysis stays local. Face embeddings and 220×220 face thumbnails are included only when the selected gallery has face filtering enabled; galleries without that setting never receive face-derived data.
+
 ## Command Line Interface (CLI)
 
 RapidRAW includes a headless export tool for batch processing photos in automated scripts, terminal pipelines, or server environments without opening the GUI:

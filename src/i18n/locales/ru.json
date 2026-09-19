@@ -1274,7 +1274,7 @@
     "culling": {
       "actionDelete": "Переместить в корзину",
       "actionRateSuggestions": "Применить предложенные оценки",
-      "actionRateZero": "Установить оценку 1 звезда",
+      "actionRateZero": "Установить оценку 0 звёзд",
       "actionReject": "Пометить как отклоненное (красная метка)",
       "analysisOverlay": "★{{rating}} · {{eyeState}} · {{eyeMethod}}",
       "analyzeEyes": "Локально проанализировать состояние глаз (эвристика)",

@@ -363,6 +363,7 @@ function App() {
 
   const {
     handleRate,
+    handleApplyRatings,
     handleClearSelection,
     handleLibraryImageSingleClick,
     handleImageClick,
@@ -1031,6 +1032,7 @@ function App() {
           handleStartImport={handleStartImport}
           handleSetColorLabel={handleSetColorLabel}
           handleRate={handleRate}
+          handleApplyRatings={handleApplyRatings}
           executeDelete={executeDelete}
           handleSaveCollage={handleSaveCollage}
           handleCreateAlbumItem={handleCreateAlbumItem}

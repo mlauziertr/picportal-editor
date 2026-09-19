@@ -1224,7 +1224,7 @@
     "culling": {
       "actionDelete": "ゴミ箱に移動",
       "actionRateSuggestions": "提案された星評価を適用",
-      "actionRateZero": "評価を星1に設定",
+      "actionRateZero": "評価を星0に設定",
       "actionReject": "除外としてマーク (赤ラベル)",
       "analysisOverlay": "★{{rating}} · {{eyeState}} · {{eyeMethod}}",
       "analyzeEyes": "目の状態をローカルで分析（ヒューリスティック）",

@@ -208,6 +208,34 @@ fn analyze_image(
     })
 }
 
+fn connected_components(
+    item_count: usize,
+    mut is_similar: impl FnMut(usize, usize) -> bool,
+) -> Vec<Vec<usize>> {
+    let mut components = Vec::new();
+    let mut processed_indices = vec![false; item_count];
+    for i in 0..item_count {
+        if processed_indices[i] {
+            continue;
+        }
+        let mut component = vec![i];
+        let mut queue = VecDeque::from([i]);
+        processed_indices[i] = true;
+        while let Some(current) = queue.pop_front() {
+            for j in 0..item_count {
+                if processed_indices[j] || !is_similar(current, j) {
+                    continue;
+                }
+                processed_indices[j] = true;
+                component.push(j);
+                queue.push_back(j);
+            }
+        }
+        components.push(component);
+    }
+    components
+}
+
 fn encode_face_source(
     path: &str,
     settings: &crate::app_settings::AppSettings,
@@ -362,28 +390,10 @@ pub async fn cull_images(
         ..Default::default()
     };
     let mut duplicate_paths = HashSet::new();
-    let mut processed_indices = vec![false; successful.len()];
     if settings.group_similar {
-        for i in 0..successful.len() {
-            if processed_indices[i] {
-                continue;
-            }
-            let mut group_indices = vec![i];
-            let mut queue = VecDeque::from([i]);
-            processed_indices[i] = true;
-            while let Some(current) = queue.pop_front() {
-                for j in (current + 1)..successful.len() {
-                    if processed_indices[j] {
-                        continue;
-                    }
-                    let distance = successful[current].hash.dist(&successful[j].hash);
-                    if distance <= settings.similarity_threshold {
-                        processed_indices[j] = true;
-                        group_indices.push(j);
-                        queue.push_back(j);
-                    }
-                }
-            }
+        for mut group_indices in connected_components(successful.len(), |left, right| {
+            successful[left].hash.dist(&successful[right].hash) <= settings.similarity_threshold
+        }) {
             if group_indices.len() > 1 {
                 group_indices.sort_by(|left, right| {
                     successful[*right]
@@ -479,5 +489,12 @@ mod tests {
         assert_eq!(category_rating("duplicate", &mapping), 2);
         assert_eq!(category_rating("defect", &mapping), 1);
         assert_eq!(category_rating("unknown", &mapping), 3);
+    }
+
+    #[test]
+    fn similarity_groups_include_lower_index_neighbors_discovered_later() {
+        let edges = [(0, 2), (2, 0), (2, 1), (1, 2)];
+        let groups = connected_components(3, |left, right| edges.contains(&(left, right)));
+        assert_eq!(groups, vec![vec![0, 2, 1]]);
     }
 }

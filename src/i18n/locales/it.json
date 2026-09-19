@@ -1250,7 +1250,7 @@
     "culling": {
       "actionDelete": "Sposta nel Cestino",
       "actionRateSuggestions": "Applica le stelle proposte",
-      "actionRateZero": "Imposta Valutazione a 1 Stella",
+      "actionRateZero": "Imposta Valutazione a 0 Stelle",
       "actionReject": "Segna come Rifiutata (Etichetta Rossa)",
       "analysisOverlay": "★{{rating}} · {{eyeState}} · {{eyeMethod}}",
       "analyzeEyes": "Analizza lo stato degli occhi localmente (euristica)",

@@ -51,7 +51,6 @@ export enum Invokes {
   PicPortalGalleries = 'picportal_galleries',
   PicPortalCreateGallery = 'picportal_create_gallery',
   PicPortalPublish = 'picportal_publish',
-  PicPortalQueueStatus = 'picportal_queue_status',
   DeleteFolder = 'delete_folder',
   DuplicateFile = 'duplicate_file',
   EstimateExportSizes = 'estimate_export_sizes',

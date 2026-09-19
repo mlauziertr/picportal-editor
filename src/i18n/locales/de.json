@@ -1226,7 +1226,7 @@
     "culling": {
       "actionDelete": "In den Papierkorb verschieben",
       "actionRateSuggestions": "Vorgeschlagene Sterne anwenden",
-      "actionRateZero": "Bewertung auf 1 Stern setzen",
+      "actionRateZero": "Bewertung auf 0 Sterne setzen",
       "actionReject": "Als abgelehnt markieren (Rote Markierung)",
       "analysisOverlay": "★{{rating}} · {{eyeState}} · {{eyeMethod}}",
       "analyzeEyes": "Augenstatus lokal analysieren (Heuristik)",

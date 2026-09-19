@@ -39,6 +39,34 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
     });
   }, []);
 
+  const handleApplyRatings = useCallback((ratings: Record<string, number>) => {
+    const entries = Object.entries(ratings);
+    if (entries.length === 0) return;
+
+    useLibraryStore.getState().setLibrary((state) => ({
+      imageRatings: entries.reduce(
+        (nextRatings, [path, rating]) => {
+          nextRatings[path] = rating;
+          return nextRatings;
+        },
+        { ...state.imageRatings },
+      ),
+    }));
+
+    const pathsByRating = new Map<number, string[]>();
+    entries.forEach(([path, rating]) => {
+      const paths = pathsByRating.get(rating) ?? [];
+      paths.push(path);
+      pathsByRating.set(rating, paths);
+    });
+    Promise.all(
+      Array.from(pathsByRating, ([rating, paths]) => invoke(Invokes.SetRatingForPaths, { paths, rating })),
+    ).catch((err) => {
+      console.error(err);
+      toast.error(`Failed to apply ratings: ${err}`);
+    });
+  }, []);
+
   const handleSetColorLabel = useCallback(async (color: string | null, paths?: string[]) => {
     const { multiSelectedPaths, libraryActivePath, imageList, setLibrary } = useLibraryStore.getState();
     const { selectedImage } = useEditorStore.getState();
@@ -436,6 +464,7 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
 
   return {
     handleRate,
+    handleApplyRatings,
     handleSetColorLabel,
     handleTagsChanged,
     handleUpdateExif,

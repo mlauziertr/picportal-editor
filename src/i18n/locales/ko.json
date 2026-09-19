@@ -1224,7 +1224,7 @@
     "culling": {
       "actionDelete": "휴지통으로 이동",
       "actionRateSuggestions": "제안된 별점 적용",
-      "actionRateZero": "평점을 1점으로 설정",
+      "actionRateZero": "평점을 0점으로 설정",
       "actionReject": "거부됨으로 표시 (빨간 레이블)",
       "analysisOverlay": "★{{rating}} · {{eyeState}} · {{eyeMethod}}",
       "analyzeEyes": "눈 상태를 로컬에서 분석(휴리스틱)",

@@ -7,6 +7,7 @@
 
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
     sync::Mutex,
     time::Duration,
@@ -530,9 +531,7 @@ pub async fn picportal_publish(
     if !capabilities.derivatives.tauri_enabled {
         return Err("PicPortal local derivative processing is disabled by the server".to_owned());
     }
-    if gallery.face_filter_enabled && !capabilities.faces.tauri_enabled {
-        return Err("PicPortal local face processing is disabled by the server; no remote fallback was used".to_owned());
-    }
+    let publish_faces = face_publication_enabled(&gallery, &capabilities)?;
     let queue_path = queue_path(&app)?;
     let mut queue = load_queue(&queue_path)?;
     let mut result = PublishResult {
@@ -546,6 +545,7 @@ pub async fn picportal_publish(
             &session,
             &gallery,
             &capabilities,
+            publish_faces,
             &path,
             &app,
             &state,
@@ -572,16 +572,6 @@ pub async fn picportal_publish(
     }
     save_queue(&queue_path, &queue)?;
     Ok(result)
-}
-
-#[tauri::command]
-pub fn picportal_queue_status(app: AppHandle) -> Result<Vec<serde_json::Value>, String> {
-    let queue = load_queue(&queue_path(&app)?)?;
-    Ok(queue
-        .items
-        .into_iter()
-        .map(|item| serde_json::to_value(item).unwrap_or(serde_json::Value::Null))
-        .collect())
 }
 
 fn current_session(state: &PicPortalState) -> Result<PicPortalSession, String> {
@@ -634,6 +624,7 @@ async fn publish_one(
     session: &PicPortalSession,
     gallery: &GallerySummary,
     capabilities: &ProcessingCapabilities,
+    publish_faces: bool,
     path: &str,
     app: &AppHandle,
     state: &PicPortalState,
@@ -645,14 +636,10 @@ async fn publish_one(
     let source = fs::read(&source_path)
         .map_err(|error| format!("cannot read export {}: {error}", source_path.display()))?;
     let derivatives = local_derivatives::generate_local_derivatives(&source)?;
-    let existing = queue
-        .items
-        .iter()
-        .find(|item| queue_identity_matches(item, path, session, &gallery.id));
+    let existing = queue.items.iter().find(|item| {
+        queue_identity_matches(item, path, session, &gallery.id, &derivatives.source_sha256)
+    });
     if let Some(existing) = existing {
-        if existing.source_sha256 != derivatives.source_sha256 {
-            return Err("export changed since it was queued; select it again to create a new publication identity".to_owned());
-        }
         if existing.state == "uploaded" {
             return Ok(PublishItemResult {
                 path: path.to_owned(),
@@ -678,17 +665,15 @@ async fn publish_one(
                 last_error: None,
             },
         );
-    } else if let Some(item) = queue
-        .items
-        .iter_mut()
-        .find(|item| queue_identity_matches(item, path, session, &gallery.id))
-    {
+    } else if let Some(item) = queue.items.iter_mut().find(|item| {
+        queue_identity_matches(item, path, session, &gallery.id, &derivatives.source_sha256)
+    }) {
         item.state = "uploading".to_owned();
         item.last_error = None;
     }
     save_queue(queue_path, queue)?;
 
-    let face_analysis = if gallery.face_filter_enabled {
+    let face_analysis = if publish_faces {
         let mut runtime = state
             .face_runtime
             .lock()
@@ -767,11 +752,9 @@ async fn publish_one(
             .collect::<Vec<_>>();
         upload_face_analysis(session, &gallery.id, &photo_id, &face_manifest, &thumbnails).await?;
     }
-    if let Some(item) = queue
-        .items
-        .iter_mut()
-        .find(|item| item.path == path && item.gallery_id == gallery.id)
-    {
+    if let Some(item) = queue.items.iter_mut().find(|item| {
+        queue_identity_matches(item, path, session, &gallery.id, &derivatives.source_sha256)
+    }) {
         item.state = "uploaded".to_owned();
         item.photo_id = Some(photo_id.clone());
         item.upload_id = None;
@@ -785,6 +768,22 @@ async fn publish_one(
         photo_id: Some(photo_id),
         error: None,
     })
+}
+
+fn face_publication_enabled(
+    gallery: &GallerySummary,
+    capabilities: &ProcessingCapabilities,
+) -> Result<bool, String> {
+    if !gallery.face_filter_enabled {
+        return Ok(false);
+    }
+    if !capabilities.faces.tauri_enabled {
+        return Err(
+            "PicPortal local face processing is disabled by the server; no remote fallback was used"
+                .to_owned(),
+        );
+    }
+    Ok(true)
 }
 
 fn validate_export_path(path: &Path) -> Result<(), String> {
@@ -893,11 +892,12 @@ fn clear_queue_upload_session(
     path: &str,
     session: &PicPortalSession,
     gallery_id: &str,
+    source_sha256: &str,
 ) {
     if let Some(item) = queue
         .items
         .iter_mut()
-        .find(|item| queue_identity_matches(item, path, session, gallery_id))
+        .find(|item| queue_identity_matches(item, path, session, gallery_id, source_sha256))
     {
         item.upload_id = None;
         item.upload_offset = 0;
@@ -909,13 +909,14 @@ fn update_queue_upload_session(
     path: &str,
     session: &PicPortalSession,
     gallery_id: &str,
+    source_sha256: &str,
     upload_id: &str,
     offset: u64,
 ) {
     if let Some(item) = queue
         .items
         .iter_mut()
-        .find(|item| queue_identity_matches(item, path, session, gallery_id))
+        .find(|item| queue_identity_matches(item, path, session, gallery_id, source_sha256))
     {
         item.state = "uploading".to_owned();
         item.upload_id = Some(upload_id.to_owned());
@@ -929,13 +930,14 @@ fn mark_original_uploaded(
     path: &str,
     session: &PicPortalSession,
     gallery_id: &str,
+    source_sha256: &str,
     photo_id: &str,
     offset: u64,
 ) {
     if let Some(item) = queue
         .items
         .iter_mut()
-        .find(|item| queue_identity_matches(item, path, session, gallery_id))
+        .find(|item| queue_identity_matches(item, path, session, gallery_id, source_sha256))
     {
         item.state = "original_uploaded".to_owned();
         item.photo_id = Some(photo_id.to_owned());
@@ -957,12 +959,11 @@ async fn upload_original(
     queue: &mut QueueFile,
 ) -> Result<String, String> {
     let total_bytes = source.len() as u64;
-    if let Some(existing) = queue.items.iter().find(|item| {
-        item.path == path
-            && item.gallery_id == gallery_id
-            && item.account_id == session.account_id
-            && item.api_base_url == session.base_url
-    }) {
+    if let Some(existing) = queue
+        .items
+        .iter()
+        .find(|item| queue_identity_matches(item, path, session, gallery_id, source_sha256))
+    {
         if let Some(photo_id) = existing.photo_id.as_deref() {
             return Ok(photo_id.to_owned());
         }
@@ -975,12 +976,7 @@ async fn upload_original(
     let requested_upload_id = queue
         .items
         .iter()
-        .find(|item| {
-            item.path == path
-                && item.gallery_id == gallery_id
-                && item.account_id == session.account_id
-                && item.api_base_url == session.base_url
-        })
+        .find(|item| queue_identity_matches(item, path, session, gallery_id, source_sha256))
         .and_then(|item| item.upload_id.clone());
     let start_request = |upload_id: Option<&str>| {
         let mut payload = serde_json::json!({
@@ -1007,24 +1003,11 @@ async fn upload_original(
         // A server-side session may have expired. Retain the source identity but
         // create a fresh session rather than silently changing destination.
         let _ = start.text().await;
-        clear_queue_upload_session(queue, path, session, gallery_id);
+        clear_queue_upload_session(queue, path, session, gallery_id, source_sha256);
         start = start_request(None)
             .send()
             .await
             .map_err(|error| format!("new upload session failed: {error}"))?;
-    }
-    if start.status() == StatusCode::NOT_FOUND {
-        let body = start.text().await.unwrap_or_default();
-        if body.contains("Route POST:") && body.contains("/photos/uploads not found") {
-            let photo_id =
-                upload_multipart(session, gallery_id, filename, content_type, source).await?;
-            mark_original_uploaded(queue, path, session, gallery_id, &photo_id, total_bytes);
-            save_queue(queue_path, queue)?;
-            return Ok(photo_id);
-        }
-        return Err(format!(
-            "resumable upload route rejected the request: {body}"
-        ));
     }
     let session_payload = require_success(start)
         .await?
@@ -1042,14 +1025,30 @@ async fn upload_original(
             .photo_id
             .filter(|id| !id.trim().is_empty())
             .ok_or_else(|| "completed PicPortal upload has no photo id".to_owned())?;
-        mark_original_uploaded(queue, path, session, gallery_id, &photo_id, total_bytes);
+        mark_original_uploaded(
+            queue,
+            path,
+            session,
+            gallery_id,
+            source_sha256,
+            &photo_id,
+            total_bytes,
+        );
         save_queue(queue_path, queue)?;
         return Ok(photo_id);
     }
 
     let upload_id = session_payload.upload_id.clone();
     let mut offset = session_payload.offset;
-    update_queue_upload_session(queue, path, session, gallery_id, &upload_id, offset);
+    update_queue_upload_session(
+        queue,
+        path,
+        session,
+        gallery_id,
+        source_sha256,
+        &upload_id,
+        offset,
+    );
     save_queue(queue_path, queue)?;
     while offset < total_bytes {
         let start_offset = usize::try_from(offset)
@@ -1082,7 +1081,15 @@ async fn upload_original(
             return Err("PicPortal upload did not advance to a valid durable offset".to_owned());
         }
         offset = payload.offset;
-        update_queue_upload_session(queue, path, session, gallery_id, &upload_id, offset);
+        update_queue_upload_session(
+            queue,
+            path,
+            session,
+            gallery_id,
+            source_sha256,
+            &upload_id,
+            offset,
+        );
         save_queue(queue_path, queue)?;
     }
     let complete = session
@@ -1105,45 +1112,17 @@ async fn upload_original(
     if photo.id.trim().is_empty() {
         return Err("PicPortal returned an empty photo id".to_owned());
     }
-    mark_original_uploaded(queue, path, session, gallery_id, &photo.id, total_bytes);
+    mark_original_uploaded(
+        queue,
+        path,
+        session,
+        gallery_id,
+        source_sha256,
+        &photo.id,
+        total_bytes,
+    );
     save_queue(queue_path, queue)?;
     Ok(photo.id)
-}
-
-async fn upload_multipart(
-    session: &PicPortalSession,
-    gallery_id: &str,
-    filename: &str,
-    content_type: &str,
-    source: &[u8],
-) -> Result<String, String> {
-    let part = reqwest::multipart::Part::bytes(source.to_vec())
-        .file_name(filename.to_owned())
-        .mime_str(content_type)
-        .map_err(|error| error.to_string())?;
-    let form = reqwest::multipart::Form::new().part("file", part);
-    let response = session
-        .client
-        .post(endpoint(
-            &session.base_url,
-            &format!("galleries/{gallery_id}/photos?deferProcessing=true"),
-        ))
-        .header("origin", APP_ORIGIN)
-        .multipart(form)
-        .send()
-        .await
-        .map_err(|error| format!("multipart upload failed: {error}"))?;
-    let photo_id = require_success(response)
-        .await?
-        .json::<PhotoResponse>()
-        .await
-        .map_err(|error| format!("multipart response is invalid: {error}"))?
-        .photo
-        .id;
-    if photo_id.trim().is_empty() {
-        return Err("PicPortal returned an empty photo id".to_owned());
-    }
-    Ok(photo_id)
 }
 
 async fn upload_derivatives(
@@ -1235,11 +1214,24 @@ fn queue_path(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 fn load_queue(path: &Path) -> Result<QueueFile, String> {
-    if !path.is_file() {
-        return Ok(QueueFile::default());
+    let temporary = path.with_extension("json.tmp");
+    let backup = path.with_extension("json.bak");
+    let mut invalid_queue = None;
+    for candidate in [path, temporary.as_path(), backup.as_path()] {
+        if !candidate.is_file() {
+            continue;
+        }
+        let bytes =
+            fs::read(candidate).map_err(|error| format!("cannot read PicPortal queue: {error}"))?;
+        match serde_json::from_slice(&bytes) {
+            Ok(queue) => return Ok(queue),
+            Err(error) => invalid_queue = Some(error),
+        }
     }
-    let bytes = fs::read(path).map_err(|error| format!("cannot read PicPortal queue: {error}"))?;
-    serde_json::from_slice(&bytes).map_err(|error| format!("PicPortal queue is invalid: {error}"))
+    invalid_queue.map_or_else(
+        || Ok(QueueFile::default()),
+        |error| Err(format!("PicPortal queue is invalid: {error}")),
+    )
 }
 
 fn save_queue(path: &Path, queue: &QueueFile) -> Result<(), String> {
@@ -1249,34 +1241,43 @@ fn save_queue(path: &Path, queue: &QueueFile) -> Result<(), String> {
     fs::create_dir_all(parent)
         .map_err(|error| format!("cannot create PicPortal queue directory: {error}"))?;
     let temporary = path.with_extension("json.tmp");
+    let backup = path.with_extension("json.bak");
     let bytes = serde_json::to_vec_pretty(queue)
         .map_err(|error| format!("cannot serialize PicPortal queue: {error}"))?;
-    fs::write(&temporary, bytes)
-        .map_err(|error| format!("cannot write PicPortal queue: {error}"))?;
-    let temporary_file = fs::OpenOptions::new()
-        .read(true)
+    let mut temporary_file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
         .open(&temporary)
-        .map_err(|error| format!("cannot reopen PicPortal queue: {error}"))?;
+        .map_err(|error| format!("cannot open PicPortal queue: {error}"))?;
+    temporary_file
+        .write_all(&bytes)
+        .map_err(|error| format!("cannot write PicPortal queue: {error}"))?;
     temporary_file
         .sync_all()
         .map_err(|error| format!("cannot flush PicPortal queue: {error}"))?;
     drop(temporary_file);
-    if let Err(error) = fs::rename(&temporary, path) {
-        // Windows does not replace an existing destination with rename(). The
-        // queue is still protected by the flushed temporary file if this
-        // compatibility path is needed.
-        if path.exists() {
-            fs::remove_file(path).map_err(|remove_error| {
-                format!("cannot replace PicPortal queue: {remove_error}")
-            })?;
-            fs::rename(&temporary, path)
-                .map_err(|rename_error| format!("cannot commit PicPortal queue: {rename_error}"))?;
-        } else {
-            return Err(format!("cannot commit PicPortal queue: {error}"));
+
+    if path.exists() {
+        if backup.exists() {
+            fs::remove_file(&backup)
+                .map_err(|error| format!("cannot clear PicPortal queue backup: {error}"))?;
         }
+        fs::rename(path, &backup)
+            .map_err(|error| format!("cannot back up PicPortal queue: {error}"))?;
+    }
+    if let Err(error) = fs::rename(&temporary, path) {
+        if backup.exists() {
+            let _ = fs::rename(&backup, path);
+        }
+        return Err(format!("cannot commit PicPortal queue: {error}"));
     }
     if let Ok(directory) = fs::File::open(parent) {
         let _ = directory.sync_all();
+    }
+    if backup.exists() {
+        fs::remove_file(&backup)
+            .map_err(|error| format!("cannot clear PicPortal queue backup: {error}"))?;
     }
     Ok(())
 }
@@ -1286,11 +1287,13 @@ fn queue_identity_matches(
     path: &str,
     session: &PicPortalSession,
     gallery_id: &str,
+    source_sha256: &str,
 ) -> bool {
     item.path == path
         && item.api_base_url == session.base_url
         && item.account_id == session.account_id
         && item.gallery_id == gallery_id
+        && item.source_sha256 == source_sha256
 }
 
 fn mark_queue_error(
@@ -1300,11 +1303,12 @@ fn mark_queue_error(
     gallery_id: &str,
     error: &str,
 ) {
-    if let Some(item) = queue
-        .items
-        .iter_mut()
-        .find(|item| queue_identity_matches(item, path, session, gallery_id))
-    {
+    if let Some(item) = queue.items.iter_mut().find(|item| {
+        item.path == path
+            && item.api_base_url == session.base_url
+            && item.account_id == session.account_id
+            && item.gallery_id == gallery_id
+    }) {
         item.state = "failed".to_owned();
         item.last_error = Some(error.to_owned());
     }
@@ -1326,6 +1330,33 @@ fn upsert_queue(queue: &mut QueueFile, item: QueueItem) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn processing_capabilities(face_processing_enabled: bool) -> ProcessingCapabilities {
+        ProcessingCapabilities {
+            derivatives: DerivativeCapabilities {
+                tauri_enabled: true,
+            },
+            faces: FaceCapabilities {
+                tauri_enabled: face_processing_enabled,
+                model_id: "model".into(),
+                model_digest: None,
+                embedding_dim: 128,
+                detector_input: 320,
+                max_faces: 10,
+                pipeline_version: "pipeline".into(),
+            },
+        }
+    }
+
+    fn gallery(face_filter_enabled: bool) -> GallerySummary {
+        GallerySummary {
+            id: "gallery".into(),
+            title: "Gallery".into(),
+            slug: "gallery".into(),
+            photo_count: 0,
+            face_filter_enabled,
+        }
+    }
 
     #[test]
     fn queue_destination_is_part_of_the_identity() {
@@ -1372,6 +1403,14 @@ mod tests {
     }
 
     #[test]
+    fn face_publication_requires_the_selected_gallery_to_enable_faces() {
+        let capabilities = processing_capabilities(true);
+        assert!(!face_publication_enabled(&gallery(false), &capabilities).expect("policy"));
+        assert!(face_publication_enabled(&gallery(true), &capabilities).expect("policy"));
+        assert!(face_publication_enabled(&gallery(true), &processing_capabilities(false)).is_err());
+    }
+
+    #[test]
     fn idempotency_key_changes_with_source() {
         assert_ne!(
             idempotency_key("gallery", "photo", "a"),
@@ -1400,5 +1439,70 @@ mod tests {
         assert_eq!(restored.items[0].upload_id.as_deref(), Some("upload"));
         assert_eq!(restored.items[0].upload_offset, 8 * 1024 * 1024);
         assert_eq!(restored.items[0].gallery_id, "gallery");
+    }
+
+    #[test]
+    fn reexport_replaces_the_obsolete_upload_identity() {
+        let mut queue = QueueFile {
+            items: vec![QueueItem {
+                path: "export.jpg".into(),
+                api_base_url: PRODUCTION_API_BASE_URL.into(),
+                account_id: "account".into(),
+                gallery_id: "gallery".into(),
+                source_sha256: "old-source".into(),
+                state: "uploading".into(),
+                photo_id: None,
+                upload_id: Some("old-upload".into()),
+                upload_offset: 42,
+                last_error: None,
+            }],
+        };
+        upsert_queue(
+            &mut queue,
+            QueueItem {
+                path: "export.jpg".into(),
+                api_base_url: PRODUCTION_API_BASE_URL.into(),
+                account_id: "account".into(),
+                gallery_id: "gallery".into(),
+                source_sha256: "new-source".into(),
+                state: "queued".into(),
+                photo_id: None,
+                upload_id: None,
+                upload_offset: 0,
+                last_error: None,
+            },
+        );
+
+        assert_eq!(queue.items.len(), 1);
+        assert_eq!(queue.items[0].source_sha256, "new-source");
+        assert_eq!(queue.items[0].upload_id, None);
+        assert_eq!(queue.items[0].upload_offset, 0);
+    }
+
+    #[test]
+    fn queue_load_recovers_a_flushed_temporary_commit() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("picportal-queue.json");
+        let temporary = path.with_extension("json.tmp");
+        let queue = QueueFile {
+            items: vec![QueueItem {
+                path: "export.jpg".into(),
+                api_base_url: PRODUCTION_API_BASE_URL.into(),
+                account_id: "account".into(),
+                gallery_id: "gallery".into(),
+                source_sha256: "source".into(),
+                state: "uploading".into(),
+                photo_id: None,
+                upload_id: Some("upload".into()),
+                upload_offset: 128,
+                last_error: None,
+            }],
+        };
+        fs::write(&temporary, serde_json::to_vec(&queue).expect("queue JSON"))
+            .expect("temporary queue");
+
+        let restored = load_queue(&path).expect("recover queue");
+        assert_eq!(restored.items[0].upload_id.as_deref(), Some("upload"));
+        assert_eq!(restored.items[0].upload_offset, 128);
     }
 }

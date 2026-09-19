@@ -1274,7 +1274,7 @@
     "culling": {
       "actionDelete": "Przenieś do kosza",
       "actionRateSuggestions": "Zastosuj proponowane gwiazdki",
-      "actionRateZero": "Ustaw ocenę na 1 Gwiazdkę",
+      "actionRateZero": "Ustaw ocenę na 0 gwiazdek",
       "actionReject": "Oznacz jako odrzucone (Czerwona etykieta)",
       "analysisOverlay": "★{{rating}} · {{eyeState}} · {{eyeMethod}}",
       "analyzeEyes": "Analizuj stan oczu lokalnie (heurystyka)",

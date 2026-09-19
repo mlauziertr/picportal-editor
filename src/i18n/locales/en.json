@@ -1226,7 +1226,7 @@
     "culling": {
       "actionDelete": "Move to Trash",
       "actionRateSuggestions": "Apply proposed stars",
-      "actionRateZero": "Set Rating to 1 Stars",
+      "actionRateZero": "Set rating to 0 stars",
       "actionReject": "Mark as Rejected (Red Label)",
       "analysisOverlay": "★{{rating}} · {{eyeState}} · {{eyeMethod}}",
       "analyzeEyes": "Analyze eye state locally (heuristic)",

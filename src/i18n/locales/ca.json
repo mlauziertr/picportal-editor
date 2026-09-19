@@ -1226,7 +1226,7 @@
     "culling": {
       "actionDelete": "Moure a la paperera",
       "actionRateSuggestions": "Aplica les estrelles proposades",
-      "actionRateZero": "Establir puntuació a 1 estrella",
+      "actionRateZero": "Establir puntuació a 0 estrelles",
       "actionReject": "Marcar com a rebutjada (Etiqueta vermella)",
       "analysisOverlay": "★{{rating}} · {{eyeState}} · {{eyeMethod}}",
       "analyzeEyes": "Analitza l'estat dels ulls localment (heurística)",
