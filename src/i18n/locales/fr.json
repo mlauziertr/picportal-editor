@@ -1522,7 +1522,12 @@
     "newGallery": "Titre de la nouvelle galerie",
     "password": "Mot de passe",
     "publish": "Traiter et publier localement",
-    "publishResult": "{{completed}} téléversées, {{failed}} échouées",
+    "publishCompleted_many": "{{count}} images téléversées",
+    "publishCompleted_one": "{{count}} image téléversée",
+    "publishCompleted_other": "{{count}} images téléversées",
+    "publishFailed_many": "{{count}} images échouées",
+    "publishFailed_one": "{{count}} image échouée",
+    "publishFailed_other": "{{count}} images échouées",
     "refresh": "Actualiser les galeries",
     "title": "Publication PicPortal"
   },

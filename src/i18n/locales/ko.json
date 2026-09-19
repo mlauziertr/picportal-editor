@@ -1488,7 +1488,8 @@
     "newGallery": "새 갤러리 제목",
     "password": "비밀번호",
     "publish": "로컬에서 처리하고 게시",
-    "publishResult": "{{completed}}개 업로드, {{failed}}개 실패",
+    "publishCompleted_other": "{{count}}개 업로드",
+    "publishFailed_other": "{{count}}개 실패",
     "refresh": "갤러리 새로 고침",
     "title": "PicPortal 게시"
   },

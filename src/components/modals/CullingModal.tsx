@@ -150,9 +150,10 @@ export default function CullingModal({
       });
       suggestions.blurryImages.forEach((img) => initialRejects.add(img.path));
       setSelectedRejects(initialRejects);
-      if (suggestions.similarGroups.length === 0) {
-        setActiveTab(
-          suggestions.retainedImages.length > 0
+      setActiveTab(
+        suggestions.similarGroups.length > 0
+          ? 'similar'
+          : suggestions.retainedImages.length > 0
             ? 'retained'
             : suggestions.reviewImages.length > 0
               ? 'review'
@@ -161,8 +162,7 @@ export default function CullingModal({
                 : suggestions.unknownImages.length > 0
                   ? 'unknown'
                   : 'blurry',
-        );
-      }
+      );
     }
   }, [stage, suggestions]);
 

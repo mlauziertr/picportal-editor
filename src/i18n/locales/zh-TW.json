@@ -1488,7 +1488,8 @@
     "newGallery": "新圖庫標題",
     "password": "密碼",
     "publish": "在本機處理並發布",
-    "publishResult": "已上傳 {{completed}} 張，失敗 {{failed}} 張",
+    "publishCompleted_other": "已上傳 {{count}} 張",
+    "publishFailed_other": "{{count}} 張失敗",
     "refresh": "重新整理圖庫",
     "title": "PicPortal 發布"
   },

@@ -1488,7 +1488,8 @@
     "newGallery": "新图库标题",
     "password": "密码",
     "publish": "在本地处理并发布",
-    "publishResult": "已上传 {{completed}} 张，失败 {{failed}} 张",
+    "publishCompleted_other": "已上传 {{count}} 张",
+    "publishFailed_other": "{{count}} 张失败",
     "refresh": "刷新图库",
     "title": "PicPortal 发布"
   },

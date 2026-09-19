@@ -1523,7 +1523,12 @@
     "newGallery": "Título da nova galeria",
     "password": "Palavra-passe",
     "publish": "Processar e publicar localmente",
-    "publishResult": "{{completed}} carregadas, {{failed}} falhadas",
+    "publishCompleted_many": "{{count}} imagens carregadas",
+    "publishCompleted_one": "{{count}} imagem carregada",
+    "publishCompleted_other": "{{count}} imagens carregadas",
+    "publishFailed_many": "{{count}} imagens falhadas",
+    "publishFailed_one": "{{count}} imagem falhada",
+    "publishFailed_other": "{{count}} imagens falhadas",
     "refresh": "Atualizar galerias",
     "title": "Publicação no PicPortal"
   },

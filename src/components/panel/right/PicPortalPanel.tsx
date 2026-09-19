@@ -117,13 +117,18 @@ export default function PicPortalPanel() {
     setBusy(true);
     try {
       const result = await invoke<PublishResult>(Invokes.PicPortalPublish, { paths, galleryId });
-      setStatus(
-        t('picportal.publishResult', {
-          completed: result.completed,
-          failed: result.failed,
-          defaultValue: '{{completed}} uploaded, {{failed}} failed',
+      const summary = [
+        t('picportal.publishCompleted', {
+          count: result.completed,
+          defaultValue: '{{count}} images uploaded',
         }),
-      );
+        t('picportal.publishFailed', {
+          count: result.failed,
+          defaultValue: '{{count}} images failed',
+        }),
+      ].join(', ');
+      const failures = result.items.flatMap((item) => (item.error ? [`${item.path}: ${item.error}`] : []));
+      setStatus([summary, ...failures].join('\n'));
     } catch (error) {
       setStatus(String(error));
     } finally {
@@ -218,7 +223,7 @@ export default function PicPortalPanel() {
         </div>
       )}
       {status && (
-        <Text variant={TextVariants.small} className="break-words text-text-secondary">
+        <Text variant={TextVariants.small} className="whitespace-pre-wrap break-words text-text-secondary">
           {status}
         </Text>
       )}

@@ -1488,7 +1488,8 @@
     "newGallery": "新しいギャラリーのタイトル",
     "password": "パスワード",
     "publish": "ローカルで処理して公開",
-    "publishResult": "{{completed}} 件アップロード、{{failed}} 件失敗",
+    "publishCompleted_other": "{{count}} 件アップロード",
+    "publishFailed_other": "{{count}} 件失敗",
     "refresh": "ギャラリーを更新",
     "title": "PicPortal 公開"
   },

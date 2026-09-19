@@ -787,7 +787,9 @@ fn face_publication_enabled(
 }
 
 fn validate_export_path(path: &Path) -> Result<(), String> {
-    if !path.is_file() {
+    let metadata =
+        fs::metadata(path).map_err(|_| format!("export does not exist: {}", path.display()))?;
+    if !metadata.is_file() {
         return Err(format!("export does not exist: {}", path.display()));
     }
     let extension = path
@@ -797,6 +799,12 @@ fn validate_export_path(path: &Path) -> Result<(), String> {
         .to_ascii_lowercase();
     if !matches!(extension.as_str(), "jpg" | "jpeg" | "png" | "webp") {
         return Err("PicPortal publication accepts an exported JPEG, PNG or WebP; RAW files are never uploaded by this workflow".to_owned());
+    }
+    if metadata.len() == 0 || metadata.len() > local_derivatives::MAX_SOURCE_BYTES {
+        return Err(format!(
+            "source must be between 1 and {} bytes",
+            local_derivatives::MAX_SOURCE_BYTES
+        ));
     }
     Ok(())
 }
@@ -1428,6 +1436,24 @@ mod tests {
         assert_ne!(
             idempotency_key("gallery", "photo", "a"),
             idempotency_key("gallery", "photo", "b")
+        );
+    }
+
+    #[test]
+    fn export_validation_rejects_an_oversized_source() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("export.jpg");
+        let file = fs::File::create(&path).expect("export file");
+        file.set_len(local_derivatives::MAX_SOURCE_BYTES + 1)
+            .expect("oversized sparse export");
+
+        let error = validate_export_path(&path).expect_err("oversized export must be rejected");
+        assert_eq!(
+            error,
+            format!(
+                "source must be between 1 and {} bytes",
+                local_derivatives::MAX_SOURCE_BYTES
+            )
         );
     }
 

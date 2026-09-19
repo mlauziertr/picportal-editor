@@ -1491,7 +1491,10 @@
     "newGallery": "Neuer Galerietitel",
     "password": "Passwort",
     "publish": "Lokal verarbeiten und veröffentlichen",
-    "publishResult": "{{completed}} hochgeladen, {{failed}} fehlgeschlagen",
+    "publishCompleted_one": "{{count}} Bild hochgeladen",
+    "publishCompleted_other": "{{count}} Bilder hochgeladen",
+    "publishFailed_one": "{{count}} Bild fehlgeschlagen",
+    "publishFailed_other": "{{count}} Bilder fehlgeschlagen",
     "refresh": "Galerien aktualisieren",
     "title": "PicPortal-Veröffentlichung"
   },

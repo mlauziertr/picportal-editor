@@ -1491,7 +1491,10 @@
     "newGallery": "New gallery title",
     "password": "Password",
     "publish": "Process and publish locally",
-    "publishResult": "{{completed}} uploaded, {{failed}} failed",
+    "publishCompleted_one": "{{count}} image uploaded",
+    "publishCompleted_other": "{{count}} images uploaded",
+    "publishFailed_one": "{{count}} image failed",
+    "publishFailed_other": "{{count}} images failed",
     "refresh": "Refresh galleries",
     "title": "PicPortal publication"
   },

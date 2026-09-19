@@ -1492,7 +1492,12 @@
     "newGallery": "Títol de la nova galeria",
     "password": "Contrasenya",
     "publish": "Processa i publica localment",
-    "publishResult": "{{completed}} pujades, {{failed}} fallides",
+    "publishCompleted_many": "{{count}} imatges pujades",
+    "publishCompleted_one": "{{count}} imatge pujada",
+    "publishCompleted_other": "{{count}} imatges pujades",
+    "publishFailed_many": "{{count}} imatges fallides",
+    "publishFailed_one": "{{count}} imatge fallida",
+    "publishFailed_other": "{{count}} imatges fallides",
     "refresh": "Actualitza les galeries",
     "title": "Publicació a PicPortal"
   },
