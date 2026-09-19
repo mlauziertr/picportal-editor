@@ -46,6 +46,12 @@ export enum Invokes {
   CreateFolder = 'create_folder',
   CreateVirtualCopy = 'create_virtual_copy',
   CullImages = 'cull_images',
+  PicPortalLogin = 'picportal_login',
+  PicPortalLogout = 'picportal_logout',
+  PicPortalGalleries = 'picportal_galleries',
+  PicPortalCreateGallery = 'picportal_create_gallery',
+  PicPortalPublish = 'picportal_publish',
+  PicPortalQueueStatus = 'picportal_queue_status',
   DeleteFolder = 'delete_folder',
   DuplicateFile = 'duplicate_file',
   EstimateExportSizes = 'estimate_export_sizes',
@@ -328,6 +334,7 @@ export interface Preset {
 export interface Progress {
   completed?: number;
   current?: number;
+  stage?: string;
   total: number;
 }
 
@@ -392,14 +399,25 @@ export interface WaveformData {
   width: number;
 }
 
+export interface StarMapping {
+  retained: number;
+  review: number;
+  duplicate: number;
+  defect: number;
+  unknown: number;
+}
+
 export interface CullingSettings {
   similarityThreshold: number;
   blurThreshold: number;
   groupSimilar: boolean;
   filterBlurry: boolean;
+  analyzeEyes: boolean;
+  autoAssignStars: boolean;
+  starMapping: StarMapping;
 }
 
-interface ImageAnalysisResult {
+export interface ImageAnalysisResult {
   path: string;
   qualityScore: number;
   sharpnessMetric: number;
@@ -407,9 +425,14 @@ interface ImageAnalysisResult {
   exposureMetric: number;
   width: number;
   height: number;
+  eyeState: 'open' | 'closed' | 'notApplicable' | 'unknown';
+  eyeConfidence: number;
+  eyeMethod: string;
+  category: 'retained' | 'review' | 'duplicate' | 'defect' | string;
+  suggestedRating: number;
 }
 
-interface CullGroup {
+export interface CullGroup {
   representative: ImageAnalysisResult;
   duplicates: ImageAnalysisResult[];
 }
@@ -417,7 +440,14 @@ interface CullGroup {
 export interface CullingSuggestions {
   similarGroups: CullGroup[];
   blurryImages: ImageAnalysisResult[];
+  retainedImages: ImageAnalysisResult[];
+  reviewImages: ImageAnalysisResult[];
+  duplicateImages: ImageAnalysisResult[];
+  defectImages: ImageAnalysisResult[];
+  unknownImages: ImageAnalysisResult[];
   failedPaths: string[];
+  starAssignments: Record<string, number>;
+  eyeAnalysisStatus: string;
 }
 
 interface KeybindHandler {

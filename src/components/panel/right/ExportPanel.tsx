@@ -30,6 +30,7 @@ import Text from '../../ui/Text';
 import { TextColors, TextVariants, TextWeights } from '../../../types/typography';
 import { useEditorStore } from '../../../store/useEditorStore';
 import { useUIStore } from '../../../store/useUIStore';
+import PicPortalPanel from './PicPortalPanel';
 
 interface ExportPanelProps {
   exportState: ExportState;
@@ -1008,6 +1009,7 @@ export default function ExportPanel({
             )}
           </Button>
         </motion.div>
+        <PicPortalPanel />
       </div>
     </div>
   );

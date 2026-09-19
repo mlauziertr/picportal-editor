@@ -1,7 +1,7 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useTranslation } from 'react-i18next';
-import { CheckCircle, XCircle, Loader2, Users, Trash2, Star, Tag } from 'lucide-react';
+import { CheckCircle, XCircle, Loader2, Users, Star, Tag } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { CullingSettings, CullingSuggestions, Invokes, Progress } from '../ui/AppProperties';
 import Button from '../ui/Button';
@@ -19,13 +19,21 @@ interface CullingModalProps {
   error: string | null;
   imagePaths: string[];
   thumbnails: Record<string, string>;
-  onApply(action: 'reject' | 'rate_zero' | 'delete', paths: string[]): void;
+  onApply(action: 'reject' | 'rate_zero' | 'rate_suggestions', paths: string[], ratings?: Record<string, number>): void;
   onError(error: string): void;
 }
 
-type CullAction = 'reject' | 'rate_zero' | 'delete';
+type CullAction = 'reject' | 'rate_zero' | 'rate_suggestions';
 
-function ImageThumbnail({ path, thumbnails, isSelected, onToggle, children }: any) {
+interface ImageThumbnailProps {
+  path: string;
+  thumbnails: Record<string, string>;
+  isSelected: boolean;
+  onToggle: () => void;
+  children?: ReactNode;
+}
+
+function ImageThumbnail({ path, thumbnails, isSelected, onToggle, children }: ImageThumbnailProps) {
   const thumbnailUrl = thumbnails[path];
   return (
     <div
@@ -80,21 +88,30 @@ export default function CullingModal({
     similarityThreshold: 28,
     filterBlurry: true,
     blurThreshold: 100.0,
+    analyzeEyes: true,
+    autoAssignStars: true,
+    starMapping: { retained: 5, review: 3, duplicate: 1, defect: 0, unknown: 2 },
   });
 
   const [selectedRejects, setSelectedRejects] = useState<Set<string>>(new Set());
   const [action, setAction] = useState<CullAction>('reject');
-  const [activeTab, setActiveTab] = useState<'similar' | 'blurry'>('similar');
+  const [activeTab, setActiveTab] = useState<'similar' | 'blurry' | 'retained' | 'review' | 'defect' | 'unknown'>(
+    'similar',
+  );
 
   const CULL_ACTIONS = useMemo(
     () => [
+      {
+        value: 'rate_suggestions' as const,
+        label: t('modals.culling.actionRateSuggestions', { defaultValue: 'Apply proposed stars' }),
+        icon: <Star size={16} />,
+      },
       {
         value: 'reject' as const,
         label: t('modals.culling.actionReject'),
         icon: <Tag size={16} className="text-red-500" />,
       },
       { value: 'rate_zero' as const, label: t('modals.culling.actionRateZero'), icon: <Star size={16} /> },
-      { value: 'delete' as const, label: t('modals.culling.actionDelete'), icon: <Trash2 size={16} /> },
     ],
     [t],
   );
@@ -133,6 +150,19 @@ export default function CullingModal({
       });
       suggestions.blurryImages.forEach((img) => initialRejects.add(img.path));
       setSelectedRejects(initialRejects);
+      if (suggestions.similarGroups.length === 0) {
+        setActiveTab(
+          suggestions.retainedImages.length > 0
+            ? 'retained'
+            : suggestions.reviewImages.length > 0
+              ? 'review'
+              : suggestions.defectImages.length > 0
+                ? 'defect'
+                : suggestions.unknownImages.length > 0
+                  ? 'unknown'
+                  : 'blurry',
+        );
+      }
     }
   }, [stage, suggestions]);
 
@@ -158,11 +188,19 @@ export default function CullingModal({
   };
 
   const handleApply = () => {
-    onApply(action, Array.from(selectedRejects));
+    if (action === 'rate_suggestions' && suggestions) {
+      onApply(action, Object.keys(suggestions.starAssignments), suggestions.starAssignments);
+    } else {
+      onApply(action, Array.from(selectedRejects));
+    }
   };
 
   const numSimilar = suggestions?.similarGroups.reduce((acc, group) => acc + group.duplicates.length, 0) || 0;
   const numBlurry = suggestions?.blurryImages.length || 0;
+  const numRetained = suggestions?.retainedImages.length || 0;
+  const numReview = suggestions?.reviewImages.length || 0;
+  const numDefects = suggestions?.defectImages.length || 0;
+  const numUnknown = suggestions?.unknownImages.length || 0;
 
   const renderSettings = () => (
     <>
@@ -221,6 +259,38 @@ export default function CullingModal({
             </div>
           )}
         </div>
+        <Switch
+          label={t('modals.culling.analyzeEyes', { defaultValue: 'Analyze eye state locally (heuristic)' })}
+          checked={settings.analyzeEyes}
+          onChange={(v) => setSettings((s) => ({ ...s, analyzeEyes: v }))}
+        />
+        <Switch
+          label={t('modals.culling.autoAssignStars', { defaultValue: 'Propose stars by category' })}
+          checked={settings.autoAssignStars}
+          onChange={(v) => setSettings((s) => ({ ...s, autoAssignStars: v }))}
+        />
+        {settings.autoAssignStars && (
+          <div className="grid grid-cols-2 gap-x-4 gap-y-2 border-l-2 border-border-color pl-4">
+            {(['retained', 'review', 'duplicate', 'defect', 'unknown'] as const).map((category) => (
+              <Slider
+                key={category}
+                label={t(`modals.culling.mapping.${category}`, { defaultValue: `${category} stars` })}
+                min={0}
+                max={5}
+                step={1}
+                value={settings.starMapping[category]}
+                defaultValue={settings.starMapping[category]}
+                onChange={(e) =>
+                  setSettings((s) => ({
+                    ...s,
+                    starMapping: { ...s.starMapping, [category]: Number(e.target.value) },
+                  }))
+                }
+                fillOrigin="min"
+              />
+            ))}
+          </div>
+        )}
       </div>
       <div className="flex justify-end gap-3 mt-8">
         <button
@@ -242,7 +312,7 @@ export default function CullingModal({
         <div className="w-full bg-surface rounded-full h-2.5 mt-2">
           <div
             className="bg-accent h-2.5 rounded-full"
-            style={{ width: `${(progress.current / progress.total) * 100}%` }}
+            style={{ width: `${((progress.current || 0) / progress.total) * 100}%` }}
           />
         </div>
       )}
@@ -267,7 +337,7 @@ export default function CullingModal({
 
     if (!suggestions) return null;
 
-    const totalSuggestions = numSimilar + numBlurry;
+    const totalSuggestions = numSimilar + numBlurry + numRetained + numReview + numDefects + numUnknown;
     if (totalSuggestions === 0) {
       return (
         <div className="flex flex-col items-center justify-center h-48">
@@ -289,7 +359,7 @@ export default function CullingModal({
           {t('modals.culling.cullingSuggestions')}
         </Text>
         <div className="border-b border-surface mb-4">
-          <nav className="-mb-px flex space-x-4" aria-label="Tabs">
+          <nav className="-mb-px flex flex-wrap gap-x-4" aria-label="Tabs">
             {numSimilar > 0 && (
               <button
                 onClick={() => setActiveTab('similar')}
@@ -315,6 +385,27 @@ export default function CullingModal({
                 {t('modals.culling.blurryImagesTab')}{' '}
                 <span className="bg-surface text-text-secondary rounded-full px-2 py-0.5 text-xs">{numBlurry}</span>
               </button>
+            )}
+            {[
+              ['retained', numRetained, t('modals.culling.retained', { defaultValue: 'Retained' })],
+              ['review', numReview, t('modals.culling.review', { defaultValue: 'Review' })],
+              ['defect', numDefects, t('modals.culling.defect', { defaultValue: 'Defects' })],
+              ['unknown', numUnknown, t('modals.culling.unknown', { defaultValue: 'Unknown' })],
+            ].map(([tab, count, label]) =>
+              Number(count) > 0 ? (
+                <button
+                  key={tab}
+                  onClick={() => setActiveTab(tab as 'retained' | 'review' | 'defect' | 'unknown')}
+                  className={`${
+                    activeTab === tab
+                      ? 'border-accent text-accent'
+                      : 'border-transparent text-text-secondary hover:text-text-primary hover:border-gray-300'
+                  } whitespace-nowrap py-2 px-1 border-b-2 font-medium text-sm`}
+                >
+                  {label}{' '}
+                  <span className="bg-surface text-text-secondary rounded-full px-2 py-0.5 text-xs">{count}</span>
+                </button>
+              ) : null,
             )}
           </nav>
         </div>
@@ -389,7 +480,46 @@ export default function CullingModal({
                       isSelected={selectedRejects.has(img.path)}
                       onToggle={() => handleToggleReject(img.path)}
                     >
-                      {t('modals.culling.sharpness', { sharpness: img.sharpnessMetric.toFixed(0) })}
+                      {t('modals.culling.blurryOverlay', {
+                        sharpness: img.sharpnessMetric.toFixed(0),
+                        rating: img.suggestedRating,
+                        defaultValue: '{{sharpness}} · ★{{rating}}',
+                      })}
+                    </ImageThumbnail>
+                  ))}
+                </div>
+              )}
+              {(['retained', 'review', 'defect', 'unknown'] as const).includes(
+                activeTab as 'retained' | 'review' | 'defect' | 'unknown',
+              ) && (
+                <div className="grid grid-cols-4 md:grid-cols-5 lg:grid-cols-6 gap-2">
+                  {(activeTab === 'retained'
+                    ? suggestions.retainedImages
+                    : activeTab === 'review'
+                      ? suggestions.reviewImages
+                      : activeTab === 'defect'
+                        ? suggestions.defectImages
+                        : suggestions.unknownImages
+                  ).map((img) => (
+                    <ImageThumbnail
+                      key={img.path}
+                      path={img.path}
+                      thumbnails={thumbnails}
+                      isSelected={selectedRejects.has(img.path)}
+                      onToggle={() => handleToggleReject(img.path)}
+                    >
+                      {t('modals.culling.analysisOverlay', {
+                        rating: img.suggestedRating,
+                        eyeState:
+                          img.eyeState === 'unknown'
+                            ? t('modals.culling.eyeUnknown', { defaultValue: 'eyes unknown' })
+                            : img.eyeState,
+                        eyeMethod:
+                          img.eyeMethod === 'local-heuristic'
+                            ? t('modals.culling.eyeHeuristic', { defaultValue: 'heuristic' })
+                            : img.eyeMethod,
+                        defaultValue: '★{{rating}} · {{eyeState}} · {{eyeMethod}}',
+                      })}
                     </ImageThumbnail>
                   ))}
                 </div>
@@ -414,8 +544,13 @@ export default function CullingModal({
             >
               {t('modals.culling.cancel')}
             </button>
-            <Button onClick={handleApply} disabled={selectedRejects.size === 0}>
-              {t('modals.culling.applyButton', { count: selectedRejects.size })}
+            <Button onClick={handleApply} disabled={action !== 'rate_suggestions' && selectedRejects.size === 0}>
+              {action === 'rate_suggestions'
+                ? t('modals.culling.applyStarsButton', {
+                    count: Object.keys(suggestions.starAssignments).length,
+                    defaultValue: 'Apply stars ({{count}})',
+                  })
+                : t('modals.culling.applyButton', { count: selectedRejects.size })}
             </Button>
           </div>
         </div>

@@ -1,6 +1,6 @@
 {
-  "name": "rapidraw",
-  "author": "Timon Käch",
+  "name": "picportal-editor",
+  "author": "PicPortal contributors (RapidRAW attribution retained)",
   "private": true,
   "scripts": {
     "dev": "vite",

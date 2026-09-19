@@ -1,0 +1,10 @@
+CC0 1.0 Universal dedication
+
+The PicPortal project generated picportal-synthetic-face.jpg internally with
+OpenAI image generation on 2026-09-04 from the adjacent tracked prompt. The
+subject is fictional and no third-party source image was supplied.
+
+To the extent the project has copyright or related rights in this generated
+test fixture, the project dedicates those rights to the public domain under
+CC0 1.0 Universal. A copy of the legal code is available at:
+https://creativecommons.org/publicdomain/zero/1.0/legalcode

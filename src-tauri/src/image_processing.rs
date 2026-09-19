@@ -3284,6 +3284,9 @@ pub fn perform_auto_analysis(image: &DynamicImage) -> AutoAdjustmentResults {
 
     let mut luma_hist = vec![0u32; 256];
     let mut mean_saturation = 0.0f32;
+    let mut mean_red = 0.0f32;
+    let mut mean_green = 0.0f32;
+    let mut mean_blue = 0.0f32;
     let mut center_sum = 0.0f32;
     let mut edge_sum = 0.0f32;
     let mut center_n = 0u32;
@@ -3293,6 +3296,10 @@ pub fn perform_auto_analysis(image: &DynamicImage) -> AutoAdjustmentResults {
         let r = pixel[0] as f32;
         let g = pixel[1] as f32;
         let b = pixel[2] as f32;
+
+        mean_red += r;
+        mean_green += g;
+        mean_blue += b;
 
         let luma_f = LUMA_R * r + LUMA_G * g + LUMA_B * b;
         luma_hist[(luma_f.round() as usize).min(255)] += 1;
@@ -3318,6 +3325,15 @@ pub fn perform_auto_analysis(image: &DynamicImage) -> AutoAdjustmentResults {
     }
 
     mean_saturation /= total_pixels as f32;
+    mean_red /= total_pixels as f32;
+    mean_green /= total_pixels as f32;
+    mean_blue /= total_pixels as f32;
+
+    // A gray-world estimate provides a transparent, deterministic first white balance.
+    // It is an initial edit, not a learned profile; the user can correct it in RapidRAW.
+    let temperature = ((mean_blue - mean_red) / 255.0 * 100.0).clamp(-100.0, 100.0) as f64;
+    let tint =
+        ((mean_green - (mean_red + mean_blue) * 0.5) / 255.0 * 100.0).clamp(-100.0, 100.0) as f64;
 
     let percentile = |hist: &Vec<u32>, p: f64| -> usize {
         let target = (total_pixels * p) as u32;
@@ -3435,8 +3451,8 @@ pub fn perform_auto_analysis(image: &DynamicImage) -> AutoAdjustmentResults {
         shadows: shadows.clamp(-100.0, 100.0),
         vibrancy: vibrancy.clamp(-100.0, 100.0),
         vignette_amount: vignette_amount.clamp(-100.0, 100.0),
-        temperature: 0.0,
-        tint: 0.0,
+        temperature,
+        tint,
         dehaze: dehaze.clamp(-100.0, 100.0),
         clarity: clarity.clamp(-100.0, 100.0),
         centre: centre.clamp(-100.0, 100.0),
@@ -3454,6 +3470,8 @@ pub fn auto_results_to_json(results: &AutoAdjustmentResults) -> serde_json::Valu
         "shadows": results.shadows,
         "vibrance": results.vibrancy,
         "vignetteAmount": results.vignette_amount,
+        "temperature": results.temperature,
+        "tint": results.tint,
         "clarity": results.clarity,
         "centré": results.centre,
 
@@ -3484,4 +3502,30 @@ pub fn calculate_auto_adjustments(
     let results = perform_auto_analysis(&original_image);
 
     Ok(auto_results_to_json(&results))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{ImageBuffer, Rgb};
+
+    #[test]
+    fn gray_world_initialization_is_deterministic_and_editable() {
+        let neutral = DynamicImage::ImageRgb8(ImageBuffer::from_pixel(8, 8, Rgb([100, 100, 100])));
+        let blue_cast = DynamicImage::ImageRgb8(ImageBuffer::from_pixel(8, 8, Rgb([50, 50, 100])));
+        let green_cast = DynamicImage::ImageRgb8(ImageBuffer::from_pixel(8, 8, Rgb([50, 100, 50])));
+
+        let neutral_result = perform_auto_analysis(&neutral);
+        let blue_result = perform_auto_analysis(&blue_cast);
+        let green_result = perform_auto_analysis(&green_cast);
+
+        assert_eq!(neutral_result.temperature, 0.0);
+        assert_eq!(neutral_result.tint, 0.0);
+        assert!(blue_result.temperature > 0.0);
+        assert!(green_result.tint > 0.0);
+        assert_eq!(
+            auto_results_to_json(&blue_result)["temperature"],
+            serde_json::json!(blue_result.temperature)
+        );
+    }
 }

@@ -18,6 +18,7 @@ mod culling;
 mod denoising;
 mod exif_processing;
 mod export_processing;
+mod face_processing;
 mod file_management;
 mod focus_stacking;
 mod formats;
@@ -30,12 +31,14 @@ mod inpainting;
 mod launch_request;
 mod lens_blur;
 mod lens_correction;
+mod local_derivatives;
 mod lut_processing;
 mod mask_generation;
 mod multi_exposure;
 mod negative_conversion;
 mod panorama_stitching;
 mod panorama_utils;
+mod picportal;
 mod preset_converter;
 mod raw_processing;
 mod tagging;
@@ -94,6 +97,7 @@ pub use android_integration::*;
 pub use app_settings::*;
 pub use app_state::*;
 pub use launch_request::*;
+pub use picportal::PicPortalState;
 use tagging_utils::{candidates, hierarchy};
 
 #[cfg(target_os = "macos")]
@@ -2139,6 +2143,7 @@ pub fn run() {
             disks_cache_refreshing: AtomicBool::new(false),
             camera_session: Mutex::new(camera_tethering::CameraSession::new()),
         })
+        .manage(PicPortalState::default())
         .invoke_handler(tauri::generate_handler![
             apply_adjustments,
             generate_preview_for_path,
@@ -2242,6 +2247,12 @@ pub fn run() {
             tagging::add_tag_for_paths,
             tagging::remove_tag_for_paths,
             culling::cull_images,
+            picportal::picportal_login,
+            picportal::picportal_logout,
+            picportal::picportal_galleries,
+            picportal::picportal_create_gallery,
+            picportal::picportal_publish,
+            picportal::picportal_queue_status,
             lens_correction::get_lensfun_makers,
             lens_correction::get_lensfun_lenses_for_maker,
             lens_correction::autodetect_lens,

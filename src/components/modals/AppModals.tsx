@@ -18,7 +18,7 @@ import ConfirmModal from './ConfirmModal';
 import ImportSettingsModal from './ImportSettingsModal';
 import CullingModal from './CullingModal';
 import CollageModal from './CollageModal';
-import { AppSettings, Invokes, AlbumItem, Album, AlbumGroup } from '../ui/AppProperties';
+import { AppSettings, AlbumItem, AlbumGroup } from '../ui/AppProperties';
 import { CopyPasteSettings } from '../../utils/adjustments';
 
 export interface AppModalsProps {
@@ -334,13 +334,13 @@ export default function AppModals(props: AppModalsProps) {
         error={cullingModalState.error}
         imagePaths={cullingModalState.pathsToCull}
         thumbnails={thumbnails}
-        onApply={(action, paths) => {
+        onApply={(action, paths, ratings) => {
           if (action === 'reject') {
             props.handleSetColorLabel('red', paths);
           } else if (action === 'rate_zero') {
-            props.handleRate(1, paths);
-          } else if (action === 'delete') {
-            props.executeDelete(paths, { includeAssociated: false });
+            props.handleRate(0, paths);
+          } else if (action === 'rate_suggestions' && ratings) {
+            Object.entries(ratings).forEach(([path, rating]) => props.handleRate(rating, [path]));
           }
           setUI({
             cullingModalState: { isOpen: false, progress: null, suggestions: null, error: null, pathsToCull: [] },

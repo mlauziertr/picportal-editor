@@ -1,0 +1,9 @@
+Use case: photorealistic-natural
+Asset type: deterministic computer-vision face-detection parity fixture for an open-source/commercial software repository
+Primary request: Create an entirely fictional adult person, head-and-shoulders passport-style portrait, facing directly toward camera, neutral relaxed expression, both eyes clearly visible, no occlusion.
+Scene/backdrop: plain medium-gray studio background with no objects.
+Subject: one and only one fictional adult, centered, symmetric frontal face, natural skin texture, short simple hair kept away from the eyes, shoulders visible.
+Style/medium: realistic studio photograph, crisp focus, ordinary camera rendering.
+Composition/framing: square image, face occupies roughly 45% of image width, generous margin around head, no cropping of hair or chin.
+Lighting/mood: soft even frontal studio light, minimal shadows, neutral color balance.
+Constraints: exactly one person; no resemblance request to any real or famous person; no text, logos, watermark, jewelry, eyewear, hat, hands, props, patterns, or background detail; RGB appearance; commercially reusable test-fixture intent.
