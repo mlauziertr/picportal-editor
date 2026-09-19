@@ -1224,7 +1224,12 @@ fn load_queue(path: &Path) -> Result<QueueFile, String> {
         let bytes =
             fs::read(candidate).map_err(|error| format!("cannot read PicPortal queue: {error}"))?;
         match serde_json::from_slice(&bytes) {
-            Ok(queue) => return Ok(queue),
+            Ok(queue) => {
+                if candidate == temporary.as_path() {
+                    commit_temporary_queue(path)?;
+                }
+                return Ok(queue);
+            }
             Err(error) => invalid_queue = Some(error),
         }
     }
@@ -1241,7 +1246,6 @@ fn save_queue(path: &Path, queue: &QueueFile) -> Result<(), String> {
     fs::create_dir_all(parent)
         .map_err(|error| format!("cannot create PicPortal queue directory: {error}"))?;
     let temporary = path.with_extension("json.tmp");
-    let backup = path.with_extension("json.bak");
     let bytes = serde_json::to_vec_pretty(queue)
         .map_err(|error| format!("cannot serialize PicPortal queue: {error}"))?;
     let mut temporary_file = fs::OpenOptions::new()
@@ -1258,6 +1262,15 @@ fn save_queue(path: &Path, queue: &QueueFile) -> Result<(), String> {
         .map_err(|error| format!("cannot flush PicPortal queue: {error}"))?;
     drop(temporary_file);
 
+    commit_temporary_queue(path)
+}
+
+fn commit_temporary_queue(path: &Path) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "PicPortal queue has no parent directory".to_owned())?;
+    let temporary = path.with_extension("json.tmp");
+    let backup = path.with_extension("json.bak");
     if path.exists() {
         if backup.exists() {
             fs::remove_file(&backup)
@@ -1519,5 +1532,14 @@ mod tests {
         let restored = load_queue(&path).expect("recover queue");
         assert_eq!(restored.items[0].upload_id.as_deref(), Some("new-upload"));
         assert_eq!(restored.items[0].upload_offset, 128);
+        assert!(!temporary.exists());
+
+        fs::write(&temporary, b"{").expect("interrupted next queue write");
+        let restored_after_second_crash = load_queue(&path).expect("recover promoted queue");
+        assert_eq!(
+            restored_after_second_crash.items[0].upload_id.as_deref(),
+            Some("new-upload")
+        );
+        assert_eq!(restored_after_second_crash.items[0].upload_offset, 128);
     }
 }
