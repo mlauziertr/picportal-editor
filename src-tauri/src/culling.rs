@@ -236,6 +236,16 @@ fn connected_components(
     components
 }
 
+fn compare_group_candidates(
+    left: &ImageAnalysisResult,
+    right: &ImageAnalysisResult,
+) -> std::cmp::Ordering {
+    right
+        .quality_score
+        .total_cmp(&left.quality_score)
+        .then_with(|| left.path.cmp(&right.path))
+}
+
 fn encode_face_source(
     path: &str,
     settings: &crate::app_settings::AppSettings,
@@ -396,10 +406,7 @@ pub async fn cull_images(
         }) {
             if group_indices.len() > 1 {
                 group_indices.sort_by(|left, right| {
-                    successful[*right]
-                        .result
-                        .quality_score
-                        .total_cmp(&successful[*left].result.quality_score)
+                    compare_group_candidates(&successful[*left].result, &successful[*right].result)
                 });
                 let representative = group_indices[0];
                 for index in group_indices.iter().skip(1) {
@@ -475,6 +482,23 @@ pub async fn cull_images(
 mod tests {
     use super::*;
 
+    fn analysis_result(path: &str, quality_score: f64) -> ImageAnalysisResult {
+        ImageAnalysisResult {
+            path: path.to_owned(),
+            quality_score,
+            sharpness_metric: 0.0,
+            center_focus_metric: 0.0,
+            exposure_metric: 0.0,
+            width: 1,
+            height: 1,
+            eye_state: "notApplicable".to_owned(),
+            eye_confidence: 0.0,
+            eye_method: "disabled".to_owned(),
+            category: "review".to_owned(),
+            suggested_rating: 0,
+        }
+    }
+
     #[test]
     fn star_mapping_is_clamped_to_the_rapidraw_range() {
         let mapping = StarMapping {
@@ -496,5 +520,19 @@ mod tests {
         let edges = [(0, 2), (2, 0), (2, 1), (1, 2)];
         let groups = connected_components(3, |left, right| edges.contains(&(left, right)));
         assert_eq!(groups, vec![vec![0, 2, 1]]);
+    }
+
+    #[test]
+    fn equal_quality_representatives_are_independent_of_input_order() {
+        let first = analysis_result("a.jpg", 0.75);
+        let second = analysis_result("b.jpg", 0.75);
+        let mut forward = [&first, &second];
+        let mut reversed = [&second, &first];
+
+        forward.sort_by(|left, right| compare_group_candidates(left, right));
+        reversed.sort_by(|left, right| compare_group_candidates(left, right));
+
+        assert_eq!(forward[0].path, "a.jpg");
+        assert_eq!(reversed[0].path, "a.jpg");
     }
 }
