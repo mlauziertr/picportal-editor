@@ -436,7 +436,7 @@ pub async fn picportal_logout(state: State<'_, PicPortalState>) -> Result<(), St
         .session
         .lock()
         .map_err(|_| "PicPortal session lock is poisoned".to_owned())?
-        .take();
+        .clone();
     if let Some(session) = session {
         let response = session
             .client
@@ -446,6 +446,15 @@ pub async fn picportal_logout(state: State<'_, PicPortalState>) -> Result<(), St
             .await
             .map_err(|error| format!("PicPortal logout failed: {error}"))?;
         require_success(response).await?;
+        let mut current = state
+            .session
+            .lock()
+            .map_err(|_| "PicPortal session lock is poisoned".to_owned())?;
+        if current.as_ref().is_some_and(|current| {
+            current.base_url == session.base_url && current.account_id == session.account_id
+        }) {
+            current.take();
+        }
     }
     Ok(())
 }

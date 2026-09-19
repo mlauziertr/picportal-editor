@@ -341,7 +341,31 @@ export default function CullingModal({
     if (!suggestions) return null;
 
     const totalSuggestions = numSimilar + numBlurry + numRetained + numReview + numDefects + numUnknown;
+    const failedPathsNotice =
+      suggestions.failedPaths.length > 0 ? (
+        <div role="alert" className="w-full rounded-md border border-red-500/40 bg-red-500/10 p-3">
+          <Text variant={TextVariants.heading} className="text-red-500">
+            {t('modals.culling.cullingFailed')}
+          </Text>
+          <ul className="mt-2 max-h-32 space-y-1 overflow-y-auto text-sm text-text-secondary">
+            {suggestions.failedPaths.map((path, index) => (
+              <li key={`${path}-${index}`} className="break-all">
+                {path}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null;
     if (totalSuggestions === 0) {
+      if (failedPathsNotice) {
+        return (
+          <div className="flex flex-col items-center justify-center gap-4">
+            <XCircle className="w-16 h-16 text-red-500" />
+            {failedPathsNotice}
+            <Button onClick={onClose}>{t('modals.culling.close')}</Button>
+          </div>
+        );
+      }
       return (
         <div className="flex flex-col items-center justify-center h-48">
           <CheckCircle className="w-16 h-16 text-green-500" />
@@ -361,6 +385,7 @@ export default function CullingModal({
         <Text variant={TextVariants.title} className="mb-4">
           {t('modals.culling.cullingSuggestions')}
         </Text>
+        {failedPathsNotice && <div className="mb-4">{failedPathsNotice}</div>}
         <div className="border-b border-surface mb-4">
           <nav className="-mb-px flex flex-wrap gap-x-4" aria-label="Tabs">
             {numSimilar > 0 && (
