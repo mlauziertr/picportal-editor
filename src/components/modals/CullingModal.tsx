@@ -187,8 +187,11 @@ export default function CullingModal({
     });
   };
 
+  const starAssignmentCount = suggestions ? Object.keys(suggestions.starAssignments).length : 0;
+
   const handleApply = () => {
     if (action === 'rate_suggestions' && suggestions) {
+      if (starAssignmentCount === 0) return;
       onApply(action, Object.keys(suggestions.starAssignments), suggestions.starAssignments);
     } else {
       onApply(action, Array.from(selectedRejects));
@@ -544,10 +547,13 @@ export default function CullingModal({
             >
               {t('modals.culling.cancel')}
             </button>
-            <Button onClick={handleApply} disabled={action !== 'rate_suggestions' && selectedRejects.size === 0}>
+            <Button
+              onClick={handleApply}
+              disabled={action === 'rate_suggestions' ? starAssignmentCount === 0 : selectedRejects.size === 0}
+            >
               {action === 'rate_suggestions'
                 ? t('modals.culling.applyStarsButton', {
-                    count: Object.keys(suggestions.starAssignments).length,
+                    count: starAssignmentCount,
                     defaultValue: 'Apply stars ({{count}})',
                   })
                 : t('modals.culling.applyButton', { count: selectedRejects.size })}
