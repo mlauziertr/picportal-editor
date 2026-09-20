@@ -272,6 +272,30 @@ fn category_rating(category: &str, mapping: &StarMapping) -> u8 {
     value.min(5)
 }
 
+fn is_blurry(result: &ImageAnalysisResult, settings: &CullingSettings) -> bool {
+    settings.filter_blurry && result.sharpness_metric < settings.blur_threshold
+}
+
+fn culling_category(
+    result: &ImageAnalysisResult,
+    settings: &CullingSettings,
+    is_duplicate: bool,
+) -> &'static str {
+    if is_duplicate {
+        "duplicate"
+    } else if settings.analyze_eyes
+        && (result.eye_method == "unavailable" || result.eye_state == "unknown")
+    {
+        "unknown"
+    } else if is_blurry(result, settings) || result.eye_state == "closed" {
+        "defect"
+    } else if result.quality_score >= 0.55 {
+        "retained"
+    } else {
+        "review"
+    }
+}
+
 fn set_eye_signal(result: &mut ImageAnalysisResult, analysis: &face_processing::LocalFaceAnalysis) {
     if analysis.faces.is_empty() {
         result.eye_state = "notApplicable".to_owned();
@@ -429,19 +453,11 @@ pub async fn cull_images(
     }
 
     for data in &mut successful {
-        let is_blurry =
-            settings.filter_blurry && data.result.sharpness_metric < settings.blur_threshold;
-        let category = if duplicate_paths.contains(&data.result.path) {
-            "duplicate"
-        } else if settings.analyze_eyes && data.result.eye_method == "unavailable" {
-            "unknown"
-        } else if is_blurry || data.result.eye_state == "closed" {
-            "defect"
-        } else if data.result.quality_score >= 0.55 {
-            "retained"
-        } else {
-            "review"
-        };
+        let category = culling_category(
+            &data.result,
+            &settings,
+            duplicate_paths.contains(&data.result.path),
+        );
         data.result.category = category.to_owned();
         data.result.suggested_rating = category_rating(category, &settings.star_mapping);
         if settings.auto_assign_stars {
@@ -456,7 +472,7 @@ pub async fn cull_images(
             "unknown" => suggestions.unknown_images.push(data.result.clone()),
             _ => suggestions.defect_images.push(data.result.clone()),
         }
-        if is_blurry {
+        if is_blurry(&data.result, &settings) {
             suggestions.blurry_images.push(data.result.clone());
         }
     }
@@ -503,6 +519,57 @@ mod tests {
         }
     }
 
+    fn eye_settings(analyze_eyes: bool) -> CullingSettings {
+        CullingSettings {
+            analyze_eyes,
+            filter_blurry: false,
+            group_similar: false,
+            ..Default::default()
+        }
+    }
+
+    fn face(state: face_processing::EyeState) -> face_processing::LocalFace {
+        face_processing::LocalFace {
+            bbox: face_processing::FaceBox {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            confidence: 1.0,
+            embedding: Vec::new(),
+            thumbnail: Vec::new(),
+            thumbnail_sha256: String::new(),
+            eye: face_processing::EyeAssessment {
+                state,
+                confidence: 0.5,
+                method: "local-heuristic",
+            },
+        }
+    }
+
+    fn face_analysis(states: Vec<face_processing::EyeState>) -> face_processing::LocalFaceAnalysis {
+        face_processing::LocalFaceAnalysis {
+            source_sha256: String::new(),
+            source_width: 1,
+            source_height: 1,
+            faces: states.into_iter().map(face).collect(),
+            model_id: String::new(),
+            model_digest: String::new(),
+            pipeline_version: String::new(),
+            embedding_dimension: 0,
+            detector_input: 0,
+        }
+    }
+
+    fn category_and_rating(
+        result: &ImageAnalysisResult,
+        settings: &CullingSettings,
+    ) -> (&'static str, u8) {
+        let category = culling_category(result, settings, false);
+        (category, category_rating(category, &settings.star_mapping))
+    }
+
     #[test]
     fn star_mapping_is_clamped_to_the_rapidraw_range() {
         let mapping = StarMapping {
@@ -541,42 +608,82 @@ mod tests {
     }
 
     #[test]
-    fn indeterminate_face_preserves_unknown_eye_state() {
-        let face = |state| face_processing::LocalFace {
-            bbox: face_processing::FaceBox {
-                x: 0.0,
-                y: 0.0,
-                width: 1.0,
-                height: 1.0,
-            },
-            confidence: 1.0,
-            embedding: Vec::new(),
-            thumbnail: Vec::new(),
-            thumbnail_sha256: String::new(),
-            eye: face_processing::EyeAssessment {
-                state,
-                confidence: 0.5,
-                method: "local-heuristic",
-            },
-        };
-        let analysis = face_processing::LocalFaceAnalysis {
-            source_sha256: String::new(),
-            source_width: 1,
-            source_height: 1,
-            faces: vec![
-                face(face_processing::EyeState::Closed),
-                face(face_processing::EyeState::Unknown),
+    fn eye_outcome_indeterminate_faces_are_unknown() {
+        let settings = eye_settings(true);
+        for states in [
+            vec![
+                face_processing::EyeState::Closed,
+                face_processing::EyeState::Unknown,
             ],
-            model_id: String::new(),
-            model_digest: String::new(),
-            pipeline_version: String::new(),
-            embedding_dimension: 0,
-            detector_input: 0,
-        };
-        let mut result = analysis_result("faces.jpg", 0.75);
+            vec![
+                face_processing::EyeState::Open,
+                face_processing::EyeState::Closed,
+            ],
+        ] {
+            let mut result = analysis_result("faces.jpg", 0.75);
+            set_eye_signal(&mut result, &face_analysis(states));
 
-        set_eye_signal(&mut result, &analysis);
+            assert_eq!(result.eye_state, "unknown");
+            assert_eq!(
+                category_and_rating(&result, &settings),
+                ("unknown", settings.star_mapping.unknown)
+            );
+        }
+    }
 
-        assert_eq!(result.eye_state, "unknown");
+    #[test]
+    fn eye_outcome_conclusive_faces_preserve_categories() {
+        let settings = eye_settings(true);
+        let mut open = analysis_result("open.jpg", 0.75);
+        set_eye_signal(
+            &mut open,
+            &face_analysis(vec![
+                face_processing::EyeState::Open,
+                face_processing::EyeState::Open,
+            ]),
+        );
+        let mut closed = analysis_result("closed.jpg", 0.75);
+        set_eye_signal(
+            &mut closed,
+            &face_analysis(vec![
+                face_processing::EyeState::Closed,
+                face_processing::EyeState::Closed,
+            ]),
+        );
+
+        assert_eq!(
+            category_and_rating(&open, &settings),
+            ("retained", settings.star_mapping.retained)
+        );
+        assert_eq!(
+            category_and_rating(&closed, &settings),
+            ("defect", settings.star_mapping.defect)
+        );
+    }
+
+    #[test]
+    fn eye_outcome_analysis_failure_is_unknown() {
+        let settings = eye_settings(true);
+        let mut result = analysis_result("failed.jpg", 0.75);
+        result.eye_state = "unknown".to_owned();
+        result.eye_method = "unavailable".to_owned();
+
+        assert_eq!(
+            category_and_rating(&result, &settings),
+            ("unknown", settings.star_mapping.unknown)
+        );
+    }
+
+    #[test]
+    fn eye_outcome_disabled_analysis_uses_quality() {
+        let settings = eye_settings(false);
+        let mut result = analysis_result("disabled.jpg", 0.75);
+        result.eye_state = "unknown".to_owned();
+        result.eye_method = "unavailable".to_owned();
+
+        assert_eq!(
+            category_and_rating(&result, &settings),
+            ("retained", settings.star_mapping.retained)
+        );
     }
 }
