@@ -19,7 +19,11 @@ interface CullingModalProps {
   error: string | null;
   imagePaths: string[];
   thumbnails: Record<string, string>;
-  onApply(action: 'reject' | 'rate_zero' | 'rate_suggestions', paths: string[], ratings?: Record<string, number>): void;
+  onApply(
+    action: 'reject' | 'rate_zero' | 'rate_suggestions',
+    paths: string[],
+    ratings?: Record<string, number>,
+  ): void | Promise<void>;
   onError(error: string): void;
 }
 
@@ -95,6 +99,7 @@ export default function CullingModal({
 
   const [selectedRejects, setSelectedRejects] = useState<Set<string>>(new Set());
   const [action, setAction] = useState<CullAction>('reject');
+  const [isApplying, setIsApplying] = useState(false);
   const [activeTab, setActiveTab] = useState<'similar' | 'blurry' | 'retained' | 'review' | 'defect' | 'unknown'>(
     'similar',
   );
@@ -189,12 +194,19 @@ export default function CullingModal({
 
   const starAssignmentCount = suggestions ? Object.keys(suggestions.starAssignments).length : 0;
 
-  const handleApply = () => {
-    if (action === 'rate_suggestions' && suggestions) {
-      if (starAssignmentCount === 0) return;
-      onApply(action, Object.keys(suggestions.starAssignments), suggestions.starAssignments);
-    } else {
-      onApply(action, Array.from(selectedRejects));
+  const handleApply = async () => {
+    setIsApplying(true);
+    try {
+      if (action === 'rate_suggestions' && suggestions) {
+        if (starAssignmentCount === 0) return;
+        await onApply(action, Object.keys(suggestions.starAssignments), suggestions.starAssignments);
+      } else {
+        await onApply(action, Array.from(selectedRejects));
+      }
+    } catch (applyError) {
+      onError(String(applyError));
+    } finally {
+      setIsApplying(false);
     }
   };
 
@@ -574,7 +586,9 @@ export default function CullingModal({
             </button>
             <Button
               onClick={handleApply}
-              disabled={action === 'rate_suggestions' ? starAssignmentCount === 0 : selectedRejects.size === 0}
+              disabled={
+                isApplying || (action === 'rate_suggestions' ? starAssignmentCount === 0 : selectedRejects.size === 0)
+              }
             >
               {action === 'rate_suggestions'
                 ? t('modals.culling.applyStarsButton', {

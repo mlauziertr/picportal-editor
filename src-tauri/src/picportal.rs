@@ -94,6 +94,8 @@ struct QueueItem {
     #[serde(default)]
     photo_id: Option<String>,
     #[serde(default)]
+    face_analysis_uploaded: bool,
+    #[serde(default)]
     upload_id: Option<String>,
     #[serde(default)]
     upload_offset: u64,
@@ -686,12 +688,33 @@ async fn publish_one(
     validate_export_path(&source_path)?;
     let source = fs::read(&source_path)
         .map_err(|error| format!("cannot read export {}: {error}", source_path.display()))?;
-    let derivatives = local_derivatives::generate_local_derivatives(&source)?;
-    let existing = queue.items.iter().find(|item| {
-        queue_identity_matches(item, path, session, &gallery.id, &derivatives.source_sha256)
-    });
-    if let Some(existing) = existing {
+    let source_sha256 = local_derivatives::sha256_hex(&source);
+    let existing = queue
+        .items
+        .iter()
+        .find(|item| queue_identity_matches(item, path, session, &gallery.id, &source_sha256))
+        .cloned();
+    if let Some(existing) = existing.as_ref() {
         if existing.state == "uploaded" {
+            if let Some(photo_id) = completed_face_analysis_photo(existing, publish_faces)? {
+                let analysis = analyze_faces(&source, capabilities, app, state)?;
+                upload_faces_for_photo(
+                    session,
+                    &gallery.id,
+                    &photo_id,
+                    &source_sha256,
+                    source.len() as u64,
+                    &analysis,
+                )
+                .await?;
+                if let Some(item) = queue.items.iter_mut().find(|item| {
+                    queue_identity_matches(item, path, session, &gallery.id, &source_sha256)
+                }) {
+                    item.face_analysis_uploaded = true;
+                    item.last_error = None;
+                }
+                save_queue(queue_path, queue)?;
+            }
             return Ok(PublishItemResult {
                 path: path.to_owned(),
                 state: existing.state.clone(),
@@ -700,6 +723,7 @@ async fn publish_one(
             });
         }
     }
+    let derivatives = local_derivatives::generate_local_derivatives(&source)?;
     if existing.is_none() {
         upsert_queue(
             queue,
@@ -711,6 +735,7 @@ async fn publish_one(
                 source_sha256: derivatives.source_sha256.clone(),
                 state: "queued".to_owned(),
                 photo_id: None,
+                face_analysis_uploaded: false,
                 upload_id: None,
                 upload_offset: 0,
                 last_error: None,
@@ -725,26 +750,7 @@ async fn publish_one(
     save_queue(queue_path, queue)?;
 
     let face_analysis = if publish_faces {
-        let mut runtime = state
-            .face_runtime
-            .lock()
-            .map_err(|_| "face runtime lock is poisoned".to_owned())?;
-        let runtime = face_processing::ensure_runtime(&mut runtime, app)?;
-        let analysis = runtime.analyze(&source)?;
-        if analysis.model_id != capabilities.faces.model_id
-            || analysis.pipeline_version != capabilities.faces.pipeline_version
-            || analysis.embedding_dimension != capabilities.faces.embedding_dim
-            || analysis.detector_input != capabilities.faces.detector_input
-            || analysis.faces.len() > capabilities.faces.max_faces
-            || capabilities
-                .faces
-                .model_digest
-                .as_deref()
-                .is_some_and(|digest| digest != analysis.model_digest)
-        {
-            return Err("PicPortal face model contract is incompatible with the server".to_owned());
-        }
-        Some(analysis)
+        Some(analyze_faces(&source, capabilities, app, state)?)
     } else {
         None
     };
@@ -753,13 +759,11 @@ async fn publish_one(
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("export.jpg");
-    let content_type = content_type_for_path(&source_path)
-        .ok_or_else(|| "unsupported exported image extension".to_owned())?;
     let photo_id = upload_original(
         session,
         &gallery.id,
         filename,
-        content_type,
+        derivatives.source_mime,
         &source,
         &derivatives.source_sha256,
         path,
@@ -795,19 +799,22 @@ async fn publish_one(
     )
     .await?;
     if let Some(analysis) = face_analysis {
-        let face_manifest = face_manifest(&analysis, &idempotency_key, source.len() as u64);
-        let thumbnails = analysis
-            .faces
-            .iter()
-            .map(|face| face.thumbnail.clone())
-            .collect::<Vec<_>>();
-        upload_face_analysis(session, &gallery.id, &photo_id, &face_manifest, &thumbnails).await?;
+        upload_faces_for_photo(
+            session,
+            &gallery.id,
+            &photo_id,
+            &derivatives.source_sha256,
+            source.len() as u64,
+            &analysis,
+        )
+        .await?;
     }
     if let Some(item) = queue.items.iter_mut().find(|item| {
         queue_identity_matches(item, path, session, &gallery.id, &derivatives.source_sha256)
     }) {
         item.state = "uploaded".to_owned();
         item.photo_id = Some(photo_id.clone());
+        item.face_analysis_uploaded = publish_faces;
         item.upload_id = None;
         item.upload_offset = source.len() as u64;
         item.last_error = None;
@@ -837,6 +844,49 @@ fn face_publication_enabled(
     Ok(true)
 }
 
+fn completed_face_analysis_photo(
+    item: &QueueItem,
+    publish_faces: bool,
+) -> Result<Option<String>, String> {
+    if item.state != "uploaded" || !publish_faces || item.face_analysis_uploaded {
+        return Ok(None);
+    }
+    item.photo_id
+        .as_ref()
+        .filter(|photo_id| !photo_id.trim().is_empty())
+        .cloned()
+        .map(Some)
+        .ok_or_else(|| "completed PicPortal publication has no photo id".to_owned())
+}
+
+fn analyze_faces(
+    source: &[u8],
+    capabilities: &ProcessingCapabilities,
+    app: &AppHandle,
+    state: &PicPortalState,
+) -> Result<face_processing::LocalFaceAnalysis, String> {
+    let mut runtime = state
+        .face_runtime
+        .lock()
+        .map_err(|_| "face runtime lock is poisoned".to_owned())?;
+    let runtime = face_processing::ensure_runtime(&mut runtime, app)?;
+    let analysis = runtime.analyze(source)?;
+    if analysis.model_id != capabilities.faces.model_id
+        || analysis.pipeline_version != capabilities.faces.pipeline_version
+        || analysis.embedding_dimension != capabilities.faces.embedding_dim
+        || analysis.detector_input != capabilities.faces.detector_input
+        || analysis.faces.len() > capabilities.faces.max_faces
+        || capabilities
+            .faces
+            .model_digest
+            .as_deref()
+            .is_some_and(|digest| digest != analysis.model_digest)
+    {
+        return Err("PicPortal face model contract is incompatible with the server".to_owned());
+    }
+    Ok(analysis)
+}
+
 fn validate_export_path(path: &Path) -> Result<(), String> {
     let metadata =
         fs::metadata(path).map_err(|_| format!("export does not exist: {}", path.display()))?;
@@ -858,15 +908,6 @@ fn validate_export_path(path: &Path) -> Result<(), String> {
         ));
     }
     Ok(())
-}
-
-fn content_type_for_path(path: &Path) -> Option<&'static str> {
-    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
-        "jpg" | "jpeg" => Some("image/jpeg"),
-        "png" => Some("image/png"),
-        "webp" => Some("image/webp"),
-        _ => None,
-    }
 }
 
 fn derivative_dimensions(derivative: &local_derivatives::LocalDerivative) -> DerivativeDimensions {
@@ -1265,6 +1306,24 @@ async fn upload_face_analysis(
     Ok(())
 }
 
+async fn upload_faces_for_photo(
+    session: &PicPortalSession,
+    gallery_id: &str,
+    photo_id: &str,
+    source_sha256: &str,
+    source_bytes: u64,
+    analysis: &face_processing::LocalFaceAnalysis,
+) -> Result<(), String> {
+    let idempotency_key = idempotency_key(gallery_id, photo_id, source_sha256);
+    let manifest = face_manifest(analysis, &idempotency_key, source_bytes);
+    let thumbnails = analysis
+        .faces
+        .iter()
+        .map(|face| face.thumbnail.clone())
+        .collect::<Vec<_>>();
+    upload_face_analysis(session, gallery_id, photo_id, &manifest, &thumbnails).await
+}
+
 fn queue_path(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
@@ -1511,6 +1570,7 @@ mod tests {
                 source_sha256: "hash".into(),
                 state: "uploaded".into(),
                 photo_id: Some("photo".into()),
+                face_analysis_uploaded: false,
                 upload_id: None,
                 upload_offset: 0,
                 last_error: None,
@@ -1534,6 +1594,7 @@ mod tests {
                 source_sha256: "hash".into(),
                 state: "queued".into(),
                 photo_id: None,
+                face_analysis_uploaded: false,
                 upload_id: None,
                 upload_offset: 0,
                 last_error: None,
@@ -1548,6 +1609,37 @@ mod tests {
         assert!(!face_publication_enabled(&gallery(false), &capabilities).expect("policy"));
         assert!(face_publication_enabled(&gallery(true), &capabilities).expect("policy"));
         assert!(face_publication_enabled(&gallery(true), &processing_capabilities(false)).is_err());
+    }
+
+    #[test]
+    fn completed_publication_runs_only_missing_authorized_face_phase() {
+        let mut item = QueueItem {
+            path: "export.jpg".into(),
+            api_base_url: PRODUCTION_API_BASE_URL.into(),
+            account_id: "account".into(),
+            gallery_id: "gallery".into(),
+            source_sha256: "source".into(),
+            state: "uploaded".into(),
+            photo_id: Some("photo".into()),
+            face_analysis_uploaded: false,
+            upload_id: None,
+            upload_offset: 128,
+            last_error: None,
+        };
+
+        assert_eq!(
+            completed_face_analysis_photo(&item, true).expect("face phase"),
+            Some("photo".into())
+        );
+        assert_eq!(
+            completed_face_analysis_photo(&item, false).expect("gallery guard"),
+            None
+        );
+        item.face_analysis_uploaded = true;
+        assert_eq!(
+            completed_face_analysis_photo(&item, true).expect("completed face phase"),
+            None
+        );
     }
 
     #[test]
@@ -1587,6 +1679,7 @@ mod tests {
                 source_sha256: "source".into(),
                 state: "uploading".into(),
                 photo_id: None,
+                face_analysis_uploaded: false,
                 upload_id: Some("upload".into()),
                 upload_offset: 8 * 1024 * 1024,
                 last_error: None,
@@ -1610,6 +1703,7 @@ mod tests {
                 source_sha256: "old-source".into(),
                 state: "uploading".into(),
                 photo_id: None,
+                face_analysis_uploaded: false,
                 upload_id: Some("old-upload".into()),
                 upload_offset: 42,
                 last_error: None,
@@ -1625,6 +1719,7 @@ mod tests {
                 source_sha256: "new-source".into(),
                 state: "queued".into(),
                 photo_id: None,
+                face_analysis_uploaded: false,
                 upload_id: None,
                 upload_offset: 0,
                 last_error: None,
@@ -1651,6 +1746,7 @@ mod tests {
                 source_sha256: "source".into(),
                 state: "uploading".into(),
                 photo_id: None,
+                face_analysis_uploaded: false,
                 upload_id: Some("old-upload".into()),
                 upload_offset: 64,
                 last_error: None,

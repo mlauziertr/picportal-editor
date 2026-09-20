@@ -9,6 +9,7 @@ import { globalImageCache } from '../utils/ImageLRUCache';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { computeSortedLibrary } from './useSortedLibrary';
 import { expandGroupedPaths } from '../utils/imageGrouping';
+import { persistRatingAssignments } from '../utils/ratingPersistence';
 
 export function useLibraryActions(handleImageSelect?: (path: string, openInEditor?: boolean) => void) {
   const handleRate = useCallback((newRating: number, paths?: string[]) => {
@@ -39,32 +40,26 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
     });
   }, []);
 
-  const handleApplyRatings = useCallback((ratings: Record<string, number>) => {
+  const handleApplyRatings = useCallback(async (ratings: Record<string, number>) => {
     const entries = Object.entries(ratings);
     if (entries.length === 0) return;
 
-    useLibraryStore.getState().setLibrary((state) => ({
-      imageRatings: entries.reduce(
-        (nextRatings, [path, rating]) => {
-          nextRatings[path] = rating;
-          return nextRatings;
-        },
-        { ...state.imageRatings },
-      ),
-    }));
-
-    const pathsByRating = new Map<number, string[]>();
-    entries.forEach(([path, rating]) => {
-      const paths = pathsByRating.get(rating) ?? [];
-      paths.push(path);
-      pathsByRating.set(rating, paths);
-    });
-    Promise.all(
-      Array.from(pathsByRating, ([rating, paths]) => invoke(Invokes.SetRatingForPaths, { paths, rating })),
-    ).catch((err) => {
-      console.error(err);
-      toast.error(`Failed to apply ratings: ${err}`);
-    });
+    const { succeeded, failures } = await persistRatingAssignments(ratings, (paths, rating) =>
+      invoke(Invokes.SetRatingForPaths, { paths, rating }),
+    );
+    if (Object.keys(succeeded).length > 0) {
+      useLibraryStore.getState().setLibrary((state) => ({
+        imageRatings: { ...state.imageRatings, ...succeeded },
+      }));
+    }
+    if (failures.length > 0) {
+      const details = failures
+        .map(({ rating, paths, error }) => `★${rating} (${paths.join(', ')}): ${String(error)}`)
+        .join('; ');
+      console.error('Failed to apply rating groups:', failures);
+      toast.error(`Failed to apply ratings: ${details}`);
+      throw new Error(details);
+    }
   }, []);
 
   const handleSetColorLabel = useCallback(async (color: string | null, paths?: string[]) => {

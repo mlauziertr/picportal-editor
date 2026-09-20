@@ -39,7 +39,7 @@ export interface AppModalsProps {
   handleStartImport: (settings: any) => Promise<void>;
   handleSetColorLabel: (color: string | null, paths?: string[]) => Promise<void>;
   handleRate: (rating: number, paths?: string[]) => void;
-  handleApplyRatings: (ratings: Record<string, number>) => void;
+  handleApplyRatings: (ratings: Record<string, number>) => Promise<void>;
   executeDelete: (paths: string[], options: any) => Promise<void>;
   handleSaveCollage: (base64Data: string, firstPath: string) => Promise<string>;
   handleCreateAlbumItem: (name: string, type: 'album' | 'group') => Promise<void>;
@@ -335,13 +335,13 @@ export default function AppModals(props: AppModalsProps) {
         error={cullingModalState.error}
         imagePaths={cullingModalState.pathsToCull}
         thumbnails={thumbnails}
-        onApply={(action, paths, ratings) => {
+        onApply={async (action, paths, ratings) => {
           if (action === 'reject') {
             props.handleSetColorLabel('red', paths);
           } else if (action === 'rate_zero') {
             props.handleRate(0, paths);
           } else if (action === 'rate_suggestions' && ratings) {
-            props.handleApplyRatings(ratings);
+            await props.handleApplyRatings(ratings);
           }
           setUI({
             cullingModalState: { isOpen: false, progress: null, suggestions: null, error: null, pathsToCull: [] },

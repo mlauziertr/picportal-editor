@@ -34,6 +34,7 @@ pub struct LocalDerivative {
 #[derive(Debug)]
 pub struct LocalDerivatives {
     pub source_sha256: String,
+    pub source_mime: &'static str,
     pub source_width: u32,
     pub source_height: u32,
     pub preview: LocalDerivative,
@@ -43,6 +44,7 @@ pub struct LocalDerivatives {
 #[derive(Debug)]
 pub struct DecodedSource {
     pub source_sha256: String,
+    pub source_mime: &'static str,
     pub width: u32,
     pub height: u32,
     pub image: DynamicImage,
@@ -69,6 +71,12 @@ pub fn decode_source(source: &[u8]) -> Result<DecodedSource, String> {
     ) {
         return Err("PicPortal local delivery supports JPEG, PNG and WebP exports".to_owned());
     }
+    let source_mime = match format {
+        ImageFormat::Jpeg => "image/jpeg",
+        ImageFormat::Png => "image/png",
+        ImageFormat::WebP => "image/webp",
+        _ => unreachable!(),
+    };
     if matches!(format, ImageFormat::Png) && !is_static_png(source) {
         return Err(
             "animated or malformed PNG exports are not supported by local PicPortal processing"
@@ -115,6 +123,7 @@ pub fn decode_source(source: &[u8]) -> Result<DecodedSource, String> {
     let (width, height) = image.dimensions();
     Ok(DecodedSource {
         source_sha256: sha256_hex(source),
+        source_mime,
         width,
         height,
         image,
@@ -128,6 +137,7 @@ pub fn generate_local_derivatives(source: &[u8]) -> Result<LocalDerivatives, Str
     let thumbnail = make_derivative(&decoded.image, THUMBNAIL_MAX_SIDE, THUMBNAIL_QUALITY)?;
     Ok(LocalDerivatives {
         source_sha256: decoded.source_sha256,
+        source_mime: decoded.source_mime,
         source_width: decoded.width,
         source_height: decoded.height,
         preview,
@@ -270,6 +280,13 @@ mod tests {
         bytes.into_inner()
     }
 
+    fn opaque_png() -> Vec<u8> {
+        let image = DynamicImage::ImageRgb8(ImageBuffer::from_pixel(1, 1, Rgb([32, 96, 180])));
+        let mut bytes = Cursor::new(Vec::new());
+        image.write_to(&mut bytes, ImageFormat::Png).expect("png");
+        bytes.into_inner()
+    }
+
     #[test]
     fn delivery_dimensions_never_enlarge() {
         assert_eq!(expected_dimensions(100, 40, PREVIEW_MAX_SIDE), (100, 40));
@@ -311,6 +328,22 @@ mod tests {
     #[test]
     fn unsupported_format_is_rejected_before_network_work() {
         assert!(decode_source(b"not-an-image").is_err());
+    }
+
+    #[test]
+    fn source_mime_comes_from_decoded_content() {
+        assert_eq!(
+            generate_local_derivatives(&opaque_png())
+                .expect("PNG derivatives")
+                .source_mime,
+            "image/png"
+        );
+        assert_eq!(
+            generate_local_derivatives(&jpeg(1, 1))
+                .expect("JPEG derivatives")
+                .source_mime,
+            "image/jpeg"
+        );
     }
 
     #[test]
