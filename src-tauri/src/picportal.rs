@@ -771,7 +771,13 @@ async fn publish_one(
         queue,
     )
     .await?;
-    let idempotency_key = idempotency_key(&gallery.id, &photo_id, &derivatives.source_sha256);
+    let idempotency_key = idempotency_key(
+        &session.base_url,
+        &session.account_id,
+        &gallery.id,
+        &photo_id,
+        &derivatives.source_sha256,
+    );
     let manifest = DerivativeManifest {
         version: 1,
         idempotency_key: idempotency_key.clone(),
@@ -919,10 +925,23 @@ fn derivative_dimensions(derivative: &local_derivatives::LocalDerivative) -> Der
     }
 }
 
-fn idempotency_key(gallery_id: &str, photo_id: &str, source_sha256: &str) -> String {
-    local_derivatives::sha256_hex(
-        format!("{gallery_id}:{photo_id}:{source_sha256}:{DERIVATIVE_PIPELINE_VERSION}").as_bytes(),
-    )
+fn idempotency_key(
+    api_base_url: &str,
+    account_id: &str,
+    gallery_id: &str,
+    photo_id: &str,
+    source_sha256: &str,
+) -> String {
+    let operation = serde_json::to_vec(&(
+        api_base_url,
+        account_id,
+        gallery_id,
+        photo_id,
+        source_sha256,
+        DERIVATIVE_PIPELINE_VERSION,
+    ))
+    .expect("idempotency operation identity is serializable");
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, &operation).to_string()
 }
 
 fn face_manifest(
@@ -1314,7 +1333,13 @@ async fn upload_faces_for_photo(
     source_bytes: u64,
     analysis: &face_processing::LocalFaceAnalysis,
 ) -> Result<(), String> {
-    let idempotency_key = idempotency_key(gallery_id, photo_id, source_sha256);
+    let idempotency_key = idempotency_key(
+        &session.base_url,
+        &session.account_id,
+        gallery_id,
+        photo_id,
+        source_sha256,
+    );
     let manifest = face_manifest(analysis, &idempotency_key, source_bytes);
     let thumbnails = analysis
         .faces
@@ -1643,11 +1668,48 @@ mod tests {
     }
 
     #[test]
-    fn idempotency_key_changes_with_source() {
-        assert_ne!(
-            idempotency_key("gallery", "photo", "a"),
-            idempotency_key("gallery", "photo", "b")
+    fn derivative_idempotency_key_is_a_stable_uuid_for_the_operation() {
+        let first = idempotency_key(
+            "https://example.test",
+            "account",
+            "gallery",
+            "photo",
+            "source",
         );
+        let retry = idempotency_key(
+            "https://example.test",
+            "account",
+            "gallery",
+            "photo",
+            "source",
+        );
+        let changed_source = idempotency_key(
+            "https://example.test",
+            "account",
+            "gallery",
+            "photo",
+            "other-source",
+        );
+        let changed_account = idempotency_key(
+            "https://example.test",
+            "other-account",
+            "gallery",
+            "photo",
+            "source",
+        );
+        let changed_destination = idempotency_key(
+            "https://other.example.test",
+            "account",
+            "gallery",
+            "photo",
+            "source",
+        );
+
+        assert!(uuid::Uuid::parse_str(&first).is_ok());
+        assert_eq!(first, retry);
+        assert_ne!(first, changed_source);
+        assert_ne!(first, changed_account);
+        assert_ne!(first, changed_destination);
     }
 
     #[test]
