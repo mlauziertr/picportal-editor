@@ -70,10 +70,16 @@ pub fn decode_source(source: &[u8]) -> Result<DecodedSource, String> {
         return Err("PicPortal local delivery supports JPEG, PNG and WebP exports".to_owned());
     }
     if matches!(format, ImageFormat::Png) && !is_static_png(source) {
-        return Err("animated or malformed PNG exports are delegated to the server".to_owned());
+        return Err(
+            "animated or malformed PNG exports are not supported by local PicPortal processing"
+                .to_owned(),
+        );
     }
     if matches!(format, ImageFormat::WebP) && !is_static_webp(source) {
-        return Err("animated or malformed WebP exports are delegated to the server".to_owned());
+        return Err(
+            "animated or malformed WebP exports are not supported by local PicPortal processing"
+                .to_owned(),
+        );
     }
 
     let mut limits = Limits::default();
@@ -101,7 +107,9 @@ pub fn decode_source(source: &[u8]) -> Result<DecodedSource, String> {
     let mut image = DynamicImage::from_decoder(decoder)
         .map_err(|error| format!("cannot materialize exported image: {error}"))?;
     if image.color().has_alpha() && image.pixels().any(|(_, _, pixel)| pixel.0[3] != 255) {
-        return Err("transparent exports are delegated to the server pipeline".to_owned());
+        return Err(
+            "transparent exports are not supported by local PicPortal processing".to_owned(),
+        );
     }
     image.apply_orientation(orientation);
     let (width, height) = image.dimensions();
@@ -245,13 +253,20 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{ImageBuffer, Rgb};
+    use image::{ImageBuffer, Rgb, Rgba};
 
     fn jpeg(width: u32, height: u32) -> Vec<u8> {
         let image =
             DynamicImage::ImageRgb8(ImageBuffer::from_pixel(width, height, Rgb([32, 96, 180])));
         let mut bytes = Cursor::new(Vec::new());
         image.write_to(&mut bytes, ImageFormat::Jpeg).expect("jpeg");
+        bytes.into_inner()
+    }
+
+    fn transparent_png() -> Vec<u8> {
+        let image = DynamicImage::ImageRgba8(ImageBuffer::from_pixel(1, 1, Rgba([32, 96, 180, 0])));
+        let mut bytes = Cursor::new(Vec::new());
+        image.write_to(&mut bytes, ImageFormat::Png).expect("png");
         bytes.into_inner()
     }
 
@@ -296,5 +311,26 @@ mod tests {
     #[test]
     fn unsupported_format_is_rejected_before_network_work() {
         assert!(decode_source(b"not-an-image").is_err());
+    }
+
+    #[test]
+    fn unsupported_exports_report_local_rejection() {
+        let png = transparent_png();
+        assert_eq!(
+            decode_source(&png).expect_err("transparent PNG must be rejected"),
+            "transparent exports are not supported by local PicPortal processing"
+        );
+        assert_eq!(
+            decode_source(&png[..20]).expect_err("malformed PNG must be rejected"),
+            "animated or malformed PNG exports are not supported by local PicPortal processing"
+        );
+
+        let webp = webp::Encoder::from_rgb(&[32, 96, 180], 1, 1)
+            .encode(75.0)
+            .to_vec();
+        assert_eq!(
+            decode_source(&webp[..20]).expect_err("malformed WebP must be rejected"),
+            "animated or malformed WebP exports are not supported by local PicPortal processing"
+        );
     }
 }

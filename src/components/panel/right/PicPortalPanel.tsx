@@ -126,6 +126,10 @@ export default function PicPortalPanel() {
           password: newGalleryAccessMode === 'password' ? newGalleryPassword : null,
         },
       });
+      const createdStatus = t('picportal.galleryCreated', { defaultValue: 'Gallery created' });
+      setGalleries((current) => [...current.filter((item) => item.id !== gallery.id), gallery]);
+      setGalleryId(gallery.id);
+      setStatus(createdStatus);
       setNewGalleryTitle('');
       setNewGalleryType('');
       setNewGalleryAccessMode('');
@@ -134,9 +138,15 @@ export default function PicPortalPanel() {
       setNewGalleryClientName('');
       setNewGalleryClientEmail('');
       setNewGalleryPassword('');
-      await refreshGalleries();
-      setGalleryId(gallery.id);
-      setStatus(t('picportal.galleryCreated', { defaultValue: 'Gallery created' }));
+      try {
+        const refreshed = await invoke<GallerySummary[]>(Invokes.PicPortalGalleries);
+        setGalleries(refreshed.some((item) => item.id === gallery.id) ? refreshed : [...refreshed, gallery]);
+        setGalleryId(gallery.id);
+      } catch (refreshError) {
+        setStatus(
+          `${createdStatus}\n${t('picportal.refresh', { defaultValue: 'Refresh galleries' })}: ${String(refreshError)}`,
+        );
+      }
     } catch (error) {
       setStatus(String(error));
     } finally {
@@ -151,7 +161,6 @@ export default function PicPortalPanel() {
     newGalleryStatus,
     newGalleryTitle,
     newGalleryType,
-    refreshGalleries,
     t,
   ]);
 

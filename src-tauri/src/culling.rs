@@ -280,6 +280,7 @@ fn set_eye_signal(result: &mut ImageAnalysisResult, analysis: &face_processing::
     }
     let mut saw_open = false;
     let mut saw_closed = false;
+    let mut saw_indeterminate = false;
     let mut confidence = 0.0_f32;
     let mut method = "local-heuristic";
     for face in &analysis.faces {
@@ -288,11 +289,14 @@ fn set_eye_signal(result: &mut ImageAnalysisResult, analysis: &face_processing::
         match face.eye.state {
             face_processing::EyeState::Open => saw_open = true,
             face_processing::EyeState::Closed => saw_closed = true,
-            face_processing::EyeState::Unknown => {}
-            face_processing::EyeState::NotApplicable => {}
+            face_processing::EyeState::Unknown | face_processing::EyeState::NotApplicable => {
+                saw_indeterminate = true
+            }
         }
     }
-    result.eye_state = if saw_closed && !saw_open {
+    result.eye_state = if saw_indeterminate {
+        "unknown"
+    } else if saw_closed && !saw_open {
         "closed"
     } else if saw_open && !saw_closed {
         "open"
@@ -534,5 +538,45 @@ mod tests {
 
         assert_eq!(forward[0].path, "a.jpg");
         assert_eq!(reversed[0].path, "a.jpg");
+    }
+
+    #[test]
+    fn indeterminate_face_preserves_unknown_eye_state() {
+        let face = |state| face_processing::LocalFace {
+            bbox: face_processing::FaceBox {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            confidence: 1.0,
+            embedding: Vec::new(),
+            thumbnail: Vec::new(),
+            thumbnail_sha256: String::new(),
+            eye: face_processing::EyeAssessment {
+                state,
+                confidence: 0.5,
+                method: "local-heuristic",
+            },
+        };
+        let analysis = face_processing::LocalFaceAnalysis {
+            source_sha256: String::new(),
+            source_width: 1,
+            source_height: 1,
+            faces: vec![
+                face(face_processing::EyeState::Closed),
+                face(face_processing::EyeState::Unknown),
+            ],
+            model_id: String::new(),
+            model_digest: String::new(),
+            pipeline_version: String::new(),
+            embedding_dimension: 0,
+            detector_input: 0,
+        };
+        let mut result = analysis_result("faces.jpg", 0.75);
+
+        set_eye_signal(&mut result, &analysis);
+
+        assert_eq!(result.eye_state, "unknown");
     }
 }
