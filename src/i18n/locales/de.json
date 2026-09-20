@@ -1479,11 +1479,22 @@
     }
   },
   "picportal": {
+    "accessMode": "Zugriffsart",
+    "accessModeLink": "Link",
+    "accessModePassword": "Passwort",
     "brand": "PicPortal Editor",
     "chooseExports": "Exportierte Bilder auswählen",
+    "clientEmail": "E-Mail des Kunden",
+    "clientName": "Kundenname",
     "createGallery": "Galerie erstellen",
     "email": "PicPortal-E-Mail",
+    "faceFilter": "Gesichtsfilterung",
+    "faceFilterDisabled": "Gesichter deaktiviert",
+    "faceFilterEnabled": "Gesichter aktiviert",
     "galleryCreated": "Galerie erstellt",
+    "galleryType": "Galerietyp",
+    "galleryTypeClient": "Kunde",
+    "galleryTypeEvent": "Veranstaltung",
     "loggedIn": "Mit PicPortal verbunden",
     "loggedOut": "Getrennt",
     "login": "Verbinden",
@@ -1496,6 +1507,9 @@
     "publishFailed_one": "{{count}} Bild fehlgeschlagen",
     "publishFailed_other": "{{count}} Bilder fehlgeschlagen",
     "refresh": "Galerien aktualisieren",
+    "status": "Status",
+    "statusActive": "Aktiv",
+    "statusDraft": "Entwurf",
     "title": "PicPortal-Veröffentlichung"
   },
   "settings": {

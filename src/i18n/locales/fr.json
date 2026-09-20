@@ -1510,11 +1510,22 @@
     }
   },
   "picportal": {
+    "accessMode": "Mode d'accès",
+    "accessModeLink": "Lien",
+    "accessModePassword": "Mot de passe",
     "brand": "PicPortal Editor",
     "chooseExports": "Choisir les images exportées",
+    "clientEmail": "E-mail du client",
+    "clientName": "Nom du client",
     "createGallery": "Créer une galerie",
     "email": "E-mail PicPortal",
+    "faceFilter": "Filtrage des visages",
+    "faceFilterDisabled": "Visages désactivés",
+    "faceFilterEnabled": "Visages activés",
     "galleryCreated": "Galerie créée",
+    "galleryType": "Type de galerie",
+    "galleryTypeClient": "Client",
+    "galleryTypeEvent": "Événement",
     "loggedIn": "Connecté à PicPortal",
     "loggedOut": "Déconnecté",
     "login": "Se connecter",
@@ -1529,6 +1540,9 @@
     "publishFailed_one": "{{count}} image échouée",
     "publishFailed_other": "{{count}} images échouées",
     "refresh": "Actualiser les galeries",
+    "status": "Statut",
+    "statusActive": "Active",
+    "statusDraft": "Brouillon",
     "title": "Publication PicPortal"
   },
   "settings": {

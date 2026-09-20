@@ -1480,11 +1480,22 @@
     }
   },
   "picportal": {
+    "accessMode": "Mode d'accés",
+    "accessModeLink": "Enllaç",
+    "accessModePassword": "Contrasenya",
     "brand": "PicPortal Editor",
     "chooseExports": "Tria les imatges exportades",
+    "clientEmail": "Correu del client",
+    "clientName": "Nom del client",
     "createGallery": "Crea una galeria",
     "email": "Correu electrònic de PicPortal",
+    "faceFilter": "Filtratge facial",
+    "faceFilterDisabled": "Cares desactivades",
+    "faceFilterEnabled": "Cares activades",
     "galleryCreated": "Galeria creada",
+    "galleryType": "Tipus de galeria",
+    "galleryTypeClient": "Client",
+    "galleryTypeEvent": "Esdeveniment",
     "loggedIn": "Connectat a PicPortal",
     "loggedOut": "Desconnectat",
     "login": "Connecta",
@@ -1499,6 +1510,9 @@
     "publishFailed_one": "{{count}} imatge fallida",
     "publishFailed_other": "{{count}} imatges fallides",
     "refresh": "Actualitza les galeries",
+    "status": "Estat",
+    "statusActive": "Activa",
+    "statusDraft": "Esborrany",
     "title": "Publicació a PicPortal"
   },
   "settings": {

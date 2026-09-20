@@ -1543,11 +1543,22 @@
     }
   },
   "picportal": {
+    "accessMode": "Режим доступа",
+    "accessModeLink": "Ссылка",
+    "accessModePassword": "Пароль",
     "brand": "PicPortal Editor",
     "chooseExports": "Выбрать экспортированные изображения",
+    "clientEmail": "Электронная почта клиента",
+    "clientName": "Имя клиента",
     "createGallery": "Создать галерею",
     "email": "Электронная почта PicPortal",
+    "faceFilter": "Фильтрация лиц",
+    "faceFilterDisabled": "Лица отключены",
+    "faceFilterEnabled": "Лица включены",
     "galleryCreated": "Галерея создана",
+    "galleryType": "Тип галереи",
+    "galleryTypeClient": "Клиент",
+    "galleryTypeEvent": "Событие",
     "loggedIn": "Подключено к PicPortal",
     "loggedOut": "Отключено",
     "login": "Подключить",
@@ -1564,6 +1575,9 @@
     "publishFailed_one": "{{count}} изображение не загружено",
     "publishFailed_other": "{{count}} изображения не загружено",
     "refresh": "Обновить галереи",
+    "status": "Статус",
+    "statusActive": "Активна",
+    "statusDraft": "Черновик",
     "title": "Публикация PicPortal"
   },
   "settings": {

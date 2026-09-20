@@ -1476,11 +1476,22 @@
     }
   },
   "picportal": {
+    "accessMode": "存取方式",
+    "accessModeLink": "連結",
+    "accessModePassword": "密碼",
     "brand": "PicPortal Editor",
     "chooseExports": "選擇已匯出的影像",
+    "clientEmail": "客戶電子郵件",
+    "clientName": "客戶姓名",
     "createGallery": "建立圖庫",
     "email": "PicPortal 電子郵件",
+    "faceFilter": "人臉篩選",
+    "faceFilterDisabled": "停用人臉",
+    "faceFilterEnabled": "啟用人臉",
     "galleryCreated": "圖庫已建立",
+    "galleryType": "圖庫類型",
+    "galleryTypeClient": "客戶",
+    "galleryTypeEvent": "活動",
     "loggedIn": "已連線至 PicPortal",
     "loggedOut": "已中斷連線",
     "login": "連線",
@@ -1491,6 +1502,9 @@
     "publishCompleted_other": "已上傳 {{count}} 張",
     "publishFailed_other": "{{count}} 張失敗",
     "refresh": "重新整理圖庫",
+    "status": "狀態",
+    "statusActive": "已啟用",
+    "statusDraft": "草稿",
     "title": "PicPortal 發布"
   },
   "settings": {

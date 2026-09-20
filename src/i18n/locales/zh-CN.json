@@ -1476,11 +1476,22 @@
     }
   },
   "picportal": {
+    "accessMode": "访问方式",
+    "accessModeLink": "链接",
+    "accessModePassword": "密码",
     "brand": "PicPortal Editor",
     "chooseExports": "选择已导出的图片",
+    "clientEmail": "客户邮箱",
+    "clientName": "客户姓名",
     "createGallery": "创建图库",
     "email": "PicPortal 邮箱",
+    "faceFilter": "人脸筛选",
+    "faceFilterDisabled": "停用人脸",
+    "faceFilterEnabled": "启用人脸",
     "galleryCreated": "图库已创建",
+    "galleryType": "图库类型",
+    "galleryTypeClient": "客户",
+    "galleryTypeEvent": "活动",
     "loggedIn": "已连接到 PicPortal",
     "loggedOut": "已断开连接",
     "login": "连接",
@@ -1491,6 +1502,9 @@
     "publishCompleted_other": "已上传 {{count}} 张",
     "publishFailed_other": "{{count}} 张失败",
     "refresh": "刷新图库",
+    "status": "状态",
+    "statusActive": "已启用",
+    "statusDraft": "草稿",
     "title": "PicPortal 发布"
   },
   "settings": {

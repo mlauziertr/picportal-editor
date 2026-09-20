@@ -1476,11 +1476,22 @@
     }
   },
   "picportal": {
+    "accessMode": "접근 방식",
+    "accessModeLink": "링크",
+    "accessModePassword": "비밀번호",
     "brand": "PicPortal Editor",
     "chooseExports": "내보낸 이미지 선택",
+    "clientEmail": "고객 이메일",
+    "clientName": "고객 이름",
     "createGallery": "갤러리 만들기",
     "email": "PicPortal 이메일",
+    "faceFilter": "얼굴 필터링",
+    "faceFilterDisabled": "얼굴 비활성화",
+    "faceFilterEnabled": "얼굴 활성화",
     "galleryCreated": "갤러리가 생성되었습니다",
+    "galleryType": "갤러리 유형",
+    "galleryTypeClient": "고객",
+    "galleryTypeEvent": "이벤트",
     "loggedIn": "PicPortal에 연결됨",
     "loggedOut": "연결 해제됨",
     "login": "연결",
@@ -1491,6 +1502,9 @@
     "publishCompleted_other": "{{count}}개 업로드",
     "publishFailed_other": "{{count}}개 실패",
     "refresh": "갤러리 새로 고침",
+    "status": "상태",
+    "statusActive": "활성",
+    "statusDraft": "초안",
     "title": "PicPortal 게시"
   },
   "settings": {

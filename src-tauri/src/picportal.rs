@@ -283,6 +283,19 @@ struct CreatedGalleryIdentity {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateGalleryInput {
+    title: String,
+    gallery_type: String,
+    access_mode: String,
+    status: String,
+    face_filter_enabled: bool,
+    client_name: Option<String>,
+    client_email: Option<String>,
+    password: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct UploadSession {
     upload_id: String,
     offset: u64,
@@ -469,31 +482,11 @@ pub async fn picportal_galleries(
 
 #[tauri::command]
 pub async fn picportal_create_gallery(
-    input: serde_json::Value,
+    input: CreateGalleryInput,
     state: State<'_, PicPortalState>,
 ) -> Result<GallerySummary, String> {
     let session = current_session(&state)?;
-    let title = input
-        .get("title")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("")
-        .trim();
-    if title.is_empty() {
-        return Err("gallery title is required".to_owned());
-    }
-    let payload = serde_json::json!({
-        "title": title,
-        "clientName": input.get("clientName").and_then(serde_json::Value::as_str).unwrap_or(""),
-        "clientEmail": input.get("clientEmail").and_then(serde_json::Value::as_str).unwrap_or(""),
-        "eventDate": input.get("eventDate").and_then(serde_json::Value::as_str).unwrap_or(""),
-        "location": input.get("location").and_then(serde_json::Value::as_str).unwrap_or(""),
-        "galleryType": input.get("galleryType").and_then(serde_json::Value::as_str).unwrap_or("event"),
-        "accessMode": input.get("accessMode").and_then(serde_json::Value::as_str).unwrap_or("link"),
-        "password": input.get("password").and_then(serde_json::Value::as_str).unwrap_or(""),
-        "status": input.get("status").and_then(serde_json::Value::as_str).unwrap_or("active"),
-        "selectionLimit": input.get("selectionLimit").cloned().unwrap_or(serde_json::Value::Null),
-        "faceFilterEnabled": input.get("faceFilterEnabled").and_then(serde_json::Value::as_bool).unwrap_or(true),
-    });
+    let (title, face_filter_enabled, payload) = create_gallery_payload(input)?;
     let response = session
         .client
         .post(endpoint(&session.base_url, "galleries"))
@@ -510,14 +503,63 @@ pub async fn picportal_create_gallery(
         .gallery;
     Ok(GallerySummary {
         id: created.id,
-        title: title.to_owned(),
+        title,
         slug: created.slug,
         photo_count: 0,
-        face_filter_enabled: input
-            .get("faceFilterEnabled")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true),
+        face_filter_enabled,
     })
+}
+
+fn create_gallery_payload(
+    input: CreateGalleryInput,
+) -> Result<(String, bool, serde_json::Value), String> {
+    let title = input.title.trim().to_owned();
+    if title.is_empty() {
+        return Err("gallery title is required".to_owned());
+    }
+    if !matches!(input.gallery_type.as_str(), "event" | "client") {
+        return Err("gallery type must be event or client".to_owned());
+    }
+    if !matches!(input.access_mode.as_str(), "link" | "password") {
+        return Err("gallery access mode must be link or password".to_owned());
+    }
+    if !matches!(input.status.as_str(), "active" | "draft") {
+        return Err("gallery status must be active or draft".to_owned());
+    }
+
+    let mut client_name = String::new();
+    let mut client_email = String::new();
+    if input.gallery_type == "client" {
+        client_name = input.client_name.unwrap_or_default().trim().to_owned();
+        client_email = input.client_email.unwrap_or_default().trim().to_owned();
+        if client_name.is_empty() || client_email.is_empty() {
+            return Err("client galleries require a client name and email".to_owned());
+        }
+    }
+
+    let mut password = String::new();
+    if input.access_mode == "password" {
+        password = input.password.unwrap_or_default();
+        if password.trim().is_empty() {
+            return Err("password-protected galleries require a password".to_owned());
+        }
+    }
+
+    let face_filter_enabled = input.face_filter_enabled;
+    let payload = serde_json::json!({
+        "title": title,
+        "clientName": client_name,
+        "clientEmail": client_email,
+        "eventDate": "",
+        "location": "",
+        "galleryType": input.gallery_type,
+        "accessMode": input.access_mode,
+        "password": password,
+        "status": input.status,
+        "selectionLimit": serde_json::Value::Null,
+        "faceFilterEnabled": face_filter_enabled,
+    });
+    Ok((title, face_filter_enabled, payload))
 }
 
 #[tauri::command]
@@ -1386,6 +1428,74 @@ mod tests {
             photo_count: 0,
             face_filter_enabled,
         }
+    }
+
+    #[test]
+    fn gallery_creation_payload_uses_only_explicit_policy() {
+        let (_, face_filter_enabled, event_payload) = create_gallery_payload(CreateGalleryInput {
+            title: " Event ".into(),
+            gallery_type: "event".into(),
+            access_mode: "link".into(),
+            status: "draft".into(),
+            face_filter_enabled: false,
+            client_name: Some("ignored client".into()),
+            client_email: Some("ignored@example.com".into()),
+            password: Some("ignored password".into()),
+        })
+        .expect("event gallery payload");
+        assert!(!face_filter_enabled);
+        assert_eq!(event_payload["clientName"], "");
+        assert_eq!(event_payload["clientEmail"], "");
+        assert_eq!(event_payload["password"], "");
+        assert_eq!(event_payload["status"], "draft");
+
+        let (_, face_filter_enabled, client_payload) = create_gallery_payload(CreateGalleryInput {
+            title: "Client".into(),
+            gallery_type: "client".into(),
+            access_mode: "password".into(),
+            status: "active".into(),
+            face_filter_enabled: true,
+            client_name: Some("Client Name".into()),
+            client_email: Some("client@example.com".into()),
+            password: Some("secret".into()),
+        })
+        .expect("client gallery payload");
+        assert!(face_filter_enabled);
+        assert_eq!(client_payload["clientName"], "Client Name");
+        assert_eq!(client_payload["clientEmail"], "client@example.com");
+        assert_eq!(client_payload["password"], "secret");
+
+        let client_error = create_gallery_payload(CreateGalleryInput {
+            title: "Client".into(),
+            gallery_type: "client".into(),
+            access_mode: "link".into(),
+            status: "active".into(),
+            face_filter_enabled: true,
+            client_name: None,
+            client_email: None,
+            password: None,
+        })
+        .expect_err("client identity is required");
+        assert_eq!(
+            client_error,
+            "client galleries require a client name and email"
+        );
+
+        let password_error = create_gallery_payload(CreateGalleryInput {
+            title: "Client".into(),
+            gallery_type: "client".into(),
+            access_mode: "password".into(),
+            status: "active".into(),
+            face_filter_enabled: true,
+            client_name: Some("Client Name".into()),
+            client_email: Some("client@example.com".into()),
+            password: Some(" ".into()),
+        })
+        .expect_err("password is required");
+        assert_eq!(
+            password_error,
+            "password-protected galleries require a password"
+        );
     }
 
     #[test]

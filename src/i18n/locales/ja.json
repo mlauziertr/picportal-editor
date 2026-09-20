@@ -1476,11 +1476,22 @@
     }
   },
   "picportal": {
+    "accessMode": "アクセス方法",
+    "accessModeLink": "リンク",
+    "accessModePassword": "パスワード",
     "brand": "PicPortal Editor",
     "chooseExports": "書き出した画像を選択",
+    "clientEmail": "クライアントのメールアドレス",
+    "clientName": "クライアント名",
     "createGallery": "ギャラリーを作成",
     "email": "PicPortal メールアドレス",
+    "faceFilter": "顔フィルター",
+    "faceFilterDisabled": "顔を無効化",
+    "faceFilterEnabled": "顔を有効化",
     "galleryCreated": "ギャラリーを作成しました",
+    "galleryType": "ギャラリーの種類",
+    "galleryTypeClient": "クライアント",
+    "galleryTypeEvent": "イベント",
     "loggedIn": "PicPortal に接続しました",
     "loggedOut": "切断しました",
     "login": "接続",
@@ -1491,6 +1502,9 @@
     "publishCompleted_other": "{{count}} 件アップロード",
     "publishFailed_other": "{{count}} 件失敗",
     "refresh": "ギャラリーを更新",
+    "status": "ステータス",
+    "statusActive": "有効",
+    "statusDraft": "下書き",
     "title": "PicPortal 公開"
   },
   "settings": {

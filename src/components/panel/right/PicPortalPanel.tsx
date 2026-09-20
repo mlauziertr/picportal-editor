@@ -27,6 +27,11 @@ interface PublishResult {
   items: Array<{ path: string; state: string; error?: string | null }>;
 }
 
+type GalleryType = '' | 'event' | 'client';
+type GalleryAccessMode = '' | 'link' | 'password';
+type GalleryStatus = '' | 'active' | 'draft';
+type FaceFilterPolicy = '' | 'enabled' | 'disabled';
+
 export default function PicPortalPanel() {
   const { t } = useTranslation();
   const [email, setEmail] = useState('');
@@ -36,6 +41,13 @@ export default function PicPortalPanel() {
   const [galleryId, setGalleryId] = useState('');
   const [paths, setPaths] = useState<string[]>([]);
   const [newGalleryTitle, setNewGalleryTitle] = useState('');
+  const [newGalleryType, setNewGalleryType] = useState<GalleryType>('');
+  const [newGalleryAccessMode, setNewGalleryAccessMode] = useState<GalleryAccessMode>('');
+  const [newGalleryStatus, setNewGalleryStatus] = useState<GalleryStatus>('');
+  const [newGalleryFaceFilter, setNewGalleryFaceFilter] = useState<FaceFilterPolicy>('');
+  const [newGalleryClientName, setNewGalleryClientName] = useState('');
+  const [newGalleryClientEmail, setNewGalleryClientEmail] = useState('');
+  const [newGalleryPassword, setNewGalleryPassword] = useState('');
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -89,19 +101,39 @@ export default function PicPortalPanel() {
   }, [t]);
 
   const createGallery = useCallback(async () => {
-    if (!newGalleryTitle.trim()) return;
+    if (
+      !newGalleryTitle.trim() ||
+      !newGalleryType ||
+      !newGalleryAccessMode ||
+      !newGalleryStatus ||
+      !newGalleryFaceFilter ||
+      (newGalleryType === 'client' && (!newGalleryClientName.trim() || !newGalleryClientEmail.trim())) ||
+      (newGalleryAccessMode === 'password' && !newGalleryPassword.trim())
+    ) {
+      return;
+    }
     setBusy(true);
     try {
       const gallery = await invoke<GallerySummary>(Invokes.PicPortalCreateGallery, {
         input: {
           title: newGalleryTitle.trim(),
-          galleryType: 'event',
-          accessMode: 'link',
-          status: 'active',
-          faceFilterEnabled: true,
+          galleryType: newGalleryType,
+          accessMode: newGalleryAccessMode,
+          status: newGalleryStatus,
+          faceFilterEnabled: newGalleryFaceFilter === 'enabled',
+          clientName: newGalleryType === 'client' ? newGalleryClientName.trim() : null,
+          clientEmail: newGalleryType === 'client' ? newGalleryClientEmail.trim() : null,
+          password: newGalleryAccessMode === 'password' ? newGalleryPassword : null,
         },
       });
       setNewGalleryTitle('');
+      setNewGalleryType('');
+      setNewGalleryAccessMode('');
+      setNewGalleryStatus('');
+      setNewGalleryFaceFilter('');
+      setNewGalleryClientName('');
+      setNewGalleryClientEmail('');
+      setNewGalleryPassword('');
       await refreshGalleries();
       setGalleryId(gallery.id);
       setStatus(t('picportal.galleryCreated', { defaultValue: 'Gallery created' }));
@@ -110,7 +142,27 @@ export default function PicPortalPanel() {
     } finally {
       setBusy(false);
     }
-  }, [newGalleryTitle, refreshGalleries, t]);
+  }, [
+    newGalleryAccessMode,
+    newGalleryClientEmail,
+    newGalleryClientName,
+    newGalleryFaceFilter,
+    newGalleryPassword,
+    newGalleryStatus,
+    newGalleryTitle,
+    newGalleryType,
+    refreshGalleries,
+    t,
+  ]);
+
+  const canCreateGallery =
+    Boolean(newGalleryTitle.trim()) &&
+    Boolean(newGalleryType) &&
+    Boolean(newGalleryAccessMode) &&
+    Boolean(newGalleryStatus) &&
+    Boolean(newGalleryFaceFilter) &&
+    (newGalleryType !== 'client' || Boolean(newGalleryClientName.trim() && newGalleryClientEmail.trim())) &&
+    (newGalleryAccessMode !== 'password' || Boolean(newGalleryPassword.trim()));
 
   const publish = useCallback(async () => {
     if (!galleryId || paths.length === 0) return;
@@ -197,20 +249,107 @@ export default function PicPortalPanel() {
               <RefreshCw size={16} />
             </button>
           </div>
-          <div className="flex gap-2">
+          <div className="space-y-2 rounded-md border border-border-color p-2">
             <input
-              className="min-w-0 flex-1 rounded-md bg-bg-primary border border-border-color px-2 py-1 text-sm"
+              className="w-full rounded-md bg-bg-primary border border-border-color px-2 py-1 text-sm"
               value={newGalleryTitle}
               onChange={(event) => setNewGalleryTitle(event.target.value)}
               placeholder={t('picportal.newGallery', { defaultValue: 'New gallery title' })}
             />
+            <div className="grid grid-cols-2 gap-2">
+              <select
+                className="min-w-0 rounded-md bg-bg-primary border border-border-color px-2 py-1 text-sm"
+                value={newGalleryType}
+                onChange={(event) => {
+                  const value = event.target.value as GalleryType;
+                  setNewGalleryType(value);
+                  if (value !== 'client') {
+                    setNewGalleryClientName('');
+                    setNewGalleryClientEmail('');
+                  }
+                }}
+              >
+                <option value="" disabled>
+                  {t('picportal.galleryType', { defaultValue: 'Gallery type' })}
+                </option>
+                <option value="event">{t('picportal.galleryTypeEvent', { defaultValue: 'Event' })}</option>
+                <option value="client">{t('picportal.galleryTypeClient', { defaultValue: 'Client' })}</option>
+              </select>
+              <select
+                className="min-w-0 rounded-md bg-bg-primary border border-border-color px-2 py-1 text-sm"
+                value={newGalleryAccessMode}
+                onChange={(event) => {
+                  const value = event.target.value as GalleryAccessMode;
+                  setNewGalleryAccessMode(value);
+                  if (value !== 'password') setNewGalleryPassword('');
+                }}
+              >
+                <option value="" disabled>
+                  {t('picportal.accessMode', { defaultValue: 'Access mode' })}
+                </option>
+                <option value="link">{t('picportal.accessModeLink', { defaultValue: 'Link' })}</option>
+                <option value="password">{t('picportal.accessModePassword', { defaultValue: 'Password' })}</option>
+              </select>
+              <select
+                className="min-w-0 rounded-md bg-bg-primary border border-border-color px-2 py-1 text-sm"
+                value={newGalleryStatus}
+                onChange={(event) => setNewGalleryStatus(event.target.value as GalleryStatus)}
+              >
+                <option value="" disabled>
+                  {t('picportal.status', { defaultValue: 'Status' })}
+                </option>
+                <option value="active">{t('picportal.statusActive', { defaultValue: 'Active' })}</option>
+                <option value="draft">{t('picportal.statusDraft', { defaultValue: 'Draft' })}</option>
+              </select>
+              <select
+                className="min-w-0 rounded-md bg-bg-primary border border-border-color px-2 py-1 text-sm"
+                value={newGalleryFaceFilter}
+                onChange={(event) => setNewGalleryFaceFilter(event.target.value as FaceFilterPolicy)}
+              >
+                <option value="" disabled>
+                  {t('picportal.faceFilter', { defaultValue: 'Face filtering' })}
+                </option>
+                <option value="enabled">{t('picportal.faceFilterEnabled', { defaultValue: 'Faces enabled' })}</option>
+                <option value="disabled">
+                  {t('picportal.faceFilterDisabled', { defaultValue: 'Faces disabled' })}
+                </option>
+              </select>
+            </div>
+            {newGalleryType === 'client' && (
+              <div className="grid grid-cols-2 gap-2">
+                <input
+                  className="min-w-0 rounded-md bg-bg-primary border border-border-color px-2 py-1 text-sm"
+                  value={newGalleryClientName}
+                  onChange={(event) => setNewGalleryClientName(event.target.value)}
+                  placeholder={t('picportal.clientName', { defaultValue: 'Client name' })}
+                />
+                <input
+                  className="min-w-0 rounded-md bg-bg-primary border border-border-color px-2 py-1 text-sm"
+                  type="email"
+                  value={newGalleryClientEmail}
+                  onChange={(event) => setNewGalleryClientEmail(event.target.value)}
+                  placeholder={t('picportal.clientEmail', { defaultValue: 'Client email' })}
+                />
+              </div>
+            )}
+            {newGalleryAccessMode === 'password' && (
+              <input
+                className="w-full rounded-md bg-bg-primary border border-border-color px-2 py-1 text-sm"
+                type="password"
+                autoComplete="new-password"
+                value={newGalleryPassword}
+                onChange={(event) => setNewGalleryPassword(event.target.value)}
+                placeholder={t('picportal.password', { defaultValue: 'Password' })}
+              />
+            )}
             <button
               onClick={createGallery}
-              disabled={busy || !newGalleryTitle.trim()}
-              className="p-2 rounded-md hover:bg-surface"
+              disabled={busy || !canCreateGallery}
+              className="flex w-full items-center justify-center gap-2 rounded-md p-2 hover:bg-surface disabled:opacity-50"
               data-tooltip={t('picportal.createGallery', { defaultValue: 'Create gallery' })}
             >
               <FolderPlus size={16} />
+              {t('picportal.createGallery', { defaultValue: 'Create gallery' })}
             </button>
           </div>
           <Button onClick={chooseExports} disabled={busy}>
