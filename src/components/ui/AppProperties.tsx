@@ -398,23 +398,18 @@ export interface WaveformData {
   width: number;
 }
 
-export interface StarMapping {
-  retained: number;
-  review: number;
-  duplicate: number;
-  defect: number;
-  unknown: number;
+export interface CullingSettings {
+  selectionAmount: 'extreme' | 'few' | 'standard' | 'more';
+  blurSeverity: 'lenient' | 'moderate' | 'strict';
+  detectDuplicates: boolean;
+  detectBlurry: boolean;
+  detectClosedEyes: boolean;
+  detectHighlights: boolean;
+  autoAssignStars: boolean;
+  preserveExistingDecisions: boolean;
 }
 
-export interface CullingSettings {
-  similarityThreshold: number;
-  blurThreshold: number;
-  groupSimilar: boolean;
-  filterBlurry: boolean;
-  analyzeEyes: boolean;
-  autoAssignStars: boolean;
-  starMapping: StarMapping;
-}
+export type CullingCategory = 'selected' | 'highlights' | 'duplicate' | 'blurred' | 'closedEyes' | 'unrated';
 
 export interface ImageAnalysisResult {
   path: string;
@@ -427,7 +422,11 @@ export interface ImageAnalysisResult {
   eyeState: 'open' | 'closed' | 'notApplicable' | 'unknown';
   eyeConfidence: number;
   eyeMethod: string;
-  category: 'retained' | 'review' | 'duplicate' | 'defect' | string;
+  faceCount: number;
+  faceThumbnails: string[];
+  qualityMethod: string;
+  reasons: string[];
+  category: CullingCategory | string;
   suggestedRating: number;
 }
 
@@ -438,15 +437,25 @@ export interface CullGroup {
 
 export interface CullingSuggestions {
   similarGroups: CullGroup[];
-  blurryImages: ImageAnalysisResult[];
-  retainedImages: ImageAnalysisResult[];
-  reviewImages: ImageAnalysisResult[];
+  selectedImages: ImageAnalysisResult[];
+  highlightImages: ImageAnalysisResult[];
   duplicateImages: ImageAnalysisResult[];
-  defectImages: ImageAnalysisResult[];
-  unknownImages: ImageAnalysisResult[];
+  blurryImages: ImageAnalysisResult[];
+  closedEyeImages: ImageAnalysisResult[];
+  unratedImages: ImageAnalysisResult[];
+  results: ImageAnalysisResult[];
   failedPaths: string[];
   starAssignments: Record<string, number>;
+  colorAssignments: Record<string, string | null>;
   eyeAnalysisStatus: string;
+}
+
+export interface CullingPersistenceSummary {
+  succeededRatings: Record<string, number>;
+  succeededColors: Record<string, string | null>;
+  failedRatings: Array<{ rating: number; paths: string[]; error: unknown }>;
+  failedColors: Array<{ color: string | null; paths: string[]; error: unknown }>;
+  skippedPaths: string[];
 }
 
 interface KeybindHandler {

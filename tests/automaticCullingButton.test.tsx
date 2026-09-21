@@ -20,7 +20,7 @@ import {
 import { Status } from '../src/components/ui/ExportImportProperties.tsx';
 
 test('automatic culling toolbar action opens options without starting analysis', () => {
-  const state = createAutomaticCullingModalState(['one.jpg', 'two.jpg']);
+  const state = createAutomaticCullingModalState(['one.jpg', 'two.jpg'], '/synthetic-fixtures');
 
   assert.deepEqual(state, {
     isOpen: true,
@@ -28,46 +28,59 @@ test('automatic culling toolbar action opens options without starting analysis',
     suggestions: null,
     error: null,
     pathsToCull: ['one.jpg', 'two.jpg'],
+    folderPath: '/synthetic-fixtures',
   });
 
   let openedState: ReturnType<typeof createAutomaticCullingModalState> | null = null;
-  openAutomaticCullingOptions(['one.jpg', 'two.jpg'], (nextState) => {
-    openedState = nextState;
-  });
-  assert.deepEqual(openedState, state);
+  openAutomaticCullingOptions(
+    ['/synthetic-fixtures/one.jpg', '/synthetic-fixtures/two.jpg'],
+    '/synthetic-fixtures',
+    (nextState) => {
+      openedState = nextState;
+    },
+  );
+  assert.deepEqual(
+    openedState,
+    createAutomaticCullingModalState(
+      ['/synthetic-fixtures/one.jpg', '/synthetic-fixtures/two.jpg'],
+      '/synthetic-fixtures',
+    ),
+  );
 });
 
-test('automatic culling toolbar action does nothing until two photos are selected', () => {
-  let openCount = 0;
-  openAutomaticCullingOptions(['one.jpg'], () => {
-    openCount += 1;
+test('automatic culling toolbar action opens for one photo and uses the folder scope', () => {
+  let openedPaths: string[] = [];
+  openAutomaticCullingOptions(['/folder/one.jpg'], '/folder', (state) => {
+    openedPaths = state.pathsToCull;
   });
 
-  assert.equal(openCount, 0);
+  assert.deepEqual(openedPaths, ['/folder/one.jpg']);
 });
 
 test('automatic culling toolbar action is visible and explains an unavailable selection', () => {
   const markup = renderToStaticMarkup(
     <AutomaticCullingButton
       label="Automatic culling"
-      unavailableLabel="Select at least two photos to use automatic culling"
-      selectedPaths={['one.jpg']}
+      unavailableLabel="Open a folder to use automatic culling"
+      folderPath={null}
+      folderPaths={['one.jpg']}
       onOpen={() => undefined}
     />,
   );
 
   assert.match(markup, />Automatic culling</);
   assert.match(markup, /disabled=""/);
-  assert.match(markup, /aria-label="Select at least two photos to use automatic culling"/);
-  assert.match(markup, /data-tooltip="Select at least two photos to use automatic culling"/);
+  assert.match(markup, /aria-label="Open a folder to use automatic culling"/);
+  assert.match(markup, /data-tooltip="Open a folder to use automatic culling"/);
 });
 
-test('automatic culling toolbar action is enabled for the current multi-selection', () => {
+test('automatic culling toolbar action is enabled for the current folder regardless of selection', () => {
   const markup = renderToStaticMarkup(
     <AutomaticCullingButton
       label="Automatic culling"
-      unavailableLabel="Select at least two photos to use automatic culling"
-      selectedPaths={['one.jpg', 'two.jpg']}
+      unavailableLabel="Open a folder to use automatic culling"
+      folderPath="/synthetic-fixtures"
+      folderPaths={['/synthetic-fixtures/one.jpg']}
       onOpen={() => undefined}
     />,
   );
@@ -101,7 +114,7 @@ test('automatic culling toolbar labels resolve locally in every locale', async (
   }
 });
 
-test('library top toolbar renders the localized automatic culling action for the current selection', async () => {
+test('library top toolbar renders the localized automatic culling action for the current folder', async () => {
   const resource = JSON.parse(readFileSync(join(process.cwd(), 'src/i18n/locales/en.json'), 'utf8'));
   const i18n = createInstance();
   await i18n.init({ lng: 'en', resources: { en: { translation: resource } } });
@@ -113,8 +126,10 @@ test('library top toolbar renders the localized automatic culling action for the
         aiModelDownloadStatus={null}
         appSettings={{ lastRootPath: null, theme: Theme.Dark, libraryDisplayMode: LibraryDisplayMode.Grid }}
         currentFolderPath="/synthetic-fixtures"
+        isAlbumView={false}
         groupBadgeInfo={null}
         imageList={[]}
+        folderPaths={['/synthetic-fixtures/one.jpg', '/synthetic-fixtures/two.jpg']}
         imageRatings={{}}
         importState={{ errorMessage: '', status: Status.Idle }}
         indexingProgress={{ current: 0, total: 0 }}

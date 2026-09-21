@@ -363,11 +363,10 @@ function App() {
 
   const {
     handleRate,
-    handleApplyRatings,
+    handleApplyCulling,
     handleClearSelection,
     handleLibraryImageSingleClick,
     handleImageClick,
-    handleSetColorLabel,
     refreshAllFolderTrees,
     handleTogglePinFolder,
     handleCreateAlbumItem,
@@ -1030,9 +1029,7 @@ function App() {
           handleRenameFolder={handleRenameFolder}
           handleSaveRename={handleSaveRename}
           handleStartImport={handleStartImport}
-          handleSetColorLabel={handleSetColorLabel}
-          handleRate={handleRate}
-          handleApplyRatings={handleApplyRatings}
+          handleApplyCulling={handleApplyCulling}
           executeDelete={executeDelete}
           handleSaveCollage={handleSaveCollage}
           handleCreateAlbumItem={handleCreateAlbumItem}

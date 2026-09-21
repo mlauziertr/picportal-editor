@@ -439,7 +439,6 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
       const copyLabel = t('contextMenus.thumbnail.copyImage', { count: selectionCount });
       const autoAdjustLabel = t('contextMenus.thumbnail.autoAdjust', { count: selectionCount });
       const renameLabel = t('contextMenus.thumbnail.renameImage', { count: selectionCount });
-      const cullLabel = t('contextMenus.thumbnail.cullImage', { count: selectionCount });
       const collageLabel = t('contextMenus.thumbnail.collage', { count: selectionCount });
       const stitchLabel = t('contextMenus.editor.stitchPanorama');
       const conversionLabel = t('contextMenus.thumbnail.convertNegative', { count: selectionCount });
@@ -609,21 +608,6 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
                 setUI({ collageModalState: { isOpen: true, sourceImages: imagesForCollage } });
               },
               disabled: selectionCount === 0 || selectionCount > 9,
-            },
-            {
-              label: cullLabel,
-              icon: Users,
-              onClick: () =>
-                setUI({
-                  cullingModalState: {
-                    isOpen: true,
-                    progress: null,
-                    suggestions: null,
-                    error: null,
-                    pathsToCull: finalSelection,
-                  },
-                }),
-              disabled: selectionCount < 2,
             },
           ],
         },

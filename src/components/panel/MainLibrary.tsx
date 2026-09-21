@@ -44,6 +44,7 @@ import SettingsPanel from './SettingsPanel';
 import LibraryGrid from './library/LibraryGrid';
 import { SearchInput, ViewOptionsDropdown } from './library/LibraryHeader';
 import AutomaticCullingButton from './library/AutomaticCullingButton';
+import CullingResultsPanel from './library/CullingResultsPanel';
 
 export interface ColumnWidths {
   thumbnail: number;
@@ -62,8 +63,10 @@ interface MainLibraryProps {
   aiModelDownloadStatus: string | null;
   appSettings: AppSettings | null;
   currentFolderPath: string | null;
+  isAlbumView: boolean;
   groupBadgeInfo: Map<GroupId, GroupBadgeInfo> | null;
   imageList: Array<ImageFile>;
+  folderPaths: Array<string>;
   imageRatings: Record<string, number>;
   importState: ImportState;
   indexingProgress: Progress;
@@ -164,6 +167,7 @@ function DisplayModeSwitch({ displayMode, setDisplayMode, t }: DisplayModeSwitch
 export default function MainLibrary(props: MainLibraryProps) {
   const { t } = useTranslation();
   const setUI = useUIStore((state) => state.setUI);
+  const cullingResultsState = useUIStore((state) => state.cullingResultsState);
   const [appVersion, setAppVersion] = useState('');
   const [isUpdateAvailable, setIsUpdateAvailable] = useState(false);
   const [latestVersion, setLatestVersion] = useState('');
@@ -184,12 +188,6 @@ export default function MainLibrary(props: MainLibraryProps) {
   };
 
   const searchCriteria = useLibraryStore((state) => state.searchCriteria);
-  const cullingSelection =
-    props.multiSelectedPaths.length > 0
-      ? props.multiSelectedPaths
-      : props.activePath
-        ? [props.activePath]
-        : [];
 
   const translatedRatingFilterOptions = useMemo(
     () => [
@@ -277,6 +275,14 @@ export default function MainLibrary(props: MainLibraryProps) {
       setIsBusyLoaderMounted(true);
     }
   }, [isBusyDelayed]);
+
+  useEffect(() => {
+    if (cullingResultsState.isOpen && cullingResultsState.folderPath !== props.currentFolderPath) {
+      setUI((state) => ({
+        cullingResultsState: { ...state.cullingResultsState, isOpen: false },
+      }));
+    }
+  }, [cullingResultsState.folderPath, cullingResultsState.isOpen, props.currentFolderPath, setUI]);
 
   useEffect(() => {
     const compareVersions = (v1: string, v2: string) => {
@@ -576,8 +582,14 @@ export default function MainLibrary(props: MainLibraryProps) {
           <AutomaticCullingButton
             label={t('library.culling.automaticCulling')}
             unavailableLabel={t('library.culling.automaticCullingUnavailable')}
-            selectedPaths={cullingSelection}
-            onOpen={(cullingModalState) => setUI({ cullingModalState })}
+            folderPath={props.isAlbumView ? null : props.currentFolderPath}
+            folderPaths={props.folderPaths}
+            onOpen={(cullingModalState) =>
+              setUI((state) => ({
+                cullingModalState,
+                cullingResultsState: { ...state.cullingResultsState, isOpen: false },
+              }))
+            }
           />
           <DisplayModeSwitch displayMode={libraryDisplayMode} setDisplayMode={setLibraryDisplayMode} t={t} />
 
@@ -669,6 +681,15 @@ export default function MainLibrary(props: MainLibraryProps) {
           <SlidersHorizontal className="h-12 w-12 mb-4 text-text-secondary" />
           <Text>{t('library.filters.noMatch')}</Text>
         </div>
+      )}
+      {cullingResultsState.isOpen && cullingResultsState.suggestions && (
+        <CullingResultsPanel
+          suggestions={cullingResultsState.suggestions}
+          persistence={cullingResultsState.persistence}
+          folderPath={cullingResultsState.folderPath}
+          initialSelectedPath={cullingResultsState.selectedPath}
+          onClose={() => setUI((state) => ({ cullingResultsState: { ...state.cullingResultsState, isOpen: false } }))}
+        />
       )}
       {props.isAndroid && (
         <Button

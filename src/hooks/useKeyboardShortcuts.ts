@@ -640,6 +640,14 @@ export const useKeyboardShortcuts = ({
         state.ui.denoiseModalState.isOpen ||
         state.ui.negativeModalState.isOpen;
 
+      if (state.ui.cullingResultsState.isOpen && event.code === 'Escape') {
+        event.preventDefault();
+        state.ui.setUI((currentState: any) => ({
+          cullingResultsState: { ...currentState.cullingResultsState, isOpen: false },
+        }));
+        return;
+      }
+
       if (isModalOpen) return;
 
       if (state.ui.isSettingsOpen) {

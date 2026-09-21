@@ -4,12 +4,24 @@ import { toast } from 'react-toastify';
 import { useLibraryStore } from '../store/useLibraryStore';
 import { useEditorStore } from '../store/useEditorStore';
 import { useUIStore } from '../store/useUIStore';
-import { Invokes, ImageFile, AlbumItem, Album, AlbumGroup } from '../components/ui/AppProperties';
+import {
+  Invokes,
+  ImageFile,
+  AlbumItem,
+  Album,
+  AlbumGroup,
+  CullingPersistenceSummary,
+  CullingSuggestions,
+} from '../components/ui/AppProperties';
 import { globalImageCache } from '../utils/ImageLRUCache';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { computeSortedLibrary } from './useSortedLibrary';
 import { expandGroupedPaths } from '../utils/imageGrouping';
-import { persistRatingAssignments } from '../utils/ratingPersistence';
+import {
+  persistBatchWithReconciliation,
+  persistColorAssignments,
+  persistRatingAssignments,
+} from '../utils/ratingPersistence';
 
 export function useLibraryActions(handleImageSelect?: (path: string, openInEditor?: boolean) => void) {
   const handleRate = useCallback((newRating: number, paths?: string[]) => {
@@ -61,6 +73,71 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
       throw new Error(details);
     }
   }, []);
+
+  const handleApplyCulling = useCallback(
+    async (suggestions: CullingSuggestions, preserveExistingDecisions = true): Promise<CullingPersistenceSummary> => {
+      const { imageList, imageRatings, setLibrary } = useLibraryStore.getState();
+      const protectedPaths = new Set(
+        preserveExistingDecisions
+          ? imageList
+              .filter((image) => {
+                const rating = imageRatings[image.path] ?? image.rating ?? 0;
+                const hasColor = (image.tags || []).some((tag) => tag.startsWith('color:'));
+                return rating > 0 || hasColor;
+              })
+              .map((image) => image.path)
+          : [],
+      );
+      const skippedPaths = suggestions.results.map((result) => result.path).filter((path) => protectedPaths.has(path));
+      const ratings = Object.fromEntries(
+        Object.entries(suggestions.starAssignments).filter(([path]) => !protectedPaths.has(path)),
+      );
+      const colors = Object.fromEntries(
+        Object.entries(suggestions.colorAssignments).filter(([path]) => !protectedPaths.has(path)),
+      );
+
+      // Ratings and labels share one sidecar file. Keep the two passes ordered so
+      // concurrent read/modify/write calls cannot discard the other decision.
+      const ratingResult = await persistRatingAssignments(ratings, (paths, rating) =>
+        persistBatchWithReconciliation(
+          paths,
+          () => invoke(Invokes.SetRatingForPaths, { paths, rating }),
+          (path) => invoke(Invokes.SetRatingForPaths, { paths: [path], rating }),
+        ),
+      );
+      const colorResult = await persistColorAssignments(colors, (paths, color) =>
+        persistBatchWithReconciliation(
+          paths,
+          () => invoke(Invokes.SetColorLabelForPaths, { paths, color }),
+          (path) => invoke(Invokes.SetColorLabelForPaths, { paths: [path], color }),
+        ),
+      );
+
+      if (Object.keys(ratingResult.succeeded).length > 0 || Object.keys(colorResult.succeeded).length > 0) {
+        setLibrary((state) => ({
+          imageRatings: { ...state.imageRatings, ...ratingResult.succeeded },
+          imageList: state.imageList.map((image) => {
+            if (colorResult.succeeded[image.path] === undefined) return image;
+            const color = colorResult.succeeded[image.path];
+            const otherTags = (image.tags || []).filter((tag) => !tag.startsWith('color:'));
+            return {
+              ...image,
+              tags: color ? [...otherTags, `color:${color}`] : otherTags.length > 0 ? otherTags : null,
+            };
+          }),
+        }));
+      }
+
+      return {
+        succeededRatings: ratingResult.succeeded,
+        succeededColors: colorResult.succeeded,
+        failedRatings: ratingResult.failures,
+        failedColors: colorResult.failures,
+        skippedPaths,
+      };
+    },
+    [],
+  );
 
   const handleSetColorLabel = useCallback(async (color: string | null, paths?: string[]) => {
     const { multiSelectedPaths, libraryActivePath, imageList, setLibrary } = useLibraryStore.getState();
@@ -460,6 +537,7 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
   return {
     handleRate,
     handleApplyRatings,
+    handleApplyCulling,
     handleSetColorLabel,
     handleTagsChanged,
     handleUpdateExif,

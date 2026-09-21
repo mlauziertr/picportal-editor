@@ -7,40 +7,48 @@ export interface AutomaticCullingModalState {
   progress: null;
   error: null;
   pathsToCull: string[];
+  folderPath: string | null;
 }
 
 interface AutomaticCullingButtonProps {
   label: string;
   unavailableLabel: string;
-  selectedPaths: string[];
+  folderPath: string | null;
+  folderPaths: string[];
   onOpen(state: AutomaticCullingModalState): void;
 }
 
-export function createAutomaticCullingModalState(selectedPaths: string[]): AutomaticCullingModalState {
+export function createAutomaticCullingModalState(
+  folderPaths: string[],
+  folderPath: string | null = null,
+): AutomaticCullingModalState {
   return {
     isOpen: true,
     suggestions: null,
     progress: null,
     error: null,
-    pathsToCull: [...selectedPaths],
+    pathsToCull: [...folderPaths],
+    folderPath,
   };
 }
 
 export function openAutomaticCullingOptions(
-  selectedPaths: string[],
+  folderPaths: string[],
+  folderPath: string | null,
   onOpen: (state: AutomaticCullingModalState) => void,
 ): void {
-  if (selectedPaths.length < 2) return;
-  onOpen(createAutomaticCullingModalState(selectedPaths));
+  if (!folderPath) return;
+  onOpen(createAutomaticCullingModalState(folderPaths, folderPath));
 }
 
 export default function AutomaticCullingButton({
   label,
   unavailableLabel,
-  selectedPaths,
+  folderPath,
+  folderPaths,
   onOpen,
 }: AutomaticCullingButtonProps) {
-  const isUnavailable = selectedPaths.length < 2;
+  const isUnavailable = !folderPath;
   const accessibleLabel = isUnavailable ? unavailableLabel : label;
 
   return (
@@ -48,7 +56,7 @@ export default function AutomaticCullingButton({
       <Button
         className="h-14 px-4 whitespace-nowrap"
         disabled={isUnavailable}
-        onClick={() => openAutomaticCullingOptions(selectedPaths, onOpen)}
+        onClick={() => openAutomaticCullingOptions(folderPaths, folderPath, onOpen)}
         aria-label={accessibleLabel}
         title={accessibleLabel}
       >

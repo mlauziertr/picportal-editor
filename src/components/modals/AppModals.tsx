@@ -18,7 +18,14 @@ import ConfirmModal from './ConfirmModal';
 import ImportSettingsModal from './ImportSettingsModal';
 import CullingModal from './CullingModal';
 import CollageModal from './CollageModal';
-import { AppSettings, AlbumItem, AlbumGroup } from '../ui/AppProperties';
+import {
+  AppSettings,
+  AlbumItem,
+  AlbumGroup,
+  CullingPersistenceSummary,
+  CullingSettings,
+  CullingSuggestions,
+} from '../ui/AppProperties';
 import { CopyPasteSettings } from '../../utils/adjustments';
 
 export interface AppModalsProps {
@@ -37,9 +44,10 @@ export interface AppModalsProps {
   handleRenameFolder: (newName: string) => Promise<void>;
   handleSaveRename: (nameTemplate: string) => Promise<void>;
   handleStartImport: (settings: any) => Promise<void>;
-  handleSetColorLabel: (color: string | null, paths?: string[]) => Promise<void>;
-  handleRate: (rating: number, paths?: string[]) => void;
-  handleApplyRatings: (ratings: Record<string, number>) => Promise<void>;
+  handleApplyCulling: (
+    suggestions: CullingSuggestions,
+    preserveExistingDecisions: boolean,
+  ) => Promise<CullingPersistenceSummary>;
   executeDelete: (paths: string[], options: any) => Promise<void>;
   handleSaveCollage: (base64Data: string, firstPath: string) => Promise<string>;
   handleCreateAlbumItem: (name: string, type: 'album' | 'group') => Promise<void>;
@@ -327,24 +335,42 @@ export default function AppModals(props: AppModalsProps) {
         isOpen={cullingModalState.isOpen}
         onClose={() =>
           setUI({
-            cullingModalState: { isOpen: false, progress: null, suggestions: null, error: null, pathsToCull: [] },
+            cullingModalState: {
+              isOpen: false,
+              progress: null,
+              suggestions: null,
+              error: null,
+              pathsToCull: [],
+              folderPath: null,
+            },
           })
         }
         progress={cullingModalState.progress}
         suggestions={cullingModalState.suggestions}
         error={cullingModalState.error}
         imagePaths={cullingModalState.pathsToCull}
-        thumbnails={thumbnails}
-        onApply={async (action, paths, ratings) => {
-          if (action === 'reject') {
-            props.handleSetColorLabel('red', paths);
-          } else if (action === 'rate_zero') {
-            props.handleRate(0, paths);
-          } else if (action === 'rate_suggestions' && ratings) {
-            await props.handleApplyRatings(ratings);
-          }
+        folderPath={cullingModalState.folderPath}
+        onComplete={async (completedSuggestions, settings: CullingSettings) => {
+          const persistence = await props.handleApplyCulling(completedSuggestions, settings.preserveExistingDecisions);
+          await props.refreshImageList().catch((refreshError) => {
+            console.error('Culling result reconciliation failed:', refreshError);
+          });
           setUI({
-            cullingModalState: { isOpen: false, progress: null, suggestions: null, error: null, pathsToCull: [] },
+            cullingModalState: {
+              isOpen: false,
+              progress: null,
+              suggestions: null,
+              error: null,
+              pathsToCull: [],
+              folderPath: null,
+            },
+            cullingResultsState: {
+              isOpen: true,
+              folderPath: cullingModalState.folderPath,
+              suggestions: completedSuggestions,
+              persistence,
+              selectedPath: completedSuggestions.results[0]?.path || null,
+            },
           });
         }}
         onError={(err) => {

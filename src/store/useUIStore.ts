@@ -4,6 +4,7 @@ import {
   Panel,
   UiVisibility,
   CullingSuggestions,
+  CullingPersistenceSummary,
   PanelRegion,
   WorkspaceState,
 } from '../components/ui/AppProperties';
@@ -88,6 +89,15 @@ interface CullingModalState {
   progress: { current: number; total: number; stage: string } | null;
   error: string | null;
   pathsToCull: Array<string>;
+  folderPath: string | null;
+}
+
+export interface CullingResultsState {
+  isOpen: boolean;
+  folderPath: string | null;
+  suggestions: CullingSuggestions | null;
+  persistence: CullingPersistenceSummary | null;
+  selectedPath: string | null;
 }
 
 const ALL_PANELS: Panel[] = [
@@ -265,6 +275,7 @@ export interface UIState {
   negativeModalState: NegativeConversionModalState;
   denoiseModalState: DenoiseModalState;
   cullingModalState: CullingModalState;
+  cullingResultsState: CullingResultsState;
   collageModalState: CollageModalState;
 
   setUI: (updater: Partial<UIState> | ((state: UIState) => Partial<UIState>)) => void;
@@ -375,7 +386,21 @@ export const useUIStore = create<UIState>((set, get) => ({
     progressMessage: null,
     isRaw: false,
   },
-  cullingModalState: { isOpen: false, suggestions: null, progress: null, error: null, pathsToCull: [] },
+  cullingModalState: {
+    isOpen: false,
+    suggestions: null,
+    progress: null,
+    error: null,
+    pathsToCull: [],
+    folderPath: null,
+  },
+  cullingResultsState: {
+    isOpen: false,
+    folderPath: null,
+    suggestions: null,
+    persistence: null,
+    selectedPath: null,
+  },
   collageModalState: { isOpen: false, sourceImages: [] },
 
   setUI: (updater) => set((state) => (typeof updater === 'function' ? updater(state) : updater)),

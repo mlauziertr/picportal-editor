@@ -3007,35 +3007,39 @@ pub fn set_color_label_for_paths(
     let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(false);
     let create_xmp_if_missing = settings.create_xmp_if_missing.unwrap_or(false);
 
-    paths.par_iter().for_each(|path| {
-        let (_, sidecar_path) = parse_virtual_path(path);
+    paths
+        .par_iter()
+        .try_for_each(|path| -> Result<(), String> {
+            let (_, sidecar_path) = parse_virtual_path(path);
 
-        let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
+            let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
 
-        let mut tags = metadata.tags.unwrap_or_default();
-        tags.retain(|tag| !tag.starts_with(COLOR_TAG_PREFIX));
+            let mut tags = metadata.tags.unwrap_or_default();
+            tags.retain(|tag| !tag.starts_with(COLOR_TAG_PREFIX));
 
-        if let Some(c) = &color
-            && !c.is_empty()
-        {
-            tags.push(format!("{}{}", COLOR_TAG_PREFIX, c));
-        }
+            if let Some(c) = &color
+                && !c.is_empty()
+            {
+                tags.push(format!("{}{}", COLOR_TAG_PREFIX, c));
+            }
 
-        if tags.is_empty() {
-            metadata.tags = None;
-        } else {
-            metadata.tags = Some(tags);
-        }
+            if tags.is_empty() {
+                metadata.tags = None;
+            } else {
+                metadata.tags = Some(tags);
+            }
 
-        if let Ok(json_string) = serde_json::to_string_pretty(&metadata) {
-            let _ = std::fs::write(&sidecar_path, json_string);
-        }
+            let json_string = serde_json::to_string_pretty(&metadata)
+                .map_err(|error| format!("cannot serialize metadata for {path}: {error}"))?;
+            std::fs::write(&sidecar_path, json_string)
+                .map_err(|error| format!("cannot persist color label for {path}: {error}"))?;
 
-        if enable_xmp_sync {
-            let source_path = parse_virtual_path(path).0;
-            sync_metadata_to_xmp(&source_path, &metadata, create_xmp_if_missing);
-        }
-    });
+            if enable_xmp_sync {
+                let source_path = parse_virtual_path(path).0;
+                sync_metadata_to_xmp(&source_path, &metadata, create_xmp_if_missing);
+            }
+            Ok(())
+        })?;
 
     Ok(())
 }
@@ -3050,22 +3054,26 @@ pub fn set_rating_for_paths(
     let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(false);
     let create_xmp_if_missing = settings.create_xmp_if_missing.unwrap_or(false);
 
-    paths.par_iter().for_each(|path| {
-        let (_, sidecar_path) = parse_virtual_path(path);
+    paths
+        .par_iter()
+        .try_for_each(|path| -> Result<(), String> {
+            let (_, sidecar_path) = parse_virtual_path(path);
 
-        let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
+            let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
 
-        metadata.rating = rating;
+            metadata.rating = rating;
 
-        if let Ok(json_string) = serde_json::to_string_pretty(&metadata) {
-            let _ = std::fs::write(&sidecar_path, json_string);
-        }
+            let json_string = serde_json::to_string_pretty(&metadata)
+                .map_err(|error| format!("cannot serialize metadata for {path}: {error}"))?;
+            std::fs::write(&sidecar_path, json_string)
+                .map_err(|error| format!("cannot persist rating for {path}: {error}"))?;
 
-        if enable_xmp_sync {
-            let source_path = parse_virtual_path(path).0;
-            sync_metadata_to_xmp(&source_path, &metadata, create_xmp_if_missing);
-        }
-    });
+            if enable_xmp_sync {
+                let source_path = parse_virtual_path(path).0;
+                sync_metadata_to_xmp(&source_path, &metadata, create_xmp_if_missing);
+            }
+            Ok(())
+        })?;
 
     Ok(())
 }

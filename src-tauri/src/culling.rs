@@ -1,10 +1,10 @@
 use crate::app_settings::load_settings;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use image::{GenericImageView, GrayImage, imageops};
 use image_hasher::{HashAlg, HasherConfig};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tauri::{AppHandle, Emitter, State};
@@ -13,48 +13,30 @@ use crate::{PicPortalState, face_processing, image_loader};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase", default)]
-pub struct StarMapping {
-    pub retained: u8,
-    pub review: u8,
-    pub duplicate: u8,
-    pub defect: u8,
-    pub unknown: u8,
-}
-
-impl Default for StarMapping {
-    fn default() -> Self {
-        Self {
-            retained: 5,
-            review: 3,
-            duplicate: 1,
-            defect: 0,
-            unknown: 2,
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(rename_all = "camelCase", default)]
 pub struct CullingSettings {
-    pub similarity_threshold: u32,
-    pub blur_threshold: f64,
-    pub group_similar: bool,
-    pub filter_blurry: bool,
-    pub analyze_eyes: bool,
+    /// Product-facing amount presets, intentionally not raw algorithm thresholds.
+    pub selection_amount: String,
+    /// Lenient/moderate/strict maps to the measured sharpness threshold.
+    pub blur_severity: String,
+    pub detect_duplicates: bool,
+    pub detect_blurry: bool,
+    pub detect_closed_eyes: bool,
+    pub detect_highlights: bool,
     pub auto_assign_stars: bool,
-    pub star_mapping: StarMapping,
+    pub preserve_existing_decisions: bool,
 }
 
 impl Default for CullingSettings {
     fn default() -> Self {
         Self {
-            similarity_threshold: 28,
-            blur_threshold: 100.0,
-            group_similar: true,
-            filter_blurry: true,
-            analyze_eyes: true,
+            selection_amount: "standard".to_owned(),
+            blur_severity: "moderate".to_owned(),
+            detect_duplicates: true,
+            detect_blurry: true,
+            detect_closed_eyes: true,
+            detect_highlights: true,
             auto_assign_stars: true,
-            star_mapping: StarMapping::default(),
+            preserve_existing_decisions: true,
         }
     }
 }
@@ -74,6 +56,11 @@ pub struct ImageAnalysisResult {
     pub eye_confidence: f32,
     /// Explicitly identifies the deterministic local heuristic when available.
     pub eye_method: String,
+    pub face_count: usize,
+    pub face_thumbnails: Vec<String>,
+    /// This is a local technical signal, not an artistic or subject score.
+    pub quality_method: String,
+    pub reasons: Vec<String>,
     pub category: String,
     pub suggested_rating: u8,
 }
@@ -89,14 +76,16 @@ pub struct CullGroup {
 #[serde(rename_all = "camelCase")]
 pub struct CullingSuggestions {
     pub similar_groups: Vec<CullGroup>,
-    pub blurry_images: Vec<ImageAnalysisResult>,
-    pub retained_images: Vec<ImageAnalysisResult>,
-    pub review_images: Vec<ImageAnalysisResult>,
+    pub selected_images: Vec<ImageAnalysisResult>,
+    pub highlight_images: Vec<ImageAnalysisResult>,
     pub duplicate_images: Vec<ImageAnalysisResult>,
-    pub defect_images: Vec<ImageAnalysisResult>,
-    pub unknown_images: Vec<ImageAnalysisResult>,
+    pub blurry_images: Vec<ImageAnalysisResult>,
+    pub closed_eye_images: Vec<ImageAnalysisResult>,
+    pub unrated_images: Vec<ImageAnalysisResult>,
+    pub results: Vec<ImageAnalysisResult>,
     pub failed_paths: Vec<String>,
     pub star_assignments: HashMap<String, u8>,
+    pub color_assignments: HashMap<String, Option<String>>,
     pub eye_analysis_status: String,
 }
 
@@ -163,12 +152,20 @@ fn analyze_image(
     settings: &crate::app_settings::AppSettings,
 ) -> Result<ImageAnalysisData, String> {
     const ANALYSIS_DIM: u32 = 720;
-    if crate::file_management::is_cloud_placeholder(Path::new(path)) {
+    let source_path = crate::file_management::parse_virtual_path(path).0;
+    if crate::file_management::is_cloud_placeholder(&source_path) {
         return Err(format!("'{path}' is stored in iCloud and not downloaded"));
     }
-    let file_bytes = std::fs::read(path).map_err(|error| error.to_string())?;
-    let image = image_loader::load_base_image_from_bytes(&file_bytes, path, true, settings, None)
-        .map_err(|error| error.to_string())?;
+    let file_bytes = std::fs::read(&source_path).map_err(|error| error.to_string())?;
+    let source_path_string = source_path.to_string_lossy();
+    let image = image_loader::load_base_image_from_bytes(
+        &file_bytes,
+        &source_path_string,
+        true,
+        settings,
+        None,
+    )
+    .map_err(|error| error.to_string())?;
     let (width, height) = image.dimensions();
     let thumbnail = image.thumbnail(ANALYSIS_DIM, ANALYSIS_DIM);
     let gray_thumbnail = thumbnail.to_luma8();
@@ -202,8 +199,12 @@ fn analyze_image(
             eye_state: "unknown".to_owned(),
             eye_confidence: 0.0,
             eye_method: "unavailable".to_owned(),
-            category: "review".to_owned(),
-            suggested_rating: 2,
+            face_count: 0,
+            face_thumbnails: Vec::new(),
+            quality_method: "local-technical".to_owned(),
+            reasons: Vec::new(),
+            category: "unrated".to_owned(),
+            suggested_rating: 0,
         },
     })
 }
@@ -250,9 +251,17 @@ fn encode_face_source(
     path: &str,
     settings: &crate::app_settings::AppSettings,
 ) -> Result<Vec<u8>, String> {
-    let file_bytes = std::fs::read(path).map_err(|error| error.to_string())?;
-    let image = image_loader::load_base_image_from_bytes(&file_bytes, path, true, settings, None)
-        .map_err(|error| error.to_string())?;
+    let source_path = crate::file_management::parse_virtual_path(path).0;
+    let file_bytes = std::fs::read(&source_path).map_err(|error| error.to_string())?;
+    let source_path_string = source_path.to_string_lossy();
+    let image = image_loader::load_base_image_from_bytes(
+        &file_bytes,
+        &source_path_string,
+        true,
+        settings,
+        None,
+    )
+    .map_err(|error| error.to_string())?;
     let bounded = image.thumbnail(1600, 1600).to_rgb8();
     let mut output = std::io::Cursor::new(Vec::new());
     bounded
@@ -261,42 +270,119 @@ fn encode_face_source(
     Ok(output.into_inner())
 }
 
-fn category_rating(category: &str, mapping: &StarMapping) -> u8 {
-    let value = match category {
-        "retained" => mapping.retained,
-        "review" => mapping.review,
-        "duplicate" => mapping.duplicate,
-        "defect" => mapping.defect,
-        _ => mapping.unknown,
+fn category_rating(category: &str) -> u8 {
+    match category {
+        "selected" => 5,
+        "highlights" => 4,
+        "duplicate" => 3,
+        "blurred" => 2,
+        "closedEyes" => 1,
+        _ => 0,
+    }
+}
+
+fn category_color(category: &str) -> Option<&'static str> {
+    match category {
+        "selected" => Some("green"),
+        "highlights" => Some("blue"),
+        "duplicate" => Some("yellow"),
+        "blurred" => Some("red"),
+        "closedEyes" => Some("purple"),
+        _ => None,
+    }
+}
+
+fn similarity_threshold() -> u32 {
+    // Keep this implementation detail stable while exposing only the
+    // understandable "Duplicate photos" switch in the UI.
+    28
+}
+
+fn blur_threshold(severity: &str) -> f64 {
+    match severity {
+        "lenient" => 65.0,
+        "strict" => 160.0,
+        _ => 100.0,
+    }
+}
+
+fn selected_limit(total: usize, amount: &str) -> usize {
+    if total == 0 {
+        return 0;
+    }
+    let fraction = match amount {
+        "extreme" => 0.05,
+        "few" => 0.10,
+        "more" => 0.35,
+        _ => 0.20,
     };
-    value.min(5)
+    ((total as f64 * fraction).ceil() as usize).clamp(1, total)
 }
 
 fn is_blurry(result: &ImageAnalysisResult, settings: &CullingSettings) -> bool {
-    settings.filter_blurry && result.sharpness_metric < settings.blur_threshold
+    settings.detect_blurry && result.sharpness_metric < blur_threshold(&settings.blur_severity)
+}
+
+fn has_unknown_eye_signal(result: &ImageAnalysisResult, settings: &CullingSettings) -> bool {
+    settings.detect_closed_eyes
+        && (result.eye_method == "unavailable" || result.eye_state == "unknown")
 }
 
 fn culling_category(
     result: &ImageAnalysisResult,
     settings: &CullingSettings,
     is_duplicate: bool,
+    is_selected: bool,
+    is_highlight: bool,
 ) -> &'static str {
-    if is_duplicate {
+    // A lower rating means a stronger review warning. The order is explicit
+    // so an image with multiple findings keeps one deterministic primary label
+    // while `reasons` retains every finding.
+    if settings.detect_closed_eyes && result.eye_state == "closed" {
+        "closedEyes"
+    } else if is_blurry(result, settings) {
+        "blurred"
+    } else if settings.detect_duplicates && is_duplicate {
         "duplicate"
-    } else if settings.analyze_eyes
-        && (result.eye_method == "unavailable" || result.eye_state == "unknown")
-    {
-        "unknown"
-    } else if is_blurry(result, settings) || result.eye_state == "closed" {
-        "defect"
-    } else if result.quality_score >= 0.55 {
-        "retained"
+    } else if has_unknown_eye_signal(result, settings) {
+        "unrated"
+    } else if is_selected {
+        "selected"
+    } else if is_highlight {
+        "highlights"
     } else {
-        "review"
+        "unrated"
     }
 }
 
+fn detector_reasons(
+    result: &ImageAnalysisResult,
+    settings: &CullingSettings,
+    is_duplicate: bool,
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if settings.detect_duplicates && is_duplicate {
+        reasons.push("duplicate".to_owned());
+    }
+    if is_blurry(result, settings) {
+        reasons.push("blurred".to_owned());
+    }
+    if settings.detect_closed_eyes && result.eye_state == "closed" {
+        reasons.push("closedEyes".to_owned());
+    }
+    if has_unknown_eye_signal(result, settings) {
+        reasons.push("eyesUnknown".to_owned());
+    }
+    reasons
+}
+
 fn set_eye_signal(result: &mut ImageAnalysisResult, analysis: &face_processing::LocalFaceAnalysis) {
+    result.face_count = analysis.faces.len();
+    result.face_thumbnails = analysis
+        .faces
+        .iter()
+        .map(|face| format!("data:image/webp;base64,{}", BASE64.encode(&face.thumbnail)))
+        .collect();
     if analysis.faces.is_empty() {
         result.eye_state = "notApplicable".to_owned();
         result.eye_method = "yunet-no-face".to_owned();
@@ -377,12 +463,12 @@ pub async fn cull_images(
         }
     }
 
-    let mut eye_status = if settings.analyze_eyes {
+    let mut eye_status = if settings.detect_closed_eyes {
         "pending".to_owned()
     } else {
         "disabled".to_owned()
     };
-    if settings.analyze_eyes && !successful.is_empty() {
+    if settings.detect_closed_eyes && !successful.is_empty() {
         let mut runtime_guard = face_state
             .face_runtime
             .lock()
@@ -428,68 +514,118 @@ pub async fn cull_images(
         ..Default::default()
     };
     let mut duplicate_paths = HashSet::new();
-    if settings.group_similar {
+    let mut similar_group_indices = Vec::new();
+    if settings.detect_duplicates {
         for mut group_indices in connected_components(successful.len(), |left, right| {
-            successful[left].hash.dist(&successful[right].hash) <= settings.similarity_threshold
+            successful[left].hash.dist(&successful[right].hash) <= similarity_threshold()
         }) {
             if group_indices.len() > 1 {
                 group_indices.sort_by(|left, right| {
                     compare_group_candidates(&successful[*left].result, &successful[*right].result)
                 });
-                let representative = group_indices[0];
                 for index in group_indices.iter().skip(1) {
                     duplicate_paths.insert(successful[*index].result.path.clone());
                 }
-                suggestions.similar_groups.push(CullGroup {
-                    representative: successful[representative].result.clone(),
-                    duplicates: group_indices
-                        .iter()
-                        .skip(1)
-                        .map(|index| successful[*index].result.clone())
-                        .collect(),
-                });
+                similar_group_indices.push(group_indices);
             }
         }
     }
 
+    let mut ranked_clean_indices: Vec<usize> = successful
+        .iter()
+        .enumerate()
+        .filter(|(_, data)| {
+            !duplicate_paths.contains(&data.result.path)
+                && !is_blurry(&data.result, &settings)
+                && !(settings.detect_closed_eyes && data.result.eye_state == "closed")
+                && !has_unknown_eye_signal(&data.result, &settings)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    ranked_clean_indices.sort_by(|left, right| {
+        compare_group_candidates(&successful[*left].result, &successful[*right].result)
+    });
+    let selected_count = selected_limit(ranked_clean_indices.len(), &settings.selection_amount);
+    let selected_paths: HashSet<String> = ranked_clean_indices
+        .iter()
+        .take(selected_count)
+        .map(|index| successful[*index].result.path.clone())
+        .collect();
+    let highlight_paths: HashSet<String> = if settings.detect_highlights {
+        ranked_clean_indices
+            .iter()
+            .skip(selected_count)
+            .take(selected_count)
+            .map(|index| successful[*index].result.path.clone())
+            .collect()
+    } else {
+        HashSet::new()
+    };
+
     for data in &mut successful {
+        let is_duplicate = duplicate_paths.contains(&data.result.path);
         let category = culling_category(
             &data.result,
             &settings,
-            duplicate_paths.contains(&data.result.path),
+            is_duplicate,
+            selected_paths.contains(&data.result.path),
+            highlight_paths.contains(&data.result.path),
         );
+        let mut reasons = detector_reasons(&data.result, &settings, is_duplicate);
+        if reasons.is_empty() {
+            reasons.push(category.to_owned());
+        }
+        data.result.reasons = reasons;
         data.result.category = category.to_owned();
-        data.result.suggested_rating = category_rating(category, &settings.star_mapping);
+        data.result.suggested_rating = category_rating(category);
         if settings.auto_assign_stars {
             suggestions
                 .star_assignments
                 .insert(data.result.path.clone(), data.result.suggested_rating);
+            suggestions.color_assignments.insert(
+                data.result.path.clone(),
+                category_color(category).map(str::to_owned),
+            );
         }
         match category {
-            "retained" => suggestions.retained_images.push(data.result.clone()),
-            "review" => suggestions.review_images.push(data.result.clone()),
+            "selected" => suggestions.selected_images.push(data.result.clone()),
+            "highlights" => suggestions.highlight_images.push(data.result.clone()),
             "duplicate" => suggestions.duplicate_images.push(data.result.clone()),
-            "unknown" => suggestions.unknown_images.push(data.result.clone()),
-            _ => suggestions.defect_images.push(data.result.clone()),
-        }
-        if is_blurry(&data.result, &settings) {
-            suggestions.blurry_images.push(data.result.clone());
+            "blurred" => suggestions.blurry_images.push(data.result.clone()),
+            "closedEyes" => suggestions.closed_eye_images.push(data.result.clone()),
+            _ => suggestions.unrated_images.push(data.result.clone()),
         }
     }
+
+    for group_indices in similar_group_indices {
+        let representative = group_indices[0];
+        suggestions.similar_groups.push(CullGroup {
+            representative: successful[representative].result.clone(),
+            duplicates: group_indices
+                .iter()
+                .skip(1)
+                .map(|index| successful[*index].result.clone())
+                .collect(),
+        });
+    }
+    suggestions.results = successful.iter().map(|data| data.result.clone()).collect();
     suggestions
-        .retained_images
+        .results
+        .sort_by(|left, right| left.path.cmp(&right.path));
+    suggestions
+        .selected_images
         .sort_by(|left, right| right.quality_score.total_cmp(&left.quality_score));
     suggestions
-        .review_images
+        .highlight_images
         .sort_by(|left, right| right.quality_score.total_cmp(&left.quality_score));
     suggestions
         .duplicate_images
         .sort_by(|left, right| left.path.cmp(&right.path));
     suggestions
-        .defect_images
+        .closed_eye_images
         .sort_by(|left, right| left.path.cmp(&right.path));
     suggestions
-        .unknown_images
+        .unrated_images
         .sort_by(|left, right| left.path.cmp(&right.path));
     suggestions
         .blurry_images
@@ -506,7 +642,7 @@ mod tests {
         ImageAnalysisResult {
             path: path.to_owned(),
             quality_score,
-            sharpness_metric: 0.0,
+            sharpness_metric: 200.0,
             center_focus_metric: 0.0,
             exposure_metric: 0.0,
             width: 1,
@@ -514,16 +650,20 @@ mod tests {
             eye_state: "notApplicable".to_owned(),
             eye_confidence: 0.0,
             eye_method: "disabled".to_owned(),
-            category: "review".to_owned(),
+            face_count: 0,
+            face_thumbnails: Vec::new(),
+            quality_method: "local-technical".to_owned(),
+            reasons: Vec::new(),
+            category: "unrated".to_owned(),
             suggested_rating: 0,
         }
     }
 
-    fn eye_settings(analyze_eyes: bool) -> CullingSettings {
+    fn eye_settings(detect_closed_eyes: bool) -> CullingSettings {
         CullingSettings {
-            analyze_eyes,
-            filter_blurry: false,
-            group_similar: false,
+            detect_closed_eyes,
+            detect_blurry: false,
+            detect_duplicates: false,
             ..Default::default()
         }
     }
@@ -565,25 +705,28 @@ mod tests {
     fn category_and_rating(
         result: &ImageAnalysisResult,
         settings: &CullingSettings,
+        is_duplicate: bool,
+        is_selected: bool,
+        is_highlight: bool,
     ) -> (&'static str, u8) {
-        let category = culling_category(result, settings, false);
-        (category, category_rating(category, &settings.star_mapping))
+        let category = culling_category(result, settings, is_duplicate, is_selected, is_highlight);
+        (category, category_rating(category))
     }
 
     #[test]
-    fn star_mapping_is_clamped_to_the_rapidraw_range() {
-        let mapping = StarMapping {
-            retained: 9,
-            review: 4,
-            duplicate: 2,
-            defect: 1,
-            unknown: 3,
-        };
-        assert_eq!(category_rating("retained", &mapping), 5);
-        assert_eq!(category_rating("review", &mapping), 4);
-        assert_eq!(category_rating("duplicate", &mapping), 2);
-        assert_eq!(category_rating("defect", &mapping), 1);
-        assert_eq!(category_rating("unknown", &mapping), 3);
+    fn referenced_category_mapping_is_fixed() {
+        assert_eq!(category_rating("selected"), 5);
+        assert_eq!(category_rating("highlights"), 4);
+        assert_eq!(category_rating("duplicate"), 3);
+        assert_eq!(category_rating("blurred"), 2);
+        assert_eq!(category_rating("closedEyes"), 1);
+        assert_eq!(category_rating("unrated"), 0);
+        assert_eq!(category_color("selected"), Some("green"));
+        assert_eq!(category_color("highlights"), Some("blue"));
+        assert_eq!(category_color("duplicate"), Some("yellow"));
+        assert_eq!(category_color("blurred"), Some("red"));
+        assert_eq!(category_color("closedEyes"), Some("purple"));
+        assert_eq!(category_color("unrated"), None);
     }
 
     #[test]
@@ -625,8 +768,8 @@ mod tests {
 
             assert_eq!(result.eye_state, "unknown");
             assert_eq!(
-                category_and_rating(&result, &settings),
-                ("unknown", settings.star_mapping.unknown)
+                category_and_rating(&result, &settings, false, true, false),
+                ("unrated", 0)
             );
         }
     }
@@ -652,12 +795,12 @@ mod tests {
         );
 
         assert_eq!(
-            category_and_rating(&open, &settings),
-            ("retained", settings.star_mapping.retained)
+            category_and_rating(&open, &settings, false, true, false),
+            ("selected", 5)
         );
         assert_eq!(
-            category_and_rating(&closed, &settings),
-            ("defect", settings.star_mapping.defect)
+            category_and_rating(&closed, &settings, false, true, false),
+            ("closedEyes", 1)
         );
     }
 
@@ -669,8 +812,8 @@ mod tests {
         result.eye_method = "unavailable".to_owned();
 
         assert_eq!(
-            category_and_rating(&result, &settings),
-            ("unknown", settings.star_mapping.unknown)
+            category_and_rating(&result, &settings, false, true, false),
+            ("unrated", 0)
         );
     }
 
@@ -682,8 +825,58 @@ mod tests {
         result.eye_method = "unavailable".to_owned();
 
         assert_eq!(
-            category_and_rating(&result, &settings),
-            ("retained", settings.star_mapping.retained)
+            category_and_rating(&result, &settings, false, true, false),
+            ("selected", 5)
         );
+        assert!(detector_reasons(&result, &settings, false).is_empty());
+    }
+
+    #[test]
+    fn disabled_blur_detector_does_not_assign_blurred_category() {
+        let settings = CullingSettings {
+            detect_blurry: false,
+            detect_closed_eyes: false,
+            ..Default::default()
+        };
+        let mut result = analysis_result("disabled-blur.jpg", 0.9);
+        result.sharpness_metric = 0.0;
+
+        assert_eq!(
+            category_and_rating(&result, &settings, false, true, false),
+            ("selected", 5)
+        );
+        assert!(detector_reasons(&result, &settings, false).is_empty());
+    }
+
+    #[test]
+    fn overlap_priority_is_deterministic_and_reasons_are_retained() {
+        let settings = CullingSettings::default();
+        let mut result = analysis_result("overlap.jpg", 0.9);
+        result.sharpness_metric = 0.0;
+        result.eye_state = "closed".to_owned();
+        result.eye_method = "local-heuristic".to_owned();
+
+        assert_eq!(
+            category_and_rating(&result, &settings, true, true, true),
+            ("closedEyes", 1)
+        );
+        assert_eq!(
+            detector_reasons(&result, &settings, true),
+            vec!["duplicate", "blurred", "closedEyes"]
+        );
+    }
+
+    #[test]
+    fn amount_presets_change_selected_count() {
+        assert_eq!(selected_limit(20, "extreme"), 1);
+        assert_eq!(selected_limit(20, "few"), 2);
+        assert_eq!(selected_limit(20, "standard"), 4);
+        assert_eq!(selected_limit(20, "more"), 7);
+    }
+
+    #[test]
+    fn blur_severity_changes_the_real_threshold() {
+        assert!(blur_threshold("lenient") < blur_threshold("moderate"));
+        assert!(blur_threshold("moderate") < blur_threshold("strict"));
     }
 }
