@@ -44,10 +44,6 @@ import SettingsPanel from './SettingsPanel';
 import LibraryGrid from './library/LibraryGrid';
 import { SearchInput, ViewOptionsDropdown } from './library/LibraryHeader';
 
-const PICPORTAL_REPOSITORY_URL = 'https://github.com/mlauziertr/picportal-editor';
-const PICPORTAL_LATEST_RELEASE_URL = `${PICPORTAL_REPOSITORY_URL}/releases/latest`;
-const PICPORTAL_LATEST_RELEASE_API_URL = 'https://api.github.com/repos/mlauziertr/picportal-editor/releases/latest';
-
 export interface ColumnWidths {
   thumbnail: number;
   name: number;
@@ -294,7 +290,7 @@ export default function MainLibrary(props: MainLibraryProps) {
         const currentVersion = await getVersion();
         setAppVersion(currentVersion);
 
-        const response = await fetch(PICPORTAL_LATEST_RELEASE_API_URL);
+        const response = await fetch('https://api.github.com/repos/CyberTimon/RapidRAW/releases/latest');
         if (!response.ok) {
           console.error('Failed to fetch latest release info from GitHub.');
           return;
@@ -442,7 +438,7 @@ export default function MainLibrary(props: MainLibraryProps) {
                             }`}
                             onClick={() => {
                               if (isUpdateAvailable) {
-                                open(PICPORTAL_LATEST_RELEASE_URL);
+                                open('https://github.com/CyberTimon/RapidRAW/releases/latest');
                               }
                             }}
                             data-tooltip={
