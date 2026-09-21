@@ -953,13 +953,21 @@ pub(crate) async fn export_images_impl(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
     completion_tx: Option<tokio::sync::oneshot::Sender<Result<(), usize>>>,
+    emit_events: bool,
 ) -> Result<(), String> {
     let cancellation_token = register_export_task(&state.export_task_token)?;
-    let task_guard = ExportTaskGuard::with_app_handle(
-        Arc::clone(&state.export_task_token),
-        Arc::clone(&cancellation_token),
-        app_handle.clone(),
-    );
+    let task_guard = if emit_events {
+        ExportTaskGuard::with_app_handle(
+            Arc::clone(&state.export_task_token),
+            Arc::clone(&cancellation_token),
+            app_handle.clone(),
+        )
+    } else {
+        ExportTaskGuard::new(
+            Arc::clone(&state.export_task_token),
+            Arc::clone(&cancellation_token),
+        )
+    };
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
     if cancellation_token.load(Ordering::SeqCst) {
@@ -1364,23 +1372,25 @@ pub(crate) async fn export_images_impl(
             |cancelled| {
                 if cancelled {
                     log::info!("Batch export cancelled and worker cleanup completed");
-                    let _ = app_handle.emit("export-cancelled", ());
+                    if emit_events {
+                        let _ = app_handle.emit("export-cancelled", ());
+                    }
                     return;
                 }
 
                 for error in &errors {
                     log::error!("Export error: {}", error);
-                    if total_paths == 1 {
+                    if emit_events && total_paths == 1 {
                         let _ = app_handle.emit("export-error", error.clone());
                     }
                 }
 
-                if error_count > 0 && total_paths > 1 {
+                if emit_events && error_count > 0 && total_paths > 1 {
                     let _ = app_handle.emit(
                         "export-error",
                         format!("{error_count} of {total_paths} exports failed"),
                     );
-                } else if error_count == 0 {
+                } else if emit_events && error_count == 0 {
                     let _ = app_handle.emit(
                         "batch-export-progress",
                         serde_json::json!({ "current": total_paths, "total": total_paths, "path": "" }),
@@ -1434,6 +1444,7 @@ pub async fn export_images(
         state,
         app_handle,
         None,
+        true,
     )
     .await
 }
@@ -1531,6 +1542,7 @@ pub async fn run_headless_export(
         state.clone(),
         app_handle.clone(),
         Some(tx),
+        true,
     )
     .await?;
 
@@ -1546,6 +1558,7 @@ pub fn cancel_export(
     state: tauri::State<AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
+    let picportal_requested = crate::picportal::request_picportal_cancellation(&app_handle);
     match request_export_cancellation(&state.export_task_token, || {
         let _ = app_handle.emit("export-cancelling", ());
     }) {
@@ -1556,7 +1569,10 @@ pub fn cancel_export(
             log::info!("Export cancellation was already requested");
         }
         ExportCancellationRequest::NoActiveTask => {
-            return Err("No export task is currently running.".to_string());
+            if !picportal_requested {
+                return Err("No export task is currently running.".to_string());
+            }
+            let _ = app_handle.emit("export-cancelling", ());
         }
     }
     Ok(())
