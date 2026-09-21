@@ -44,6 +44,10 @@ import SettingsPanel from './SettingsPanel';
 import LibraryGrid from './library/LibraryGrid';
 import { SearchInput, ViewOptionsDropdown } from './library/LibraryHeader';
 
+const PICPORTAL_REPOSITORY_URL = 'https://github.com/mlauziertr/picportal-editor';
+const PICPORTAL_LATEST_RELEASE_URL = `${PICPORTAL_REPOSITORY_URL}/releases/latest`;
+const PICPORTAL_LATEST_RELEASE_API_URL = 'https://api.github.com/repos/mlauziertr/picportal-editor/releases/latest';
+
 export interface ColumnWidths {
   thumbnail: number;
   name: number;
@@ -290,7 +294,7 @@ export default function MainLibrary(props: MainLibraryProps) {
         const currentVersion = await getVersion();
         setAppVersion(currentVersion);
 
-        const response = await fetch('https://api.github.com/repos/CyberTimon/RapidRAW/releases/latest');
+        const response = await fetch(PICPORTAL_LATEST_RELEASE_API_URL);
         if (!response.ok) {
           console.error('Failed to fetch latest release info from GitHub.');
           return;
@@ -427,17 +431,6 @@ export default function MainLibrary(props: MainLibraryProps) {
                     as="div"
                     className="absolute bottom-8 left-8 lg:left-16 space-y-1 z-10 drop-shadow-sm"
                   >
-                    <p>
-                      {t('library.splash.imagesBy')}{' '}
-                      <a
-                        href="https://instagram.com/timonkaech.photography"
-                        className="hover:underline"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                      >
-                        Timon Käch
-                      </a>
-                    </p>
                     {appVersion && (
                       <div className="flex items-center space-x-2">
                         <p>
@@ -449,7 +442,7 @@ export default function MainLibrary(props: MainLibraryProps) {
                             }`}
                             onClick={() => {
                               if (isUpdateAvailable) {
-                                open('https://github.com/CyberTimon/RapidRAW/releases/latest');
+                                open(PICPORTAL_LATEST_RELEASE_URL);
                               }
                             }}
                             data-tooltip={
@@ -467,26 +460,6 @@ export default function MainLibrary(props: MainLibraryProps) {
                               </span>
                             )}
                           </span>
-                        </p>
-                        <span>-</span>
-                        <p>
-                          <a
-                            href="https://ko-fi.com/cybertimon"
-                            className="hover:underline"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                          >
-                            {t('library.splash.donate')}
-                          </a>
-                          <span className="mx-1">{t('library.splash.or')}</span>
-                          <a
-                            href="https://github.com/CyberTimon/RapidRAW"
-                            className="hover:underline"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                          >
-                            {t('library.splash.contribute')}
-                          </a>
                         </p>
                       </div>
                     )}

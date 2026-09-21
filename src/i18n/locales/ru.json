@@ -1110,7 +1110,7 @@
     },
     "splash": {
       "addFolder": "Добавить папку",
-      "brand": "RapidRAW",
+      "brand": "PicPortal Editor",
       "continueSession": "Продолжить сеанс",
       "contribute": "Участвовать на GitHub",
       "descriptionAndroid": "Невероятно быстрый редактор RAW-файлов с GPU-ускорением. Откройте библиотеку, чтобы начать.",
@@ -1894,6 +1894,17 @@
       "title": "Тегирование"
     },
     "thanks": {
+      "attribution": {
+        "basedOn": "Based on",
+        "by": "by",
+        "license": "AGPL-3.0 license",
+        "originalAuthor": "Timon Käch",
+        "originalProject": "RapidRAW",
+        "source": "Original source code",
+        "splashImages": "Splash images by",
+        "support": "Support the original project on Ko-fi",
+        "title": "Attribution"
+      },
       "description": "Мы выражаем искреннюю благодарность разработчикам и сообществам следующих проектов, сыгравших ключевую роль в создании RapidRAW:",
       "list": {
         "darktable": "За справочные реализации некоторых алгоритмов обработки, которые легли в основу данного проекта.",
