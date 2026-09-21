@@ -1895,15 +1895,15 @@
     },
     "thanks": {
       "attribution": {
-        "basedOn": "Based on",
-        "by": "by",
+        "basedOn": "На основе",
+        "by": "автор",
         "license": "AGPL-3.0 license",
         "originalAuthor": "Timon Käch",
         "originalProject": "RapidRAW",
-        "source": "Original source code",
-        "splashImages": "Splash images by",
-        "support": "Support the original project on Ko-fi",
-        "title": "Attribution"
+        "source": "Исходный код оригинального проекта",
+        "splashImages": "Автор заставок:",
+        "support": "Поддержать оригинальный проект на Ko-fi",
+        "title": "Сведения об авторстве"
       },
       "description": "Мы выражаем искреннюю благодарность разработчикам и сообществам следующих проектов, сыгравших ключевую роль в создании RapidRAW:",
       "list": {

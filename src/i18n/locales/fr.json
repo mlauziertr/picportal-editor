@@ -1860,14 +1860,14 @@
     },
     "thanks": {
       "attribution": {
-        "basedOn": "Based on",
-        "by": "by",
+        "basedOn": "Fondé sur",
+        "by": "par",
         "license": "AGPL-3.0 license",
         "originalAuthor": "Timon Käch",
         "originalProject": "RapidRAW",
-        "source": "Original source code",
-        "splashImages": "Splash images by",
-        "support": "Support the original project on Ko-fi",
+        "source": "Code source original",
+        "splashImages": "Images de démarrage par",
+        "support": "Soutenir le projet d’origine sur Ko-fi",
         "title": "Attribution"
       },
       "description": "Un grand merci aux projets suivants qui ont été très importants dans le développement de RapidRAW :",

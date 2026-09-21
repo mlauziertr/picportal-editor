@@ -1825,15 +1825,15 @@
     },
     "thanks": {
       "attribution": {
-        "basedOn": "Based on",
-        "by": "by",
+        "basedOn": "基於",
+        "by": "作者",
         "license": "AGPL-3.0 license",
         "originalAuthor": "Timon Käch",
         "originalProject": "RapidRAW",
-        "source": "Original source code",
-        "splashImages": "Splash images by",
-        "support": "Support the original project on Ko-fi",
-        "title": "Attribution"
+        "source": "原始原始碼",
+        "splashImages": "啟動畫面圖片作者",
+        "support": "在 Ko-fi 上支持原始專案",
+        "title": "署名資訊"
       },
       "description": "衷心感謝以下專案，它們在 RapidRAW 的開發過程中非常重要：",
       "list": {

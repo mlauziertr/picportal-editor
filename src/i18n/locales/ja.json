@@ -1825,15 +1825,15 @@
     },
     "thanks": {
       "attribution": {
-        "basedOn": "Based on",
-        "by": "by",
+        "basedOn": "基になったプロジェクト：",
+        "by": "作者：",
         "license": "AGPL-3.0 license",
         "originalAuthor": "Timon Käch",
         "originalProject": "RapidRAW",
-        "source": "Original source code",
-        "splashImages": "Splash images by",
-        "support": "Support the original project on Ko-fi",
-        "title": "Attribution"
+        "source": "元のソースコード",
+        "splashImages": "スプラッシュ画像の作者：",
+        "support": "Ko-fiで元のプロジェクトを支援",
+        "title": "クレジット"
       },
       "description": "RapidRAWの開発において、非常に重要な役割を果たしてくれた以下のプロジェクトに心より感謝いたします:",
       "list": {

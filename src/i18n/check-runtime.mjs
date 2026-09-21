@@ -6,6 +6,7 @@ import i18next from 'i18next';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const localeDir = path.resolve(scriptDir, 'locales');
+const attributionOnly = process.argv.includes('--attribution-only');
 const pluralSuffix = /_(zero|one|two|few|many|other)$/;
 const countCandidates = [
   ...Array.from({ length: 201 }, (_, count) => count),
@@ -17,6 +18,7 @@ const countCandidates = [
   1_000,
   1_000_000,
 ];
+const attributionKey = 'settings.thanks.attribution';
 
 const flatten = (object, prefix = '', leaves = new Map()) => {
   for (const [key, value] of Object.entries(object)) {
@@ -45,10 +47,10 @@ for (const filename of localeFiles) {
   const pluralKeys = new Set();
 
   for (const [key, value] of leaves) {
-    if (value === '') {
+    if (!attributionOnly && value === '') {
       failures.push(`${locale}:${key} is empty`);
     }
-    if (pluralSuffix.test(key)) {
+    if (!attributionOnly && pluralSuffix.test(key)) {
       pluralKeys.add(key.replace(pluralSuffix, ''));
     }
   }
@@ -69,39 +71,60 @@ await i18n.init({
 });
 
 let checkedResolutions = 0;
+let checkedAttributions = 0;
 
 for (const filename of localeFiles) {
   const locale = path.basename(filename, '.json');
-  const pluralRules = new Intl.PluralRules(locale);
-  const sampleByCategory = new Map();
+  if (!attributionOnly) {
+    const pluralRules = new Intl.PluralRules(locale);
+    const sampleByCategory = new Map();
 
-  for (const count of countCandidates) {
-    const category = pluralRules.select(count);
-    if (!sampleByCategory.has(category)) {
-      sampleByCategory.set(category, count);
+    for (const count of countCandidates) {
+      const category = pluralRules.select(count);
+      if (!sampleByCategory.has(category)) {
+        sampleByCategory.set(category, count);
+      }
+    }
+
+    for (const category of pluralRules.resolvedOptions().pluralCategories) {
+      if (!sampleByCategory.has(category)) {
+        failures.push(`${locale}: no test count found for plural category ${category}`);
+      }
+    }
+
+    for (const key of pluralKeysByLocale.get(locale)) {
+      for (const [category, count] of sampleByCategory) {
+        const details = i18n.t(key, { lng: locale, count, returnDetails: true });
+        const expectedKey = `${key}_${category}`;
+        checkedResolutions += 1;
+
+        if (details.usedLng !== locale) {
+          failures.push(`${locale}:${expectedKey} resolved through ${details.usedLng}`);
+        }
+        if (details.exactUsedKey !== expectedKey) {
+          failures.push(`${locale}:${expectedKey} resolved as ${details.exactUsedKey}`);
+        }
+        if (typeof details.res !== 'string' || details.res.trim() === '') {
+          failures.push(`${locale}:${expectedKey} resolved to an empty value`);
+        }
+      }
     }
   }
 
-  for (const category of pluralRules.resolvedOptions().pluralCategories) {
-    if (!sampleByCategory.has(category)) {
-      failures.push(`${locale}: no test count found for plural category ${category}`);
-    }
-  }
-
-  for (const key of pluralKeysByLocale.get(locale)) {
-    for (const [category, count] of sampleByCategory) {
-      const details = i18n.t(key, { lng: locale, count, returnDetails: true });
-      const expectedKey = `${key}_${category}`;
-      checkedResolutions += 1;
+  if (locale !== 'en') {
+    for (const key of Object.keys(resources.en.translation.settings.thanks.attribution)) {
+      const fullKey = `${attributionKey}.${key}`;
+      const details = i18n.t(fullKey, { lng: locale, returnDetails: true });
+      checkedAttributions += 1;
 
       if (details.usedLng !== locale) {
-        failures.push(`${locale}:${expectedKey} resolved through ${details.usedLng}`);
+        failures.push(`${locale}:${fullKey} resolved through ${details.usedLng}`);
       }
-      if (details.exactUsedKey !== expectedKey) {
-        failures.push(`${locale}:${expectedKey} resolved as ${details.exactUsedKey}`);
+      if (details.exactUsedKey !== fullKey) {
+        failures.push(`${locale}:${fullKey} resolved as ${details.exactUsedKey}`);
       }
       if (typeof details.res !== 'string' || details.res.trim() === '') {
-        failures.push(`${locale}:${expectedKey} resolved to an empty value`);
+        failures.push(`${locale}:${fullKey} resolved to an empty value`);
       }
     }
   }
@@ -112,5 +135,7 @@ if (failures.length > 0) {
   failures.forEach((failure) => console.error(`- ${failure}`));
   process.exitCode = 1;
 } else {
-  console.log(`Validated ${checkedResolutions} plural resolutions across ${localeFiles.length} locales.`);
+  console.log(
+    `Validated ${checkedResolutions} plural resolutions and ${checkedAttributions} attribution resolutions across ${localeFiles.length} locales.`,
+  );
 }
