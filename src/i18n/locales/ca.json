@@ -898,6 +898,8 @@
       "altCullingPreviewHighRes": "Vista prèvia de cribratge d'alta resolució",
       "altThumbnailLoading": "S'està carregant la miniatura",
       "aperture": "Obertura",
+      "automaticCulling": "Cribratge automàtic",
+      "automaticCullingUnavailable": "Seleccioneu almenys dues fotos per utilitzar el cribratge automàtic",
       "cameraSettings": "Configuració de la càmera",
       "clickThumbnailsHint": "Feu clic a les miniatures a la barra lateral dreta per afegir-les a la vista de comparació.",
       "colorLabel": "Etiqueta de color",

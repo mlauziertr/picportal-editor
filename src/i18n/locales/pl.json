@@ -944,6 +944,8 @@
       "altCullingPreviewHighRes": "Podgląd selekcji w wysokiej rozdzielczości",
       "altThumbnailLoading": "Ładowanie miniatury",
       "aperture": "Przysłona",
+      "automaticCulling": "Automatyczna selekcja",
+      "automaticCullingUnavailable": "Wybierz co najmniej dwa zdjęcia, aby użyć automatycznej selekcji",
       "cameraSettings": "Ustawienia aparatu",
       "clickThumbnailsHint": "Kliknij miniatury na prawym pasku bocznym, aby dodać je do widoku porównania.",
       "colorLabel": "Etykieta koloru",

@@ -898,6 +898,8 @@
       "altCullingPreviewHighRes": "Culling-Vorschau in hoher Auflösung",
       "altThumbnailLoading": "Miniaturansicht wird geladen",
       "aperture": "Blende",
+      "automaticCulling": "Automatische Auswahl",
+      "automaticCullingUnavailable": "Wählen Sie mindestens zwei Fotos für die automatische Auswahl aus",
       "cameraSettings": "Kameraeinstellungen",
       "clickThumbnailsHint": "Klicken Sie auf Miniaturansichten in der rechten Seitenleiste, um sie zur Vergleichsansicht hinzuzufügen.",
       "colorLabel": "Farbmarkierung",

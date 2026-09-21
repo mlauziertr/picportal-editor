@@ -43,6 +43,7 @@ import SettingsPanel from './SettingsPanel';
 
 import LibraryGrid from './library/LibraryGrid';
 import { SearchInput, ViewOptionsDropdown } from './library/LibraryHeader';
+import AutomaticCullingButton from './library/AutomaticCullingButton';
 
 export interface ColumnWidths {
   thumbnail: number;
@@ -183,6 +184,12 @@ export default function MainLibrary(props: MainLibraryProps) {
   };
 
   const searchCriteria = useLibraryStore((state) => state.searchCriteria);
+  const cullingSelection =
+    props.multiSelectedPaths.length > 0
+      ? props.multiSelectedPaths
+      : props.activePath
+        ? [props.activePath]
+        : [];
 
   const translatedRatingFilterOptions = useMemo(
     () => [
@@ -566,6 +573,12 @@ export default function MainLibrary(props: MainLibraryProps) {
               <span>{t('library.import.failed')}</span>
             </Text>
           )}
+          <AutomaticCullingButton
+            label={t('library.culling.automaticCulling')}
+            unavailableLabel={t('library.culling.automaticCullingUnavailable')}
+            selectedPaths={cullingSelection}
+            onOpen={(cullingModalState) => setUI({ cullingModalState })}
+          />
           <DisplayModeSwitch displayMode={libraryDisplayMode} setDisplayMode={setLibraryDisplayMode} t={t} />
 
           <div className="flex items-center bg-surface p-1 rounded-lg gap-1 border border-border-color/20">

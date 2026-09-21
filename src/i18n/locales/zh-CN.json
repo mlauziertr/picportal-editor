@@ -896,6 +896,8 @@
       "altCullingPreviewHighRes": "高分辨率筛选预览",
       "altThumbnailLoading": "缩略图加载中",
       "aperture": "光圈",
+      "automaticCulling": "自动筛选",
+      "automaticCullingUnavailable": "请至少选择两张照片以使用自动筛选",
       "cameraSettings": "相机设置",
       "clickThumbnailsHint": "在右侧边栏中单击缩略图以将它们添加到比较视图中。",
       "colorLabel": "颜色标签",

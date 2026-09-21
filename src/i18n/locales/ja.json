@@ -896,6 +896,8 @@
       "altCullingPreviewHighRes": "高解像度選別プレビュー",
       "altThumbnailLoading": "サムネイル読み込み中",
       "aperture": "絞り",
+      "automaticCulling": "自動選別",
+      "automaticCullingUnavailable": "自動選別を使用するには写真を2枚以上選択してください",
       "cameraSettings": "カメラ設定",
       "clickThumbnailsHint": "右サイドバーのサムネイルをクリックして比較ビューに追加します。",
       "colorLabel": "カラーラベル",

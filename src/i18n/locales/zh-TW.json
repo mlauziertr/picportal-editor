@@ -896,6 +896,8 @@
       "altCullingPreviewHighRes": "高解析度篩選預覽",
       "altThumbnailLoading": "縮圖載入中",
       "aperture": "光圈",
+      "automaticCulling": "自動篩選",
+      "automaticCullingUnavailable": "請至少選取兩張照片以使用自動篩選",
       "cameraSettings": "相機設定",
       "clickThumbnailsHint": "按一下右側邊欄中的縮圖，將其新增至比較檢視中。",
       "colorLabel": "顏色標籤",

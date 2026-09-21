@@ -944,6 +944,8 @@
       "altCullingPreviewHighRes": "Предпросмотр отбора в высоком разрешении",
       "altThumbnailLoading": "Загрузка миниатюры",
       "aperture": "Диафрагма",
+      "automaticCulling": "Автоматический отбор",
+      "automaticCullingUnavailable": "Выберите не менее двух фотографий для автоматического отбора",
       "cameraSettings": "Настройки камеры",
       "clickThumbnailsHint": "Нажмите на миниатюры на правой боковой панели, чтобы добавить их в режим сравнения.",
       "colorLabel": "Цветовая метка",

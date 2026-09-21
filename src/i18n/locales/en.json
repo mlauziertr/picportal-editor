@@ -898,6 +898,8 @@
       "altCullingPreviewHighRes": "Culling Preview High Res",
       "altThumbnailLoading": "Thumbnail Loading",
       "aperture": "Aperture",
+      "automaticCulling": "Automatic culling",
+      "automaticCullingUnavailable": "Select at least two photos to use automatic culling",
       "cameraSettings": "Camera Settings",
       "clickThumbnailsHint": "Click thumbnails in the right sidebar to add them to the comparison view.",
       "colorLabel": "Color Label",
