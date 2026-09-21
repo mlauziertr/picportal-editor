@@ -12,13 +12,13 @@ import Button from '../../ui/Button';
 import Text from '../../ui/Text';
 import { TextColors, TextVariants } from '../../../types/typography';
 
-const categories: Array<{ key: CullingCategory; color: string; dotClass: string; label: string }> = [
-  { key: 'selected', color: 'green', dotClass: 'bg-green-500', label: 'Selected' },
-  { key: 'highlights', color: 'blue', dotClass: 'bg-blue-500', label: 'Highlights' },
-  { key: 'duplicate', color: 'yellow', dotClass: 'bg-yellow-500', label: 'Duplicates' },
-  { key: 'blurred', color: 'red', dotClass: 'bg-red-500', label: 'Blurred' },
-  { key: 'closedEyes', color: 'purple', dotClass: 'bg-purple-500', label: 'Closed eyes' },
-  { key: 'unrated', color: 'gray', dotClass: 'bg-gray-500', label: 'Unrated' },
+const categories: Array<{ key: CullingCategory; dotClass: string; label: string }> = [
+  { key: 'selected', dotClass: 'bg-green-500', label: 'Selected' },
+  { key: 'highlights', dotClass: 'bg-blue-500', label: 'Highlights' },
+  { key: 'duplicate', dotClass: 'bg-yellow-500', label: 'Duplicates' },
+  { key: 'blurred', dotClass: 'bg-red-500', label: 'Blurred' },
+  { key: 'closedEyes', dotClass: 'bg-purple-500', label: 'Closed eyes' },
+  { key: 'unrated', dotClass: 'bg-gray-500', label: 'Unrated' },
 ];
 
 interface CullingResultsPanelProps {
@@ -56,20 +56,6 @@ export default function CullingResultsPanel({
       setLibrary({ libraryActivePath: initialSelectedPath, multiSelectedPaths: [initialSelectedPath] });
     }
   }, [initialSelectedPath, setLibrary]);
-
-  const handleCategoryClick = (category: CullingCategory) => {
-    setActiveCategory(category);
-    const categoryInfo = categories.find((entry) => entry.key === category);
-    if (categoryInfo && category !== 'unrated') {
-      setLibrary((state) => ({
-        filterCriteria: { ...state.filterCriteria, colors: [categoryInfo.color] },
-      }));
-    } else {
-      setLibrary((state) => ({
-        filterCriteria: { ...state.filterCriteria, colors: [], rating: 0 },
-      }));
-    }
-  };
 
   const handleResultClick = (result: ImageAnalysisResult) => {
     setSelectedPath(result.path);
@@ -112,7 +98,7 @@ export default function CullingResultsPanel({
                   ? 'border-accent bg-accent/15 text-text-primary'
                   : 'border-border-color/50 text-text-secondary hover:text-text-primary'
               }`}
-              onClick={() => handleCategoryClick(category.key)}
+              onClick={() => setActiveCategory(category.key)}
             >
               <span className={`mr-1 inline-block h-2 w-2 rounded-full ${category.dotClass}`} />
               {t(`modals.culling.category.${category.key}`, { defaultValue: category.label })} {count}

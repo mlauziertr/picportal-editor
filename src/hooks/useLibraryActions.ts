@@ -17,11 +17,7 @@ import { globalImageCache } from '../utils/ImageLRUCache';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { computeSortedLibrary } from './useSortedLibrary';
 import { expandGroupedPaths } from '../utils/imageGrouping';
-import {
-  persistBatchWithReconciliation,
-  persistColorAssignments,
-  persistRatingAssignments,
-} from '../utils/ratingPersistence';
+import { persistColorAssignments, persistRatingAssignments } from '../utils/ratingPersistence';
 
 export function useLibraryActions(handleImageSelect?: (path: string, openInEditor?: boolean) => void) {
   const handleRate = useCallback((newRating: number, paths?: string[]) => {
@@ -52,28 +48,6 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
     });
   }, []);
 
-  const handleApplyRatings = useCallback(async (ratings: Record<string, number>) => {
-    const entries = Object.entries(ratings);
-    if (entries.length === 0) return;
-
-    const { succeeded, failures } = await persistRatingAssignments(ratings, (paths, rating) =>
-      invoke(Invokes.SetRatingForPaths, { paths, rating }),
-    );
-    if (Object.keys(succeeded).length > 0) {
-      useLibraryStore.getState().setLibrary((state) => ({
-        imageRatings: { ...state.imageRatings, ...succeeded },
-      }));
-    }
-    if (failures.length > 0) {
-      const details = failures
-        .map(({ rating, paths, error }) => `★${rating} (${paths.join(', ')}): ${String(error)}`)
-        .join('; ');
-      console.error('Failed to apply rating groups:', failures);
-      toast.error(`Failed to apply ratings: ${details}`);
-      throw new Error(details);
-    }
-  }, []);
-
   const handleApplyCulling = useCallback(
     async (suggestions: CullingSuggestions, preserveExistingDecisions = true): Promise<CullingPersistenceSummary> => {
       const { imageList, imageRatings, setLibrary } = useLibraryStore.getState();
@@ -99,18 +73,10 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
       // Ratings and labels share one sidecar file. Keep the two passes ordered so
       // concurrent read/modify/write calls cannot discard the other decision.
       const ratingResult = await persistRatingAssignments(ratings, (paths, rating) =>
-        persistBatchWithReconciliation(
-          paths,
-          () => invoke(Invokes.SetRatingForPaths, { paths, rating }),
-          (path) => invoke(Invokes.SetRatingForPaths, { paths: [path], rating }),
-        ),
+        invoke(Invokes.SetRatingForPaths, { paths, rating }),
       );
       const colorResult = await persistColorAssignments(colors, (paths, color) =>
-        persistBatchWithReconciliation(
-          paths,
-          () => invoke(Invokes.SetColorLabelForPaths, { paths, color }),
-          (path) => invoke(Invokes.SetColorLabelForPaths, { paths: [path], color }),
-        ),
+        invoke(Invokes.SetColorLabelForPaths, { paths, color }),
       );
 
       if (Object.keys(ratingResult.succeeded).length > 0 || Object.keys(colorResult.succeeded).length > 0) {
@@ -536,7 +502,6 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
 
   return {
     handleRate,
-    handleApplyRatings,
     handleApplyCulling,
     handleSetColorLabel,
     handleTagsChanged,

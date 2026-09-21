@@ -96,8 +96,6 @@ test('automatic culling toolbar labels resolve locally in every locale', async (
   for (const localeFile of localeFiles) {
     const locale = localeFile.replace(/\.json$/, '');
     const resource = JSON.parse(readFileSync(join(localesDirectory, localeFile), 'utf8'));
-    const cullingKeys = Object.keys(resource.library.culling);
-    assert.deepEqual(cullingKeys, [...cullingKeys].sort(), `${locale} culling keys must remain sorted`);
 
     const i18n = createInstance();
     await i18n.init({

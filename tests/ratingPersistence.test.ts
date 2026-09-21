@@ -29,7 +29,7 @@ test('partial rating failures retain only durable successful groups', async () =
 test('a partial batch write is reconciled with idempotent individual retries', async () => {
   const calls: string[][] = [];
   let batchAttempt = true;
-  await persistBatchWithReconciliation(
+  const result = await persistBatchWithReconciliation(
     ['first.jpg', 'second.jpg'],
     async () => {
       calls.push(['batch']);
@@ -44,6 +44,38 @@ test('a partial batch write is reconciled with idempotent individual retries', a
   );
 
   assert.deepEqual(calls, [['batch'], ['first.jpg'], ['second.jpg']]);
+  assert.deepEqual(result, { succeeded: ['first.jpg', 'second.jpg'], failures: [] });
+});
+
+test('mixed individual retries keep successful sidecar writes', async () => {
+  const result = await persistBatchWithReconciliation(
+    ['saved.jpg', 'failed.jpg'],
+    async () => {
+      throw new Error('partial batch failure');
+    },
+    async (path) => {
+      if (path === 'failed.jpg') throw new Error('sidecar write failed');
+    },
+  );
+
+  assert.deepEqual(result.succeeded, ['saved.jpg']);
+  assert.equal(result.failures.length, 1);
+  assert.equal(result.failures[0]?.path, 'failed.jpg');
+});
+
+test('mixed rating retries keep successful writes in the same group', async () => {
+  const result = await persistRatingAssignments(
+    { 'saved.jpg': 4, 'failed.jpg': 4, 'other-group.jpg': 2 },
+    async (paths) => {
+      if (paths.length > 1) throw new Error('batch failed');
+      if (paths[0] === 'failed.jpg') throw new Error('sidecar write failed');
+    },
+  );
+
+  assert.deepEqual(result.succeeded, { 'saved.jpg': 4, 'other-group.jpg': 2 });
+  assert.equal(result.failures.length, 1);
+  assert.deepEqual(result.failures[0]?.paths, ['failed.jpg']);
+  assert.equal(result.failures[0]?.rating, 4);
 });
 
 test('color assignments group writes and retain partial failures', async () => {
@@ -65,4 +97,19 @@ test('color assignments group writes and retain partial failures', async () => {
   assert.equal(result.failures.length, 1);
   assert.deepEqual(result.failures[0]?.paths, ['highlight.jpg']);
   assert.equal(result.failures[0]?.color, 'blue');
+});
+
+test('mixed color retries keep successful writes in the same group', async () => {
+  const result = await persistColorAssignments(
+    { 'saved.jpg': 'green', 'failed.jpg': 'green', 'other.jpg': 'red' },
+    async (paths) => {
+      if (paths.length > 1) throw new Error('batch failed');
+      if (paths[0] === 'failed.jpg') throw new Error('sidecar write failed');
+    },
+  );
+
+  assert.deepEqual(result.succeeded, { 'saved.jpg': 'green', 'other.jpg': 'red' });
+  assert.equal(result.failures.length, 1);
+  assert.deepEqual(result.failures[0]?.paths, ['failed.jpg']);
+  assert.equal(result.failures[0]?.color, 'green');
 });
