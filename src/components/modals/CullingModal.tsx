@@ -1,9 +1,16 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import type { ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useTranslation } from 'react-i18next';
 import { CheckCircle, XCircle, Loader2, Users, Trash2, Star, Tag } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { CullingSettings, CullingSuggestions, Invokes, Progress } from '../ui/AppProperties';
+import {
+  CullingSettings,
+  CullingSuggestions,
+  ImageAnalysisResult,
+  Invokes,
+  Progress,
+} from '../ui/AppProperties';
 import Button from '../ui/Button';
 import Switch from '../ui/Switch';
 import Slider from '../ui/Slider';
@@ -20,12 +27,21 @@ interface CullingModalProps {
   imagePaths: string[];
   thumbnails: Record<string, string>;
   onApply(action: 'reject' | 'rate_zero' | 'delete', paths: string[]): void;
+  onOpenImage(path: string): void;
   onError(error: string): void;
 }
 
 type CullAction = 'reject' | 'rate_zero' | 'delete';
 
-function ImageThumbnail({ path, thumbnails, isSelected, onToggle, children }: any) {
+interface ImageThumbnailProps {
+  path: string;
+  thumbnails: Record<string, string>;
+  isSelected: boolean;
+  onToggle(): void;
+  children?: ReactNode;
+}
+
+function ImageThumbnail({ path, thumbnails, isSelected, onToggle, children }: ImageThumbnailProps) {
   const thumbnailUrl = thumbnails[path];
   return (
     <div
@@ -59,6 +75,107 @@ function ImageThumbnail({ path, thumbnails, isSelected, onToggle, children }: an
   );
 }
 
+interface ReviewImageCardProps {
+  image: ImageAnalysisResult;
+  thumbnails: Record<string, string>;
+  isSelected: boolean;
+  onToggle(): void;
+  onOpenImage(): void;
+}
+
+function ReviewImageCard({ image, thumbnails, isSelected, onToggle, onOpenImage }: ReviewImageCardProps) {
+  const { t } = useTranslation();
+  const alertLabels = image.reviewAlerts.map((alert) => {
+    switch (alert) {
+      case 'focusReview':
+        return t('modals.culling.focusReviewAlert');
+      case 'eyesClosed':
+        return t('modals.culling.eyesClosedAlert');
+      case 'eyesUnknown':
+        return t('modals.culling.eyesUnknownAlert');
+      case 'subjectUnknown':
+        return t('modals.culling.subjectUnknown');
+      default:
+        return alert;
+    }
+  });
+  const roleClass = (role: string) =>
+    role === 'primary' ? 'border-amber-300' : role === 'unknown' ? 'border-red-300' : 'border-slate-300';
+
+  return (
+    <div className={`bg-surface rounded-md overflow-hidden border ${isSelected ? 'border-accent' : 'border-transparent'}`}>
+      <button
+        type="button"
+        className="relative block w-full bg-black cursor-pointer"
+        style={{ aspectRatio: `${image.width} / ${image.height}` }}
+        onClick={onToggle}
+        title={t('modals.culling.toggleManualReviewSelection')}
+      >
+        <img src={thumbnails[image.path]} alt={image.path} className="w-full h-full object-contain" />
+        {image.subjectBoxes.map((box, index) => (
+          <span
+            key={`subject-${index}`}
+            className="absolute border-2 border-cyan-300 pointer-events-none"
+            style={{
+              left: `${box.x * 100}%`,
+              top: `${box.y * 100}%`,
+              width: `${box.width * 100}%`,
+              height: `${box.height * 100}%`,
+            }}
+          />
+        ))}
+        {image.attributedFaces.map((face, index) => (
+          <span
+            key={`face-${index}`}
+            className={`absolute border-2 ${roleClass(face.role)} pointer-events-none`}
+            style={{
+              left: `${face.x * 100}%`,
+              top: `${face.y * 100}%`,
+              width: `${face.width * 100}%`,
+              height: `${face.height * 100}%`,
+            }}
+          />
+        ))}
+        {isSelected && <CheckCircle size={18} className="absolute top-2 right-2 text-accent" />}
+      </button>
+      <div className="p-2 space-y-1">
+        <Text variant={TextVariants.small} className="truncate" title={image.path}>
+          {alertLabels.join(', ') || t('modals.culling.unknownReason')}
+        </Text>
+        <Text variant={TextVariants.small} className="text-text-secondary">
+          {t('modals.culling.subjectStatus')}:{' '}
+          {image.subjectStatus === 'multiple' ? t('modals.culling.multipleSubjects') : image.subjectStatus};{' '}
+          {t('modals.culling.focusStatus')}: {image.focusStatus}
+        </Text>
+        {image.focusSignal !== null && (
+          <Text variant={TextVariants.small} className="text-text-secondary">
+            {t('modals.culling.focusScore', { score: image.focusSignal.toFixed(3) })}
+            {image.focusCropWidth && image.focusCropHeight
+              ? ` · ${t('modals.culling.nativeCrop', { width: image.focusCropWidth, height: image.focusCropHeight })}`
+              : ''}
+          </Text>
+        )}
+        {image.attributedFaces.length > 0 && (
+          <Text variant={TextVariants.small} className="text-text-secondary">
+            {t('modals.culling.facesDetected', { count: image.attributedFaces.length })}:{' '}
+            {image.attributedFaces.map((face) => `${face.role}/${face.eyeState}`).join(', ')}
+          </Text>
+        )}
+        <button
+          type="button"
+          className="text-xs text-accent hover:underline"
+          onClick={(event) => {
+            event.stopPropagation();
+            onOpenImage();
+          }}
+        >
+          {t('modals.culling.openInEditor')}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function CullingModal({
   isOpen,
   onClose,
@@ -68,6 +185,7 @@ export default function CullingModal({
   imagePaths,
   thumbnails,
   onApply,
+  onOpenImage,
   onError,
 }: CullingModalProps) {
   const { t } = useTranslation();
@@ -80,11 +198,17 @@ export default function CullingModal({
     similarityThreshold: 28,
     filterBlurry: true,
     blurThreshold: 100.0,
+    selectionAmount: 'standard',
+    blurSeverity: 'moderate',
+    detectSubject: true,
+    subjectProfile: 'general',
+    detectClosedEyes: false,
+    reviewFocus: true,
   });
 
   const [selectedRejects, setSelectedRejects] = useState<Set<string>>(new Set());
   const [action, setAction] = useState<CullAction>('reject');
-  const [activeTab, setActiveTab] = useState<'similar' | 'blurry'>('similar');
+  const [activeTab, setActiveTab] = useState<'similar' | 'blurry' | 'alerts' | 'unknown'>('similar');
 
   const CULL_ACTIONS = useMemo(
     () => [
@@ -129,12 +253,29 @@ export default function CullingModal({
     if (stage === 'results' && suggestions) {
       const initialRejects = new Set<string>();
       suggestions.similarGroups.forEach((group) => {
-        group.duplicates.forEach((dup) => initialRejects.add(dup.path));
+        const keepCount =
+          settings.selectionAmount === 'extreme'
+            ? 1
+            : settings.selectionAmount === 'few'
+              ? Math.max(1, Math.ceil((group.duplicates.length + 1) * 0.25))
+              : settings.selectionAmount === 'more'
+                ? Math.max(1, Math.ceil((group.duplicates.length + 1) * 0.75))
+                : Math.max(1, Math.ceil((group.duplicates.length + 1) * 0.5));
+        group.duplicates.slice(Math.max(0, keepCount - 1)).forEach((dup) => initialRejects.add(dup.path));
       });
       suggestions.blurryImages.forEach((img) => initialRejects.add(img.path));
       setSelectedRejects(initialRejects);
+      if (suggestions.similarGroups.length === 0) {
+        setActiveTab(
+          suggestions.blurryImages.length > 0
+            ? 'blurry'
+            : suggestions.reviewAlerts.length > 0
+              ? 'alerts'
+              : 'unknown',
+        );
+      }
     }
-  }, [stage, suggestions]);
+  }, [stage, suggestions, settings.selectionAmount]);
 
   const handleStartCulling = useCallback(async () => {
     try {
@@ -163,6 +304,8 @@ export default function CullingModal({
 
   const numSimilar = suggestions?.similarGroups.reduce((acc, group) => acc + group.duplicates.length, 0) || 0;
   const numBlurry = suggestions?.blurryImages.length || 0;
+  const numAlerts = suggestions?.reviewAlerts.length || 0;
+  const numUnknown = suggestions?.unknownImages.length || 0;
 
   const renderSettings = () => (
     <>
@@ -173,6 +316,77 @@ export default function CullingModal({
         {t('modals.culling.title')}
       </Text>
       <div className="space-y-6 text-sm">
+        <div className="space-y-3">
+          <Text variant={TextVariants.heading}>{t('modals.culling.assistedReview')}</Text>
+          <Text variant={TextVariants.small}>{t('modals.culling.assistedReviewDesc')}</Text>
+          <div className="grid gap-3 md:grid-cols-2">
+            <div>
+              <Text variant={TextVariants.label} className="mb-1">
+                {t('modals.culling.selectionAmount')}
+              </Text>
+              <Dropdown
+                options={[
+                  { value: 'extreme' as const, label: t('modals.culling.selectionAmountExtreme') },
+                  { value: 'few' as const, label: t('modals.culling.selectionAmountFew') },
+                  { value: 'standard' as const, label: t('modals.culling.selectionAmountStandard') },
+                  { value: 'more' as const, label: t('modals.culling.selectionAmountMore') },
+                ]}
+                value={settings.selectionAmount}
+                onChange={(value) => setSettings((s) => ({ ...s, selectionAmount: value }))}
+              />
+            </div>
+            <div>
+              <Text variant={TextVariants.label} className="mb-1">
+                {t('modals.culling.blurSeverity')}
+              </Text>
+              <Dropdown
+                options={[
+                  { value: 'lenient' as const, label: t('modals.culling.blurSeverityLenient') },
+                  { value: 'moderate' as const, label: t('modals.culling.blurSeverityModerate') },
+                  { value: 'strict' as const, label: t('modals.culling.blurSeverityStrict') },
+                ]}
+                value={settings.blurSeverity}
+                onChange={(value) => setSettings((s) => ({ ...s, blurSeverity: value }))}
+              />
+            </div>
+          </div>
+        </div>
+        <div className="space-y-3">
+          <Switch
+            label={t('modals.culling.detectSubject')}
+            checked={settings.detectSubject}
+            onChange={(value) => setSettings((s) => ({ ...s, detectSubject: value }))}
+          />
+          {settings.detectSubject && (
+            <div className="pl-4 border-l-2 border-border-color ml-1">
+              <Text variant={TextVariants.label} className="mb-1">
+                {t('modals.culling.subjectProfile')}
+              </Text>
+              <Dropdown
+                options={[
+                  { value: 'general' as const, label: t('modals.culling.profileGeneral') },
+                  { value: 'portrait' as const, label: t('modals.culling.profilePortrait') },
+                  { value: 'wedding' as const, label: t('modals.culling.profileWedding') },
+                  { value: 'sports' as const, label: t('modals.culling.profileSports') },
+                  { value: 'dance' as const, label: t('modals.culling.profileDance') },
+                ]}
+                value={settings.subjectProfile}
+                onChange={(value) => setSettings((s) => ({ ...s, subjectProfile: value }))}
+              />
+            </div>
+          )}
+          <Switch
+            label={t('modals.culling.detectClosedEyes')}
+            checked={settings.detectClosedEyes}
+            onChange={(value) => setSettings((s) => ({ ...s, detectClosedEyes: value }))}
+          />
+          <Switch
+            label={t('modals.culling.reviewFocus')}
+            checked={settings.reviewFocus}
+            onChange={(value) => setSettings((s) => ({ ...s, reviewFocus: value }))}
+          />
+          <Text variant={TextVariants.small}>{t('modals.culling.assistedSignalsNote')}</Text>
+        </div>
         <div>
           <Switch
             label={t('modals.culling.groupSimilar')}
@@ -267,7 +481,7 @@ export default function CullingModal({
 
     if (!suggestions) return null;
 
-    const totalSuggestions = numSimilar + numBlurry;
+    const totalSuggestions = numSimilar + numBlurry + numAlerts + numUnknown;
     if (totalSuggestions === 0) {
       return (
         <div className="flex flex-col items-center justify-center h-48">
@@ -288,6 +502,23 @@ export default function CullingModal({
         <Text variant={TextVariants.title} className="mb-4">
           {t('modals.culling.cullingSuggestions')}
         </Text>
+        {suggestions.subjectAnalysisStatus !== 'ready' && (
+          <Text variant={TextVariants.small} className="mb-3 text-text-secondary">
+            {suggestions.subjectAnalysisStatus === 'disabled'
+              ? t('modals.culling.subjectAnalysisDisabled')
+              : suggestions.subjectAnalysisStatus === 'focus-ready'
+                ? t('modals.culling.subjectAnalysisFocusReady')
+                : suggestions.subjectAnalysisStatus === 'subject-ready-focus-unavailable'
+                  ? t('modals.culling.subjectAnalysisSubjectReadyFocusUnavailable')
+                  : suggestions.subjectAnalysisStatus === 'focus-unavailable'
+                  ? t('modals.culling.subjectAnalysisFocusUnavailable')
+                  : suggestions.subjectAnalysisStatus === 'face-unavailable'
+                    ? t('modals.culling.subjectAnalysisFaceUnavailable')
+                    : suggestions.subjectAnalysisStatus === 'error'
+                    ? t('modals.culling.subjectAnalysisError')
+                    : t('modals.culling.subjectAnalysisUnavailable')}
+          </Text>
+        )}
         <div className="border-b border-surface mb-4">
           <nav className="-mb-px flex space-x-4" aria-label="Tabs">
             {numSimilar > 0 && (
@@ -314,6 +545,32 @@ export default function CullingModal({
               >
                 {t('modals.culling.blurryImagesTab')}{' '}
                 <span className="bg-surface text-text-secondary rounded-full px-2 py-0.5 text-xs">{numBlurry}</span>
+              </button>
+            )}
+            {numAlerts > 0 && (
+              <button
+                onClick={() => setActiveTab('alerts')}
+                className={`${
+                  activeTab === 'alerts'
+                    ? 'border-accent text-accent'
+                    : 'border-transparent text-text-secondary hover:text-text-primary hover:border-gray-300'
+                } whitespace-nowrap py-2 px-1 border-b-2 font-medium text-sm`}
+              >
+                {t('modals.culling.reviewAlertsTab')}{' '}
+                <span className="bg-surface text-text-secondary rounded-full px-2 py-0.5 text-xs">{numAlerts}</span>
+              </button>
+            )}
+            {numUnknown > 0 && (
+              <button
+                onClick={() => setActiveTab('unknown')}
+                className={`${
+                  activeTab === 'unknown'
+                    ? 'border-accent text-accent'
+                    : 'border-transparent text-text-secondary hover:text-text-primary hover:border-gray-300'
+                } whitespace-nowrap py-2 px-1 border-b-2 font-medium text-sm`}
+              >
+                {t('modals.culling.unknownTab')}{' '}
+                <span className="bg-surface text-text-secondary rounded-full px-2 py-0.5 text-xs">{numUnknown}</span>
               </button>
             )}
           </nav>
@@ -391,6 +648,20 @@ export default function CullingModal({
                     >
                       {t('modals.culling.sharpness', { sharpness: img.sharpnessMetric.toFixed(0) })}
                     </ImageThumbnail>
+                  ))}
+                </div>
+              )}
+              {(activeTab === 'alerts' || activeTab === 'unknown') && (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {(activeTab === 'alerts' ? suggestions.reviewAlerts : suggestions.unknownImages).map((img) => (
+                    <ReviewImageCard
+                      key={img.path}
+                      image={img}
+                      thumbnails={thumbnails}
+                      isSelected={selectedRejects.has(img.path)}
+                      onToggle={() => handleToggleReject(img.path)}
+                      onOpenImage={() => onOpenImage(img.path)}
+                    />
                   ))}
                 </div>
               )}

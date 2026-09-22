@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "modelId": "opencv-yunet-2023mar",
+  "detectorInput": 640,
+  "detectorScoreThreshold": 0.9,
+  "detectorFallbackThreshold": 0.7,
+  "detectorNmsThreshold": 0.3,
+  "maxFaces": 16,
+  "artifact": {
+    "filename": "face_detection_yunet_2023mar.onnx",
+    "sourceRevision": "f12e12798e8314f7c074a6656816c048dcc95b7a",
+    "sourceUrl": "https://media.githubusercontent.com/media/opencv/opencv_zoo/f12e12798e8314f7c074a6656816c048dcc95b7a/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
+    "sha256": "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4",
+    "bytes": 232589,
+    "license": "MIT",
+    "licenseFilename": "YUNET-LICENSE.txt",
+    "licenseUrl": "https://raw.githubusercontent.com/opencv/opencv_zoo/f12e12798e8314f7c074a6656816c048dcc95b7a/models/face_detection_yunet/LICENSE",
+    "licenseBytes": 1085,
+    "licenseSha256": "c83b8120c50ccbd4c4f96edf53141bdd566ebb8f8e9227e415326aa1b1aba958"
+  }
+}

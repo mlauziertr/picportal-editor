@@ -334,6 +334,12 @@ export default function AppModals(props: AppModalsProps) {
         error={cullingModalState.error}
         imagePaths={cullingModalState.pathsToCull}
         thumbnails={thumbnails}
+        onOpenImage={(path) => {
+          setUI({
+            cullingModalState: { isOpen: false, progress: null, suggestions: null, error: null, pathsToCull: [] },
+          });
+          props.handleImageSelect(path);
+        }}
         onApply={(action, paths) => {
           if (action === 'reject') {
             props.handleSetColorLabel('red', paths);

@@ -1,5 +1,5 @@
 use crate::app_settings::load_settings;
-use image::{GenericImageView, GrayImage, imageops};
+use image::{DynamicImage, GenericImageView, GrayImage, imageops};
 use image_hasher::{HashAlg, HasherConfig};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -9,15 +9,69 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tauri::{AppHandle, Emitter};
 
-use crate::image_loader;
+use crate::{face_processing, image_loader, subject_inference};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct CullingSettings {
     pub similarity_threshold: u32,
     pub blur_threshold: f64,
     pub group_similar: bool,
     pub filter_blurry: bool,
+    pub selection_amount: String,
+    pub blur_severity: String,
+    pub detect_subject: bool,
+    pub subject_profile: String,
+    pub detect_closed_eyes: bool,
+    pub review_focus: bool,
+}
+
+impl Default for CullingSettings {
+    fn default() -> Self {
+        Self {
+            similarity_threshold: 28,
+            blur_threshold: 100.0,
+            group_similar: true,
+            filter_blurry: true,
+            selection_amount: "standard".to_owned(),
+            blur_severity: "moderate".to_owned(),
+            detect_subject: true,
+            subject_profile: "general".to_owned(),
+            detect_closed_eyes: false,
+            review_focus: true,
+        }
+    }
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SubjectBox {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub score: f32,
+    pub label: String,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AttributedFace {
+    pub role: String,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub confidence: f32,
+    pub eye_state: String,
+    pub eye_confidence: f32,
+    pub focus_signal: Option<f64>,
+    pub focus_status: String,
+    pub focus_method: String,
+    pub focus_crop_width: Option<u32>,
+    pub focus_crop_height: Option<u32>,
+    pub focus_input_width: Option<u32>,
+    pub focus_input_height: Option<u32>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -30,6 +84,21 @@ pub struct ImageAnalysisResult {
     pub exposure_metric: f64,
     pub width: u32,
     pub height: u32,
+    pub subject_status: String,
+    pub subject_method: String,
+    pub subject_boxes: Vec<SubjectBox>,
+    pub attributed_faces: Vec<AttributedFace>,
+    pub focus_signal: Option<f64>,
+    pub focus_status: String,
+    pub focus_method: String,
+    pub focus_crop_width: Option<u32>,
+    pub focus_crop_height: Option<u32>,
+    pub focus_input_width: Option<u32>,
+    pub focus_input_height: Option<u32>,
+    pub eye_state: String,
+    pub eye_confidence: f32,
+    pub eye_method: String,
+    pub review_alerts: Vec<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -44,7 +113,10 @@ pub struct CullGroup {
 pub struct CullingSuggestions {
     pub similar_groups: Vec<CullGroup>,
     pub blurry_images: Vec<ImageAnalysisResult>,
+    pub review_alerts: Vec<ImageAnalysisResult>,
+    pub unknown_images: Vec<ImageAnalysisResult>,
     pub failed_paths: Vec<String>,
+    pub subject_analysis_status: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -59,9 +131,19 @@ struct ImageAnalysisData {
     result: ImageAnalysisResult,
 }
 
+const FOCUS_REVIEW_THRESHOLD: f64 = 0.060;
 const WEIGHT_SHARPNESS: f64 = 0.40;
 const WEIGHT_CENTER_FOCUS: f64 = 0.35;
 const WEIGHT_EXPOSURE: f64 = 0.25;
+
+fn effective_blur_threshold(settings: &CullingSettings) -> f64 {
+    let multiplier = match settings.blur_severity.as_str() {
+        "lenient" => 0.75,
+        "strict" => 1.5,
+        _ => 1.0,
+    };
+    settings.blur_threshold * multiplier
+}
 
 fn calculate_laplacian_variance(image: &GrayImage) -> f64 {
     let (width, height) = image.dimensions();
@@ -122,6 +204,18 @@ fn calculate_exposure_metric(image: &GrayImage) -> f64 {
     (1.0f64 - penalty).max(0.0)
 }
 
+fn load_analysis_image(
+    path: &str,
+    settings: &crate::app_settings::AppSettings,
+) -> Result<DynamicImage, String> {
+    if crate::file_management::is_cloud_placeholder(Path::new(path)) {
+        return Err(format!("'{}' is stored in iCloud and not downloaded", path));
+    }
+    let file_bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    image_loader::load_base_image_from_bytes(&file_bytes, path, true, settings, None)
+        .map_err(|e| e.to_string())
+}
+
 fn analyze_image(
     path: &str,
     hasher: &image_hasher::Hasher,
@@ -129,14 +223,7 @@ fn analyze_image(
 ) -> Result<ImageAnalysisData, String> {
     const ANALYSIS_DIM: u32 = 720; // FIXME: How should we calculate good focus if it's downscaled?!?
 
-    if crate::file_management::is_cloud_placeholder(Path::new(path)) {
-        return Err(format!("'{}' is stored in iCloud and not downloaded", path));
-    }
-
-    let file_bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-
-    let img = image_loader::load_base_image_from_bytes(&file_bytes, path, true, settings, None)
-        .map_err(|e| e.to_string())?;
+    let img = load_analysis_image(path, settings)?;
 
     let (width, height) = img.dimensions();
     let thumbnail = img.thumbnail(ANALYSIS_DIM, ANALYSIS_DIM);
@@ -175,8 +262,375 @@ fn analyze_image(
             exposure_metric,
             width,
             height,
+            subject_status: "not-evaluated".to_owned(),
+            subject_method: "not-requested".to_owned(),
+            subject_boxes: Vec::new(),
+            attributed_faces: Vec::new(),
+            focus_signal: None,
+            focus_status: "not-evaluated".to_owned(),
+            focus_method: "not-requested".to_owned(),
+            focus_crop_width: None,
+            focus_crop_height: None,
+            focus_input_width: None,
+            focus_input_height: None,
+            eye_state: "not-evaluated".to_owned(),
+            eye_confidence: 0.0,
+            eye_method: "not-requested".to_owned(),
+            review_alerts: Vec::new(),
         },
     })
+}
+
+fn profile_allows_multiple_subjects(profile: &str) -> bool {
+    matches!(profile, "dance" | "wedding" | "general")
+}
+
+fn point_in_subject(face: &face_processing::FaceBox, subject: &SubjectBox) -> bool {
+    let center_x = face.x + face.width / 2.0;
+    let center_y = face.y + face.height / 2.0;
+    center_x >= subject.x
+        && center_x <= subject.x + subject.width
+        && center_y >= subject.y
+        && center_y <= subject.y + subject.height
+}
+
+fn subject_box_iou(face: &face_processing::FaceBox, subject: &SubjectBox) -> f32 {
+    let left = face.x.max(subject.x);
+    let top = face.y.max(subject.y);
+    let right = (face.x + face.width).min(subject.x + subject.width);
+    let bottom = (face.y + face.height).min(subject.y + subject.height);
+    let intersection = (right - left).max(0.0) * (bottom - top).max(0.0);
+    let face_area = face.width * face.height;
+    if face_area > 0.0 {
+        intersection / face_area
+    } else {
+        0.0
+    }
+}
+
+fn eye_state_label(state: face_processing::EyeState) -> &'static str {
+    match state {
+        face_processing::EyeState::Open => "open",
+        face_processing::EyeState::Closed => "closed",
+        face_processing::EyeState::Unknown => "unknown",
+    }
+}
+
+fn subject_status_label(
+    detect_subject: bool,
+    has_subject_boxes: bool,
+    attribution_is_ambiguous: bool,
+    primary_count: usize,
+    multiple_is_valid: bool,
+) -> &'static str {
+    if !detect_subject {
+        "not-evaluated"
+    } else if !has_subject_boxes {
+        "unknown"
+    } else if attribution_is_ambiguous || primary_count == 0 {
+        "unknown"
+    } else if primary_count > 1 && multiple_is_valid {
+        "multiple"
+    } else {
+        "primary"
+    }
+}
+
+fn update_assisted_result(
+    data: &mut ImageAnalysisData,
+    image: &DynamicImage,
+    settings: &CullingSettings,
+    worker: &mut Option<subject_inference::LocalWorker>,
+    face_runtime: &mut Option<face_processing::FaceRuntime>,
+) {
+    let frame = image.thumbnail(1920, 1920);
+    let frame_width = frame.width().max(1) as f32;
+    let frame_height = frame.height().max(1) as f32;
+    let source_width = image.width().max(1) as f32;
+    let source_height = image.height().max(1) as f32;
+    let mut subject_boxes = Vec::new();
+    let mut subject_method = "grounding-dino-unavailable".to_owned();
+
+    if settings.detect_subject {
+        if let Some(local_worker) = worker.as_mut() {
+            match local_worker.detect(&frame, &settings.subject_profile) {
+                Ok(boxes) => {
+                    subject_method = "grounding-dino-local".to_owned();
+                    subject_boxes = boxes
+                        .into_iter()
+                        .filter(|item| item.width > 0.0 && item.height > 0.0)
+                        .map(|item| SubjectBox {
+                            x: item.x * source_width / frame_width,
+                            y: item.y * source_height / frame_height,
+                            width: item.width * source_width / frame_width,
+                            height: item.height * source_height / frame_height,
+                            score: item.score,
+                            label: item.label,
+                        })
+                        .collect();
+                }
+                Err(_) => {
+                    subject_method = "grounding-dino-error".to_owned();
+                }
+            }
+        }
+    } else {
+        subject_method = "disabled".to_owned();
+    }
+
+    let mut faces = Vec::new();
+    let mut face_method = "yunet-unavailable".to_owned();
+    if let Some(runtime) = face_runtime.as_mut() {
+        let rgb = image.to_rgb8();
+        match runtime.analyze(&rgb, runtime.primary_threshold()) {
+            Ok(primary) => {
+                faces = primary;
+                face_method = "yunet-0.9".to_owned();
+            }
+            Err(_) => {
+                face_method = "yunet-error".to_owned();
+            }
+        }
+        if let Some(fallback_threshold) =
+            face_processing::choose_fallback_threshold(runtime, &faces)
+        {
+            match runtime.analyze(&rgb, fallback_threshold) {
+                Ok(fallback) => {
+                    if !fallback.is_empty() {
+                        faces = fallback;
+                        face_method = "yunet-fallback-0.7".to_owned();
+                    }
+                }
+                Err(_) => {
+                    face_method = format!("{face_method};fallback-error");
+                }
+            }
+        }
+    }
+
+    let mut subject_candidates = Vec::new();
+    for (index, face) in faces.iter().enumerate() {
+        let inside = subject_boxes.iter().any(|subject| {
+            point_in_subject(&face.bbox, subject) || subject_box_iou(&face.bbox, subject) >= 0.05
+        });
+        if inside {
+            subject_candidates.push(index);
+        }
+    }
+    let multiple_is_valid = profile_allows_multiple_subjects(&settings.subject_profile);
+    let attribution_is_ambiguous =
+        subject_candidates.len() > 1 && !multiple_is_valid && !subject_boxes.is_empty();
+    let primary_indices = if !settings.detect_subject {
+        (0..faces.len()).collect()
+    } else if !subject_boxes.is_empty() && !attribution_is_ambiguous {
+        subject_candidates.clone()
+    } else {
+        Vec::new()
+    };
+
+    let mut attributed_faces = Vec::new();
+    let mut focus_values = Vec::new();
+    let mut focus_error = false;
+    let mut focus_dimensions = None;
+    let mut eye_states = Vec::new();
+    let mut review_alerts = Vec::new();
+    let focus_available = settings.review_focus
+        && worker
+            .as_ref()
+            .map(subject_inference::LocalWorker::focus_is_ready)
+            .unwrap_or(false);
+
+    for (index, face) in faces.iter().enumerate() {
+        let is_primary = primary_indices.contains(&index);
+        let role = if is_primary {
+            "primary"
+        } else if attribution_is_ambiguous && subject_candidates.contains(&index) {
+            "unknown"
+        } else {
+            "secondary"
+        };
+        let mut focus_crop_dimensions = None;
+        let mut focus_model_dimensions = None;
+        let eye_state = if is_primary && settings.detect_closed_eyes {
+            eye_states.push(face.eye.state);
+            eye_state_label(face.eye.state).to_owned()
+        } else if settings.detect_closed_eyes {
+            "not-attributed".to_owned()
+        } else {
+            "disabled".to_owned()
+        };
+        let mut focus_signal = None;
+        let mut focus_status = if !settings.review_focus {
+            "disabled".to_owned()
+        } else if !is_primary {
+            "not-attributed".to_owned()
+        } else if !focus_available {
+            "unavailable".to_owned()
+        } else {
+            "pending".to_owned()
+        };
+        let mut focus_method = if focus_available {
+            "vgg-native-local".to_owned()
+        } else {
+            "vgg-native-unavailable".to_owned()
+        };
+        if is_primary && focus_available {
+            if let Some(crop) = face_processing::crop_face(image, &face.bbox, 1.6) {
+                if let Some(local_worker) = worker.as_mut() {
+                    match local_worker.focus(&crop) {
+                        Ok(measurement) => {
+                            focus_signal = Some(measurement.score);
+                            focus_status = "available".to_owned();
+                            if focus_dimensions.is_none() {
+                                focus_dimensions = Some((measurement.width, measurement.height));
+                            }
+                            focus_crop_dimensions = Some((measurement.width, measurement.height));
+                            focus_model_dimensions =
+                                Some((measurement.input_width, measurement.input_height));
+                            focus_values.push(measurement.score);
+                            if measurement.score < FOCUS_REVIEW_THRESHOLD {
+                                review_alerts.push("focusReview".to_owned());
+                            }
+                        }
+                        Err(_) => {
+                            focus_status = "unknown".to_owned();
+                            focus_method = "vgg-native-error".to_owned();
+                            focus_error = true;
+                        }
+                    }
+                }
+            } else {
+                focus_status = "unknown".to_owned();
+                focus_method = "vgg-native-crop-failed".to_owned();
+                focus_error = true;
+            }
+        }
+        attributed_faces.push(AttributedFace {
+            role: role.to_owned(),
+            x: face.bbox.x / source_width,
+            y: face.bbox.y / source_height,
+            width: face.bbox.width / source_width,
+            height: face.bbox.height / source_height,
+            confidence: face.confidence,
+            eye_state,
+            eye_confidence: face.eye.confidence,
+            focus_signal,
+            focus_status,
+            focus_method,
+            focus_crop_width: focus_crop_dimensions.map(|value| value.0),
+            focus_crop_height: focus_crop_dimensions.map(|value| value.1),
+            focus_input_width: focus_model_dimensions.map(|value| value.0),
+            focus_input_height: focus_model_dimensions.map(|value| value.1),
+        });
+    }
+
+    let subject_status = subject_status_label(
+        settings.detect_subject,
+        !subject_boxes.is_empty(),
+        attribution_is_ambiguous,
+        primary_indices.len(),
+        multiple_is_valid,
+    );
+    let eye_state = if !settings.detect_closed_eyes {
+        "disabled"
+    } else if eye_states.is_empty() {
+        "unknown"
+    } else if eye_states
+        .iter()
+        .all(|state| *state == face_processing::EyeState::Open)
+    {
+        "open"
+    } else if eye_states
+        .iter()
+        .all(|state| *state == face_processing::EyeState::Closed)
+    {
+        "closed"
+    } else {
+        "unknown"
+    };
+    if settings.detect_closed_eyes && eye_state == "closed" {
+        review_alerts.push("eyesClosed".to_owned());
+    } else if settings.detect_closed_eyes && eye_state == "unknown" {
+        review_alerts.push("eyesUnknown".to_owned());
+    }
+    if subject_status == "unknown" {
+        review_alerts.push("subjectUnknown".to_owned());
+    }
+
+    data.result.subject_status = subject_status.to_owned();
+    data.result.subject_method = if subject_boxes.is_empty() && !faces.is_empty() {
+        format!("{subject_method};{face_method}")
+    } else {
+        subject_method
+    };
+    data.result.subject_boxes = subject_boxes;
+    data.result.attributed_faces = attributed_faces;
+    data.result.eye_state = eye_state.to_owned();
+    data.result.eye_confidence = faces
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| primary_indices.contains(index))
+        .map(|(_, face)| face.eye.confidence)
+        .fold(0.0_f32, f32::max);
+    data.result.eye_method = if settings.detect_closed_eyes {
+        face_method.clone()
+    } else {
+        "disabled".to_owned()
+    };
+    data.result.focus_signal = if focus_values.is_empty() {
+        None
+    } else {
+        Some(focus_values.iter().sum::<f64>() / focus_values.len() as f64)
+    };
+    data.result.focus_status = if !settings.review_focus {
+        "disabled".to_owned()
+    } else if data.result.focus_signal.is_some() {
+        "available".to_owned()
+    } else if !focus_available {
+        "unavailable".to_owned()
+    } else {
+        "unknown".to_owned()
+    };
+    data.result.focus_method = if focus_error {
+        "vgg-native-error".to_owned()
+    } else if focus_available {
+        "vgg-native-local".to_owned()
+    } else {
+        "vgg-native-unavailable".to_owned()
+    };
+    data.result.focus_crop_width = focus_dimensions.map(|value| value.0);
+    data.result.focus_crop_height = focus_dimensions.map(|value| value.1);
+    data.result.focus_input_width = data
+        .result
+        .attributed_faces
+        .iter()
+        .find_map(|face| face.focus_input_width);
+    data.result.focus_input_height = data
+        .result
+        .attributed_faces
+        .iter()
+        .find_map(|face| face.focus_input_height);
+    data.result.review_alerts = review_alerts;
+}
+
+fn subject_analysis_status_for(
+    worker: &subject_inference::LocalWorker,
+    subject_requested: bool,
+    focus_requested: bool,
+) -> String {
+    if subject_requested {
+        if !worker.subject_is_ready() {
+            "subject-unavailable".to_owned()
+        } else if focus_requested && !worker.focus_is_ready() {
+            "subject-ready-focus-unavailable".to_owned()
+        } else {
+            "ready".to_owned()
+        }
+    } else if worker.focus_is_ready() {
+        "focus-ready".to_owned()
+    } else {
+        "focus-unavailable".to_owned()
+    }
 }
 
 #[tauri::command]
@@ -229,6 +683,84 @@ pub async fn cull_images(
         }
     }
 
+    let mut worker = None;
+    let needs_local_worker = settings.detect_subject || settings.review_focus;
+    let mut subject_analysis_status = if !needs_local_worker {
+        "disabled".to_owned()
+    } else {
+        match subject_inference::LocalWorker::start(&app_handle) {
+            Ok(local_worker) => {
+                let status = subject_analysis_status_for(
+                    &local_worker,
+                    settings.detect_subject,
+                    settings.review_focus,
+                );
+                worker = Some(local_worker);
+                status
+            }
+            Err(_) => "unavailable".to_owned(),
+        }
+    };
+    let mut face_runtime =
+        if settings.detect_subject || settings.detect_closed_eyes || settings.review_focus {
+            match face_processing::load_for_app(&app_handle) {
+                Ok(runtime) => Some(runtime),
+                Err(_) => {
+                    subject_analysis_status = if matches!(
+                        subject_analysis_status.as_str(),
+                        "ready" | "focus-ready" | "subject-ready-focus-unavailable"
+                    ) {
+                        "face-unavailable".to_owned()
+                    } else {
+                        "unavailable".to_owned()
+                    };
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+    if settings.detect_subject || settings.detect_closed_eyes || settings.review_focus {
+        let _ = app_handle.emit(
+            "culling-progress",
+            CullingProgress {
+                current: total_count,
+                total: total_count,
+                stage: "Reviewing local subject, eyes and focus signals...".to_owned(),
+            },
+        );
+        for data in &mut successful_analyses {
+            match load_analysis_image(&data.result.path, &app_settings) {
+                Ok(image) => {
+                    update_assisted_result(data, &image, &settings, &mut worker, &mut face_runtime);
+                }
+                Err(error) => {
+                    data.result.subject_status = "unknown".to_owned();
+                    data.result.subject_method = format!("image-unavailable:{error}");
+                    data.result.focus_status = "unknown".to_owned();
+                    data.result.eye_state = if settings.detect_closed_eyes {
+                        "unknown".to_owned()
+                    } else {
+                        "disabled".to_owned()
+                    };
+                    data.result.review_alerts.push("subjectUnknown".to_owned());
+                }
+            }
+        }
+        if (settings.detect_subject
+            && successful_analyses
+                .iter()
+                .any(|data| data.result.subject_method == "grounding-dino-error"))
+            || (settings.review_focus
+                && successful_analyses
+                    .iter()
+                    .any(|data| data.result.focus_method == "vgg-native-error"))
+        {
+            subject_analysis_status = "error".to_owned();
+        }
+    }
+
     let _ = app_handle.emit(
         "culling-progress",
         CullingProgress {
@@ -240,6 +772,7 @@ pub async fn cull_images(
 
     let mut suggestions = CullingSuggestions {
         failed_paths,
+        subject_analysis_status,
         ..Default::default()
     };
     let mut processed_indices = vec![false; successful_analyses.len()];
@@ -301,7 +834,7 @@ pub async fn cull_images(
         for i in 0..successful_analyses.len() {
             if !processed_indices[i] {
                 let item = &successful_analyses[i];
-                if item.result.sharpness_metric < settings.blur_threshold {
+                if item.result.sharpness_metric < effective_blur_threshold(&settings) {
                     suggestions.blurry_images.push(item.result.clone());
                 }
             }
@@ -313,6 +846,64 @@ pub async fn cull_images(
         });
     }
 
+    for data in &successful_analyses {
+        if !data.result.review_alerts.is_empty() {
+            suggestions.review_alerts.push(data.result.clone());
+        }
+        if data.result.subject_status == "unknown"
+            || (settings.review_focus
+                && matches!(data.result.focus_status.as_str(), "unknown" | "unavailable"))
+        {
+            suggestions.unknown_images.push(data.result.clone());
+        }
+    }
+    suggestions
+        .review_alerts
+        .sort_by(|left, right| left.path.cmp(&right.path));
+    suggestions
+        .unknown_images
+        .sort_by(|left, right| left.path.cmp(&right.path));
+
     let _ = app_handle.emit("culling-complete", &suggestions);
     Ok(suggestions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blur_severity_scales_only_the_existing_technical_threshold() {
+        let mut settings = CullingSettings::default();
+        settings.blur_threshold = 100.0;
+
+        settings.blur_severity = "lenient".to_owned();
+        assert_eq!(effective_blur_threshold(&settings), 75.0);
+
+        settings.blur_severity = "moderate".to_owned();
+        assert_eq!(effective_blur_threshold(&settings), 100.0);
+
+        settings.blur_severity = "strict".to_owned();
+        assert_eq!(effective_blur_threshold(&settings), 150.0);
+    }
+
+    #[test]
+    fn subject_profiles_allow_groups_only_when_the_profile_supports_them() {
+        assert!(profile_allows_multiple_subjects("general"));
+        assert!(profile_allows_multiple_subjects("wedding"));
+        assert!(profile_allows_multiple_subjects("dance"));
+        assert!(!profile_allows_multiple_subjects("portrait"));
+        assert!(!profile_allows_multiple_subjects("sports"));
+    }
+
+    #[test]
+    fn subject_status_distinguishes_valid_groups_from_ambiguous_single_subjects() {
+        assert_eq!(subject_status_label(true, true, false, 2, true), "multiple");
+        assert_eq!(subject_status_label(true, true, true, 2, false), "unknown");
+        assert_eq!(subject_status_label(true, true, false, 1, true), "primary");
+        assert_eq!(
+            subject_status_label(false, false, false, 0, false),
+            "not-evaluated"
+        );
+    }
 }

@@ -397,9 +397,15 @@ export interface CullingSettings {
   blurThreshold: number;
   groupSimilar: boolean;
   filterBlurry: boolean;
+  selectionAmount: 'extreme' | 'few' | 'standard' | 'more';
+  blurSeverity: 'lenient' | 'moderate' | 'strict';
+  detectSubject: boolean;
+  subjectProfile: 'general' | 'portrait' | 'wedding' | 'sports' | 'dance';
+  detectClosedEyes: boolean;
+  reviewFocus: boolean;
 }
 
-interface ImageAnalysisResult {
+export interface ImageAnalysisResult {
   path: string;
   qualityScore: number;
   sharpnessMetric: number;
@@ -407,6 +413,44 @@ interface ImageAnalysisResult {
   exposureMetric: number;
   width: number;
   height: number;
+  subjectStatus: 'primary' | 'multiple' | 'unknown' | 'not-evaluated' | string;
+  subjectMethod: string;
+  subjectBoxes: Array<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    score: number;
+    label: string;
+  }>;
+  attributedFaces: Array<{
+    role: 'primary' | 'secondary' | 'unknown' | string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    confidence: number;
+    eyeState: string;
+    eyeConfidence: number;
+    focusSignal: number | null;
+    focusStatus: string;
+    focusMethod: string;
+    focusCropWidth: number | null;
+    focusCropHeight: number | null;
+    focusInputWidth: number | null;
+    focusInputHeight: number | null;
+  }>;
+  focusSignal: number | null;
+  focusStatus: string;
+  focusMethod: string;
+  focusCropWidth: number | null;
+  focusCropHeight: number | null;
+  focusInputWidth: number | null;
+  focusInputHeight: number | null;
+  eyeState: string;
+  eyeConfidence: number;
+  eyeMethod: string;
+  reviewAlerts: string[];
 }
 
 interface CullGroup {
@@ -417,7 +461,10 @@ interface CullGroup {
 export interface CullingSuggestions {
   similarGroups: CullGroup[];
   blurryImages: ImageAnalysisResult[];
+  reviewAlerts: ImageAnalysisResult[];
+  unknownImages: ImageAnalysisResult[];
   failedPaths: string[];
+  subjectAnalysisStatus: string;
 }
 
 interface KeybindHandler {

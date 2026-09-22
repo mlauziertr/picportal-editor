@@ -18,6 +18,7 @@ mod culling;
 mod denoising;
 mod exif_processing;
 mod export_processing;
+mod face_processing;
 mod file_management;
 mod focus_stacking;
 mod formats;
@@ -38,6 +39,7 @@ mod panorama_stitching;
 mod panorama_utils;
 mod preset_converter;
 mod raw_processing;
+mod subject_inference;
 mod tagging;
 mod tagging_utils;
 mod window_customizer;
@@ -2242,6 +2244,7 @@ pub fn run() {
             tagging::add_tag_for_paths,
             tagging::remove_tag_for_paths,
             culling::cull_images,
+            subject_inference::culling_runtime_status,
             lens_correction::get_lensfun_makers,
             lens_correction::get_lensfun_lenses_for_maker,
             lens_correction::autodetect_lens,
