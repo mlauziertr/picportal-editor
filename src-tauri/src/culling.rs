@@ -131,7 +131,11 @@ struct ImageAnalysisData {
     result: ImageAnalysisResult,
 }
 
-const FOCUS_REVIEW_THRESHOLD: f64 = 0.060;
+const NATIVE_IN_FOCUS_REVIEW_FLOOR: f64 = 0.060;
+
+fn native_focus_needs_review(in_focus_mean: f64) -> bool {
+    in_focus_mean < NATIVE_IN_FOCUS_REVIEW_FLOOR
+}
 const WEIGHT_SHARPNESS: f64 = 0.40;
 const WEIGHT_CENTER_FOCUS: f64 = 0.35;
 const WEIGHT_EXPOSURE: f64 = 0.25;
@@ -488,7 +492,7 @@ fn update_assisted_result(
                             focus_model_dimensions =
                                 Some((measurement.input_width, measurement.input_height));
                             focus_values.push(measurement.score);
-                            if measurement.score < FOCUS_REVIEW_THRESHOLD {
+                            if native_focus_needs_review(measurement.score) {
                                 review_alerts.push("focusReview".to_owned());
                             }
                         }
@@ -871,6 +875,62 @@ pub async fn cull_images(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_focus_review_uses_the_measured_in_focus_floor() {
+        assert!(native_focus_needs_review(0.02));
+        assert!(!native_focus_needs_review(0.40));
+        assert!(!native_focus_needs_review(NATIVE_IN_FOCUS_REVIEW_FLOOR));
+
+        let benchmark = [
+            ("img_015_0", "net", 0.2290, false),
+            ("img_021_0", "net", 0.4612, false),
+            ("img_040_0", "net", 0.1176, false),
+            ("img_053_0", "mou", 0.0232, true),
+            ("img_053_1", "mou", 0.0392, true),
+            ("img_055_0", "net", 0.1042, false),
+            ("img_056_0", "net", 0.0595, true),
+            ("img_061_0", "net", 0.9170, false),
+            ("img_065_1", "mou", 0.0283, true),
+            ("img_066_0", "mou", 0.0350, true),
+            ("img_067_0", "net", 0.0780, false),
+            ("img_073_0", "net", 0.2005, false),
+            ("img_085_0", "net", 0.3986, false),
+            ("img_106_0", "net", 0.2222, false),
+            ("img_111_0", "net", 0.4552, false),
+            ("img_117_0", "net", 0.3259, false),
+            ("img_123_0", "net", 0.3590, false),
+            ("img_123_1", "net", 0.1365, false),
+            ("img_125_0", "net", 0.3309, false),
+            ("img_126_0", "net", 0.4361, false),
+            ("img_130_0", "net", 0.3161, false),
+            ("img_134_0", "mou", 0.0410, true),
+            ("img_135_0", "net", 0.4679, false),
+            ("img_135_1", "mou", 0.1297, false),
+            ("img_136_0", "net", 0.4212, false),
+            ("img_136_1", "mou", 0.1674, false),
+            ("img_137_0", "net", 0.3301, false),
+            ("img_137_1", "mou", 0.1401, false),
+        ];
+        let mut true_positive = 0;
+        let mut false_negative = 0;
+        let mut false_positive = 0;
+        let mut true_negative = 0;
+        for (name, label, score, expected) in benchmark {
+            let alert = native_focus_needs_review(score);
+            assert_eq!(alert, expected, "{name}");
+            match (label, alert) {
+                ("mou", true) => true_positive += 1,
+                ("mou", false) => false_negative += 1,
+                (_, true) => false_positive += 1,
+                (_, false) => true_negative += 1,
+            }
+        }
+        assert_eq!(
+            (true_positive, false_negative, false_positive, true_negative),
+            (5, 3, 1, 19)
+        );
+    }
 
     #[test]
     fn blur_severity_scales_only_the_existing_technical_threshold() {
