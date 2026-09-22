@@ -9,6 +9,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use image::{DynamicImage, ImageFormat};
@@ -142,8 +143,20 @@ struct ModelArtifact {
     bytes: u64,
 }
 
+#[derive(Clone)]
+pub struct LocalWorkerCancellation {
+    child: Arc<Mutex<Child>>,
+}
+
+impl LocalWorkerCancellation {
+    pub fn cancel(&self) {
+        let mut child = self.child.lock().unwrap_or_else(|error| error.into_inner());
+        let _ = child.kill();
+    }
+}
+
 pub struct LocalWorker {
-    child: Child,
+    child: Arc<Mutex<Child>>,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     subject_ready: bool,
@@ -178,7 +191,7 @@ impl LocalWorker {
             .take()
             .ok_or_else(|| "LOCAL_CULLING_WORKER_STDOUT_FAILED".to_owned())?;
         Ok(Self {
-            child,
+            child: Arc::new(Mutex::new(child)),
             stdin,
             stdout: BufReader::new(stdout),
             subject_ready,
@@ -302,6 +315,12 @@ impl LocalWorker {
         })
     }
 
+    pub fn cancellation_handle(&self) -> LocalWorkerCancellation {
+        LocalWorkerCancellation {
+            child: Arc::clone(&self.child),
+        }
+    }
+
     pub fn subject_is_ready(&self) -> bool {
         self.subject_ready
     }
@@ -317,7 +336,9 @@ impl LocalWorker {
 
 impl Drop for LocalWorker {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        let mut child = self.child.lock().unwrap_or_else(|error| error.into_inner());
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
 

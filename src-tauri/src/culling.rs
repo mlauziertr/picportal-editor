@@ -3,10 +3,10 @@ use image::{DynamicImage, GenericImageView, GrayImage, imageops};
 use image_hasher::{HashAlg, HasherConfig};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 use tauri::{AppHandle, Emitter};
 
 use crate::{face_processing, image_loader, subject_inference};
@@ -137,6 +137,117 @@ const TORSO_INSIDE_MIN: usize = 2;
 const WEIGHT_SHARPNESS: f64 = 0.40;
 const WEIGHT_CENTER_FOCUS: f64 = 0.35;
 const WEIGHT_EXPOSURE: f64 = 0.25;
+
+struct CullingCancellation {
+    requested: AtomicBool,
+    worker: Mutex<Option<subject_inference::LocalWorkerCancellation>>,
+}
+
+impl CullingCancellation {
+    fn new() -> Self {
+        Self {
+            requested: AtomicBool::new(false),
+            worker: Mutex::new(None),
+        }
+    }
+
+    fn is_requested(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+    }
+
+    fn request(&self) {
+        self.requested.store(true, Ordering::Release);
+        let worker = self
+            .worker
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(worker) = worker.as_ref() {
+            worker.cancel();
+        }
+    }
+
+    fn attach_worker(&self, worker: subject_inference::LocalWorkerCancellation) {
+        let mut attached = self
+            .worker
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *attached = Some(worker);
+        if self.is_requested()
+            && let Some(worker) = attached.as_ref()
+        {
+            worker.cancel();
+        }
+    }
+
+    fn detach_worker(&self) {
+        let mut attached = self
+            .worker
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *attached = None;
+    }
+}
+
+static ACTIVE_CULLING_INVOCATIONS: LazyLock<Mutex<HashMap<String, Arc<CullingCancellation>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+struct CullingInvocationGuard {
+    invocation_id: String,
+    cancellation: Arc<CullingCancellation>,
+    active: bool,
+}
+
+impl CullingInvocationGuard {
+    fn register(invocation_id: &str) -> Result<Self, String> {
+        let cancellation = Arc::new(CullingCancellation::new());
+        let mut active = ACTIVE_CULLING_INVOCATIONS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if active.contains_key(invocation_id) {
+            return Err("CULLING_INVOCATION_ALREADY_ACTIVE".to_owned());
+        }
+        active.insert(invocation_id.to_owned(), Arc::clone(&cancellation));
+        Ok(Self {
+            invocation_id: invocation_id.to_owned(),
+            cancellation,
+            active: true,
+        })
+    }
+
+    fn conclude(&mut self) -> bool {
+        let mut active = ACTIVE_CULLING_INVOCATIONS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if self.active
+            && active
+                .get(&self.invocation_id)
+                .is_some_and(|value| Arc::ptr_eq(value, &self.cancellation))
+        {
+            active.remove(&self.invocation_id);
+        }
+        self.active = false;
+        self.cancellation.is_requested()
+    }
+}
+
+impl Drop for CullingInvocationGuard {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = self.conclude();
+        }
+    }
+}
+
+fn request_culling_cancel(invocation_id: &str) -> bool {
+    let active = ACTIVE_CULLING_INVOCATIONS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let Some(cancellation) = active.get(invocation_id) else {
+        return false;
+    };
+    cancellation.request();
+    true
+}
 
 fn effective_blur_threshold(settings: &CullingSettings) -> f64 {
     match settings.blur_severity.as_str() {
@@ -983,45 +1094,93 @@ fn emit_culling<T: Serialize + Clone>(
 }
 
 #[tauri::command]
+pub fn cancel_culling(invocation_id: String, app_handle: AppHandle) -> bool {
+    let accepted = request_culling_cancel(&invocation_id);
+    if accepted {
+        emit_culling(&app_handle, "culling-cancelling", &invocation_id, ());
+    }
+    accepted
+}
+
+fn finish_cancelled_culling(
+    guard: &mut CullingInvocationGuard,
+    app_handle: &AppHandle,
+    invocation_id: &str,
+) -> Result<CullingSuggestions, String> {
+    guard.conclude();
+    emit_culling(app_handle, "culling-cancelled", invocation_id, ());
+    Ok(CullingSuggestions::default())
+}
+
+#[tauri::command]
 pub async fn cull_images(
     paths: Vec<String>,
     settings: CullingSettings,
     invocation_id: String,
     app_handle: AppHandle,
 ) -> Result<CullingSuggestions, String> {
+    let mut invocation = CullingInvocationGuard::register(&invocation_id)?;
+    let cancellation = Arc::clone(&invocation.cancellation);
+    let total_count = paths.len();
+    emit_culling(&app_handle, "culling-start", &invocation_id, total_count);
+
     if paths.is_empty() {
-        return Ok(CullingSuggestions::default());
+        let suggestions = CullingSuggestions::default();
+        if invocation.conclude() {
+            emit_culling(&app_handle, "culling-cancelled", &invocation_id, ());
+        } else {
+            emit_culling(
+                &app_handle,
+                "culling-complete",
+                &invocation_id,
+                &suggestions,
+            );
+        }
+        return Ok(suggestions);
     }
 
     let app_settings = load_settings(app_handle.clone()).unwrap_or_default();
-
-    let total_count = paths.len();
     let completed_count = Arc::new(AtomicUsize::new(0));
-    emit_culling(&app_handle, "culling-start", &invocation_id, total_count);
 
     let hasher = HasherConfig::new()
         .hash_alg(HashAlg::DoubleGradient)
         .hash_size(16, 16)
         .to_hasher();
 
-    let analysis_results: Vec<Result<ImageAnalysisData, (String, String)>> = paths
-        .par_iter()
-        .map(|path| {
-            let completed = completed_count.fetch_add(1, Ordering::Relaxed) + 1;
-            emit_culling(
-                &app_handle,
-                "culling-progress",
-                &invocation_id,
-                CullingProgress {
-                    current: completed,
-                    total: total_count,
-                    stage: "Analyzing images...".to_string(),
-                },
-            );
-
-            analyze_image(path, &hasher, &app_settings).map_err(|e| (path.to_string(), e))
-        })
-        .collect();
+    let mut analysis_results: Vec<Result<ImageAnalysisData, (String, String)>> =
+        Vec::with_capacity(total_count);
+    let batch_size = rayon::current_num_threads().max(1);
+    for batch in paths.chunks(batch_size) {
+        if cancellation.is_requested() {
+            return finish_cancelled_culling(&mut invocation, &app_handle, &invocation_id);
+        }
+        let batch_results = batch
+            .par_iter()
+            .filter_map(|path| {
+                if cancellation.is_requested() {
+                    return None;
+                }
+                let result =
+                    analyze_image(path, &hasher, &app_settings).map_err(|e| (path.to_string(), e));
+                let completed = completed_count.fetch_add(1, Ordering::Relaxed) + 1;
+                emit_culling(
+                    &app_handle,
+                    "culling-progress",
+                    &invocation_id,
+                    CullingProgress {
+                        current: completed,
+                        total: total_count,
+                        stage: "Analyzing images...".to_string(),
+                    },
+                );
+                Some(result)
+            })
+            .collect::<Vec<_>>();
+        analysis_results.extend(batch_results);
+    }
+    if cancellation.is_requested() {
+        return finish_cancelled_culling(&mut invocation, &app_handle, &invocation_id);
+    }
 
     let mut successful_analyses = Vec::new();
     let mut failed_paths = Vec::new();
@@ -1047,12 +1206,19 @@ pub async fn cull_images(
                     settings.detect_subject,
                     settings.review_focus,
                 );
+                cancellation.attach_worker(local_worker.cancellation_handle());
                 worker = Some(local_worker);
                 status
             }
             Err(_) => "unavailable".to_owned(),
         }
     };
+    if cancellation.is_requested() {
+        drop(worker.take());
+        cancellation.detach_worker();
+        return finish_cancelled_culling(&mut invocation, &app_handle, &invocation_id);
+    }
+
     let mut face_runtime =
         if settings.detect_subject || settings.detect_closed_eyes || settings.review_focus {
             match face_processing::load_for_app(&app_handle) {
@@ -1079,6 +1245,12 @@ pub async fn cull_images(
             },
         );
         for data in &mut successful_analyses {
+            if cancellation.is_requested() {
+                drop(worker.take());
+                cancellation.detach_worker();
+                drop(face_runtime.take());
+                return finish_cancelled_culling(&mut invocation, &app_handle, &invocation_id);
+            }
             match load_analysis_image(&data.result.path, &app_settings) {
                 Ok(image) => {
                     update_assisted_result(data, &image, &settings, &mut worker, &mut face_runtime);
@@ -1095,6 +1267,12 @@ pub async fn cull_images(
                     data.result.review_alerts.push("subjectUnknown".to_owned());
                 }
             }
+            if cancellation.is_requested() {
+                drop(worker.take());
+                cancellation.detach_worker();
+                drop(face_runtime.take());
+                return finish_cancelled_culling(&mut invocation, &app_handle, &invocation_id);
+            }
         }
         if (settings.detect_subject
             && successful_analyses
@@ -1107,6 +1285,13 @@ pub async fn cull_images(
         {
             subject_analysis_status = "error".to_owned();
         }
+    }
+
+    drop(worker.take());
+    cancellation.detach_worker();
+    drop(face_runtime.take());
+    if cancellation.is_requested() {
+        return finish_cancelled_culling(&mut invocation, &app_handle, &invocation_id);
     }
 
     emit_culling(
@@ -1129,6 +1314,9 @@ pub async fn cull_images(
 
     if settings.group_similar {
         for i in 0..successful_analyses.len() {
+            if cancellation.is_requested() {
+                return finish_cancelled_culling(&mut invocation, &app_handle, &invocation_id);
+            }
             if processed_indices[i] {
                 continue;
             }
@@ -1141,6 +1329,9 @@ pub async fn cull_images(
             queue.push_back(i);
 
             while let Some(current_idx) = queue.pop_front() {
+                if cancellation.is_requested() {
+                    return finish_cancelled_culling(&mut invocation, &app_handle, &invocation_id);
+                }
                 for j in (current_idx + 1)..successful_analyses.len() {
                     if processed_indices[j] {
                         continue;
@@ -1182,6 +1373,9 @@ pub async fn cull_images(
 
     if settings.filter_blurry {
         for i in 0..successful_analyses.len() {
+            if cancellation.is_requested() {
+                return finish_cancelled_culling(&mut invocation, &app_handle, &invocation_id);
+            }
             if !processed_indices[i] {
                 let item = &successful_analyses[i];
                 if item.result.sharpness_metric < effective_blur_threshold(&settings) {
@@ -1216,6 +1410,10 @@ pub async fn cull_images(
         .unknown_images
         .sort_by(|left, right| left.path.cmp(&right.path));
 
+    if invocation.conclude() {
+        emit_culling(&app_handle, "culling-cancelled", &invocation_id, ());
+        return Ok(CullingSuggestions::default());
+    }
     emit_culling(
         &app_handle,
         "culling-complete",
@@ -1228,6 +1426,27 @@ pub async fn cull_images(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancellation_is_scoped_and_allows_restart_after_settlement() {
+        let first_id = "culling-cancel-test-first";
+        let second_id = "culling-cancel-test-second";
+        let (mut first, mut second) = (
+            CullingInvocationGuard::register(first_id).unwrap(),
+            CullingInvocationGuard::register(second_id).unwrap(),
+        );
+
+        assert!(request_culling_cancel(first_id));
+        assert!(first.cancellation.is_requested());
+        assert!(!second.cancellation.is_requested());
+        assert!(first.conclude());
+        assert!(!request_culling_cancel(first_id));
+        assert!(!second.conclude());
+
+        let mut restarted = CullingInvocationGuard::register(first_id).unwrap();
+        assert!(!restarted.cancellation.is_requested());
+        assert!(!restarted.conclude());
+    }
 
     #[test]
     fn native_focus_score_does_not_raise_review_without_calibration() {

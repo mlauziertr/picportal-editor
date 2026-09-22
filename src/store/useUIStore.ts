@@ -90,6 +90,8 @@ interface CullingModalState {
   pathsToCull: Array<string>;
   invocationId?: string | null;
   hiddenForEditor?: boolean;
+  isCancelling?: boolean;
+  cancelled?: boolean;
 }
 
 const ALL_PANELS: Panel[] = [

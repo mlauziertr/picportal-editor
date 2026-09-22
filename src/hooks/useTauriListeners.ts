@@ -6,7 +6,11 @@ import { useProcessStore } from '../store/useProcessStore';
 import { useEditorStore } from '../store/useEditorStore';
 import { useUIStore } from '../store/useUIStore';
 import { useLibraryStore } from '../store/useLibraryStore';
-import { cullingEventMatches } from '../utils/cullingReviewSession';
+import {
+  completeCullingCancellation,
+  cullingEventMatches,
+  requestCullingCancellation,
+} from '../utils/cullingReviewSession';
 
 interface TauriListenerProps {
   refreshAllFolderTrees: () => void;
@@ -370,6 +374,8 @@ export function useTauriListeners({
                 progress: { current: 0, total: event.payload.body, stage: 'Initializing...' },
                 suggestions: null,
                 error: null,
+                isCancelling: state.cullingModalState.isCancelling,
+                cancelled: false,
               },
             };
           });
@@ -385,6 +391,30 @@ export function useTauriListeners({
           });
         }
       }),
+      listen('culling-cancelling', (event: any) => {
+        if (isEffectActive) {
+          useUIStore.getState().setUI((state) => {
+            if (!cullingEventMatches(state.cullingModalState, event.payload?.invocationId)) {
+              return {};
+            }
+            return {
+              cullingModalState: requestCullingCancellation(state.cullingModalState),
+            };
+          });
+        }
+      }),
+      listen('culling-cancelled', (event: any) => {
+        if (isEffectActive) {
+          useUIStore.getState().setUI((state) => {
+            if (!cullingEventMatches(state.cullingModalState, event.payload?.invocationId)) {
+              return {};
+            }
+            return {
+              cullingModalState: completeCullingCancellation(state.cullingModalState),
+            };
+          });
+        }
+      }),
       listen('culling-complete', (event: any) => {
         if (isEffectActive) {
           useUIStore.getState().setUI((state) => {
@@ -394,8 +424,11 @@ export function useTauriListeners({
             return {
               cullingModalState: {
                 ...state.cullingModalState,
+                invocationId: null,
                 progress: null,
                 suggestions: event.payload.body,
+                isCancelling: false,
+                cancelled: false,
               },
             };
           });
@@ -410,8 +443,11 @@ export function useTauriListeners({
             return {
               cullingModalState: {
                 ...state.cullingModalState,
+                invocationId: null,
                 progress: null,
                 error: String(event.payload.body),
+                isCancelling: false,
+                cancelled: false,
               },
             };
           });

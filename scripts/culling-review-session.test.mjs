@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   beginCullingInvocation,
+  completeCullingCancellation,
   createCullingInvocationId,
   cullingAnalysisMessageKey,
   cullingEventMatches,
@@ -9,6 +10,7 @@ import {
   hideCullingReviewForEditor,
   initialCullingRejectPaths,
   populatedCullingResultsTab,
+  requestCullingCancellation,
   restoreCullingReviewOnLibraryReturn,
 } from '../src/utils/cullingReviewSession.ts';
 
@@ -67,10 +69,27 @@ const started = beginCullingInvocation({ ...hidden, hiddenForEditor: true }, sec
 assert.equal(started.invocationId, secondId);
 assert.equal(started.hiddenForEditor, false);
 assert.equal(started.suggestions, null);
+assert.deepEqual(started.progress, { current: 0, total: 0, stage: 'Starting...' });
+assert.equal(started.isCancelling, false);
+assert.equal(started.cancelled, false);
 assert.equal(cullingEventMatches(started, secondId), true);
 assert.equal(cullingEventMatches(started, firstId), false);
 assert.equal(cullingEventMatches({ invocationId: null }, secondId), false);
 assert.equal(cullingEventMatches(dismissedWithLateResults, firstId), false);
+
+const cancellationRequested = requestCullingCancellation(started);
+assert.equal(cancellationRequested.isCancelling, true);
+assert.equal(cancellationRequested.invocationId, secondId);
+assert.equal(requestCullingCancellation(cancellationRequested), cancellationRequested);
+const cancellationComplete = completeCullingCancellation(cancellationRequested);
+assert.equal(cancellationComplete.cancelled, true);
+assert.equal(cancellationComplete.isCancelling, false);
+assert.equal(cancellationComplete.invocationId, null);
+assert.equal(cancellationComplete.progress, null);
+const restarted = beginCullingInvocation(cancellationComplete, createCullingInvocationId());
+assert.equal(restarted.cancelled, false);
+assert.equal(restarted.isCancelling, false);
+assert.notEqual(restarted.invocationId, secondId);
 
 const emptyLists = { similarGroups: [], blurryImages: [], reviewAlerts: [], unknownImages: [], failedPaths: [] };
 for (const status of [
@@ -126,17 +145,31 @@ assert.equal(populatedCullingResultsTab(failedOnlyPass), 'failed');
 assert.deepEqual([...initialCullingRejectPaths(failedOnlyPass, 'standard')], []);
 
 const mixedCoveragePass = {
-  similarGroups: [{ duplicates: [{ path: '/photos/duplicate.raw' }] }],
-  blurryImages: [{ path: '/photos/blurry.raw' }],
+  similarGroups: [
+    {
+      duplicates: [
+        { path: '/photos/eyes-not-evaluated-duplicate.raw' },
+        { path: '/photos/regular-duplicate.raw' },
+      ],
+    },
+  ],
+  blurryImages: [
+    { path: '/photos/eyes-not-evaluated-blurry.raw' },
+    { path: '/photos/regular-blurry.raw' },
+  ],
   reviewAlerts: [],
-  unknownImages: [{ path: '/photos/eyes-not-evaluated.raw' }],
+  unknownImages: [
+    { path: '/photos/eyes-not-evaluated-duplicate.raw', eyeState: 'not-evaluated' },
+    { path: '/photos/eyes-not-evaluated-blurry.raw', eyeState: 'not-evaluated' },
+  ],
   failedPaths: ['/photos/unreadable.raw'],
 };
 const mixedRejects = initialCullingRejectPaths(mixedCoveragePass, 'extreme');
 assert.equal(hasCullingResultItems(mixedCoveragePass), true);
-assert.equal(mixedRejects.has('/photos/duplicate.raw'), true);
-assert.equal(mixedRejects.has('/photos/blurry.raw'), true);
-assert.equal(mixedRejects.has('/photos/eyes-not-evaluated.raw'), false);
+assert.equal(mixedRejects.has('/photos/regular-duplicate.raw'), true);
+assert.equal(mixedRejects.has('/photos/regular-blurry.raw'), true);
+assert.equal(mixedRejects.has('/photos/eyes-not-evaluated-duplicate.raw'), false);
+assert.equal(mixedRejects.has('/photos/eyes-not-evaluated-blurry.raw'), false);
 assert.equal(mixedRejects.has('/photos/unreadable.raw'), false);
 
 console.log('culling review session preserves explicit review coverage');

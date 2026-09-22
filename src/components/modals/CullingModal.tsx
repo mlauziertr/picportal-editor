@@ -26,6 +26,7 @@ import {
   hasCullingResultItems,
   initialCullingRejectPaths,
   populatedCullingResultsTab,
+  requestCullingCancellation,
 } from '../../utils/cullingReviewSession';
 
 interface CullingModalProps {
@@ -34,6 +35,8 @@ interface CullingModalProps {
   progress: Progress | null;
   suggestions: CullingSuggestions | null;
   error: string | null;
+  isCancelling: boolean;
+  cancelled: boolean;
   imagePaths: string[];
   thumbnails: Record<string, string>;
   onApply(action: 'reject' | 'rate_zero' | 'delete', paths: string[]): void;
@@ -97,8 +100,6 @@ function ReviewImageCard({ image, thumbnails, isSelected, onToggle, onOpenImage 
   const { t } = useTranslation();
   const alertLabels = image.reviewAlerts.map((alert) => {
     switch (alert) {
-      case 'focusReview':
-        return t('modals.culling.focusReviewAlert');
       case 'eyesClosed':
         return t('modals.culling.eyesClosedAlert');
       case 'eyesUnknown':
@@ -192,6 +193,8 @@ export default function CullingModal({
   progress,
   suggestions,
   error,
+  isCancelling,
+  cancelled,
   imagePaths,
   thumbnails,
   onApply,
@@ -201,7 +204,7 @@ export default function CullingModal({
   const { t } = useTranslation();
   const [isMounted, setIsMounted] = useState(false);
   const [show, setShow] = useState(false);
-  const [stage, setStage] = useState<'settings' | 'progress' | 'results'>('settings');
+  const [stage, setStage] = useState<'settings' | 'progress' | 'results' | 'cancelled'>('settings');
 
   const [settings, setSettings] = useState<CullingSettings>({
     groupSimilar: true,
@@ -257,12 +260,14 @@ export default function CullingModal({
   useEffect(() => {
     if (suggestions || error) {
       setStage('results');
+    } else if (cancelled) {
+      setStage('cancelled');
     } else if (progress) {
       setStage('progress');
     } else if (isOpen) {
       setStage('settings');
     }
-  }, [progress, suggestions, error, isOpen]);
+  }, [progress, suggestions, error, cancelled, isOpen]);
 
   useEffect(() => {
     if (stage === 'results' && suggestions) {
@@ -277,6 +282,8 @@ export default function CullingModal({
   }, [suggestions]);
 
   const handleStartCulling = useCallback(async () => {
+    const current = useUIStore.getState().cullingModalState;
+    if (current.progress || current.isCancelling) return;
     const invocationId = createCullingInvocationId();
     useUIStore.getState().setUI((state) => ({
       cullingModalState: beginCullingInvocation(state.cullingModalState, invocationId),
@@ -285,9 +292,37 @@ export default function CullingModal({
       await invoke(Invokes.CullImages, { paths: imagePaths, settings, invocationId });
     } catch (err) {
       console.error('Culling failed to start:', err);
-      onError(String(err));
+      if (useUIStore.getState().cullingModalState.invocationId === invocationId) {
+        onError(String(err));
+      }
     }
   }, [imagePaths, settings, onError]);
+
+  const handleCancelCulling = useCallback(async () => {
+    const current = useUIStore.getState().cullingModalState;
+    const invocationId = current.invocationId;
+    if (!invocationId || current.isCancelling || !current.progress) return;
+    useUIStore.getState().setUI((state) => ({
+      cullingModalState: requestCullingCancellation(state.cullingModalState),
+    }));
+    try {
+      const accepted = await invoke<boolean>(Invokes.CancelCulling, { invocationId });
+      if (!accepted) {
+        useUIStore.getState().setUI((state) =>
+          state.cullingModalState.invocationId === invocationId
+            ? { cullingModalState: { ...state.cullingModalState, isCancelling: false } }
+            : {},
+        );
+      }
+    } catch (err) {
+      console.error('Culling cancellation failed:', err);
+      useUIStore.getState().setUI((state) =>
+        state.cullingModalState.invocationId === invocationId
+          ? { cullingModalState: { ...state.cullingModalState, isCancelling: false } }
+          : {},
+      );
+    }
+  }, []);
 
   const handleToggleReject = (path: string) => {
     setSelectedRejects((prev) => {
@@ -439,9 +474,11 @@ export default function CullingModal({
   );
 
   const renderProgress = () => (
-    <div className="flex flex-col items-center justify-center h-48">
+    <div className="flex flex-col items-center justify-center h-56">
       <Loader2 className="w-16 h-16 text-accent animate-spin" />
-      <p className="mt-4 text-text-primary">{progress?.stage || t('modals.culling.starting')}</p>
+      <p className="mt-4 text-text-primary">
+        {isCancelling ? t('modals.culling.cancelling') : progress?.stage || t('modals.culling.starting')}
+      </p>
       {progress && progress.total > 0 && (
         <div className="w-full bg-surface rounded-full h-2.5 mt-2">
           <div
@@ -450,6 +487,31 @@ export default function CullingModal({
           />
         </div>
       )}
+      <button
+        className="mt-6 px-4 py-2 rounded-md text-text-secondary hover:bg-surface transition-colors disabled:opacity-50"
+        onClick={handleCancelCulling}
+        disabled={isCancelling}
+      >
+        {isCancelling ? t('modals.culling.cancelling') : t('modals.culling.cancelAnalysis')}
+      </button>
+    </div>
+  );
+
+  const renderCancelled = () => (
+    <div className="flex flex-col items-center justify-center h-48 text-center">
+      <XCircle className="w-16 h-16 text-text-secondary" />
+      <Text variant={TextVariants.heading} className="mt-4">
+        {t('modals.culling.analysisCancelled')}
+      </Text>
+      <div className="flex gap-3 mt-6">
+        <button
+          className="px-4 py-2 rounded-md text-text-secondary hover:bg-surface transition-colors"
+          onClick={onClose}
+        >
+          {t('modals.culling.close')}
+        </button>
+        <Button onClick={handleStartCulling}>{t('modals.culling.startAgain')}</Button>
+      </div>
     </div>
   );
 
@@ -721,6 +783,8 @@ export default function CullingModal({
         return renderProgress();
       case 'results':
         return renderResults();
+      case 'cancelled':
+        return renderCancelled();
       default:
         return null;
     }
@@ -733,7 +797,7 @@ export default function CullingModal({
       className={`fixed inset-0 flex items-center justify-center z-50 bg-black/30 backdrop-blur-xs transition-opacity duration-300 ease-in-out ${
         show ? 'opacity-100' : 'opacity-0'
       }`}
-      onClick={onClose}
+      onClick={progress || isCancelling ? undefined : onClose}
       role="dialog"
       aria-modal="true"
     >

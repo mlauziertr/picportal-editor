@@ -6,7 +6,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use image::{DynamicImage, Rgb, RgbImage, imageops};
+use image::{DynamicImage, GenericImageView, Rgb, RgbImage, imageops};
 use ort::{session::Session, value::Tensor};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -234,8 +234,7 @@ pub fn choose_fallback_threshold(
 }
 
 pub fn crop_face(image: &DynamicImage, face: &FaceBox, scale: f32) -> Option<DynamicImage> {
-    let rgb = image.to_rgb8();
-    let (width, height) = rgb.dimensions();
+    let (width, height) = image.dimensions();
     let side = (face.width.max(face.height) * scale).max(1.0);
     let center_x = face.x + face.width / 2.0;
     let center_y = face.y + face.height / 2.0;
@@ -247,7 +246,9 @@ pub fn crop_face(image: &DynamicImage, face: &FaceBox, scale: f32) -> Option<Dyn
         return None;
     }
     Some(DynamicImage::ImageRgb8(
-        imageops::crop_imm(&rgb, left, top, right - left, bottom - top).to_image(),
+        image
+            .crop_imm(left, top, right - left, bottom - top)
+            .to_rgb8(),
     ))
 }
 
@@ -469,6 +470,24 @@ mod tests {
 
     fn choose_fallback_threshold_from_values(_threshold: f32, face_count: usize) -> bool {
         face_count == 0
+    }
+
+    #[test]
+    fn focus_crop_preserves_bounds_and_rgb_conversion() {
+        let mut image: image::ImageBuffer<image::Rgba<u16>, Vec<u16>> =
+            image::ImageBuffer::new(100, 80);
+        image.put_pixel(20, 15, image::Rgba([u16::MAX, 0, u16::MAX / 2, u16::MAX]));
+        let face = FaceBox {
+            x: 20.0,
+            y: 15.0,
+            width: 20.0,
+            height: 10.0,
+        };
+
+        let crop = crop_face(&DynamicImage::ImageRgba16(image), &face, 1.0).unwrap();
+
+        assert_eq!(crop.dimensions(), (20, 20));
+        assert_eq!(crop.to_rgb8().get_pixel(0, 5).0, [255, 0, 127]);
     }
 
     #[test]

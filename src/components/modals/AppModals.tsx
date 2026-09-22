@@ -333,6 +333,8 @@ export default function AppModals(props: AppModalsProps) {
         progress={cullingModalState.progress}
         suggestions={cullingModalState.suggestions}
         error={cullingModalState.error}
+        isCancelling={Boolean(cullingModalState.isCancelling)}
+        cancelled={Boolean(cullingModalState.cancelled)}
         imagePaths={cullingModalState.pathsToCull}
         thumbnails={thumbnails}
         onOpenImage={(path) => {
@@ -354,7 +356,15 @@ export default function AppModals(props: AppModalsProps) {
           });
         }}
         onError={(err) => {
-          setUI((state) => ({ cullingModalState: { ...state.cullingModalState, error: err, progress: null } }));
+          setUI((state) => ({
+            cullingModalState: {
+              ...state.cullingModalState,
+              invocationId: null,
+              error: err,
+              progress: null,
+              isCancelling: false,
+            },
+          }));
         }}
       />
       <CollageModal

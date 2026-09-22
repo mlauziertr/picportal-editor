@@ -6,6 +6,8 @@ export interface CullingReviewSession {
   pathsToCull: string[];
   invocationId?: string | null;
   hiddenForEditor?: boolean;
+  isCancelling?: boolean;
+  cancelled?: boolean;
 }
 
 export function createCullingInvocationId(): string {
@@ -18,9 +20,11 @@ export function beginCullingInvocation<T extends CullingReviewSession>(session: 
     invocationId,
     isOpen: true,
     suggestions: null,
-    progress: null,
+    progress: { current: 0, total: 0, stage: 'Starting...' },
     error: null,
     hiddenForEditor: false,
+    isCancelling: false,
+    cancelled: false,
   };
 }
 
@@ -33,6 +37,25 @@ export function cullingEventMatches(
     session.invocationId.length > 0 &&
     eventInvocationId === session.invocationId
   );
+}
+
+export function requestCullingCancellation<T extends CullingReviewSession>(session: T): T {
+  if (!session.invocationId || session.progress == null || session.isCancelling) {
+    return session;
+  }
+  return { ...session, isCancelling: true };
+}
+
+export function completeCullingCancellation<T extends CullingReviewSession>(session: T): T {
+  return {
+    ...session,
+    invocationId: null,
+    progress: null,
+    suggestions: null,
+    error: null,
+    isCancelling: false,
+    cancelled: true,
+  };
 }
 
 export function hideCullingReviewForEditor<T extends CullingReviewSession>(session: T): T {
@@ -97,11 +120,15 @@ export function initialCullingRejectPaths(
   suggestions: {
     similarGroups: readonly { duplicates: readonly { path: string }[] }[];
     blurryImages: readonly { path: string }[];
+    unknownImages: readonly { path: string; eyeState?: string }[];
     failedPaths: readonly string[];
   },
   selectionAmount: 'extreme' | 'few' | 'standard' | 'more',
 ): Set<string> {
   const rejects = new Set<string>();
+  const protectedPaths = new Set(
+    suggestions.unknownImages.filter((image) => image.eyeState === 'not-evaluated').map((image) => image.path),
+  );
   suggestions.similarGroups.forEach((group) => {
     const keepCount =
       selectionAmount === 'extreme'
@@ -111,9 +138,14 @@ export function initialCullingRejectPaths(
           : selectionAmount === 'more'
             ? Math.max(1, Math.ceil((group.duplicates.length + 1) * 0.75))
             : Math.max(1, Math.ceil((group.duplicates.length + 1) * 0.5));
-    group.duplicates.slice(Math.max(0, keepCount - 1)).forEach((duplicate) => rejects.add(duplicate.path));
+    group.duplicates
+      .slice(Math.max(0, keepCount - 1))
+      .filter((duplicate) => !protectedPaths.has(duplicate.path))
+      .forEach((duplicate) => rejects.add(duplicate.path));
   });
-  suggestions.blurryImages.forEach((image) => rejects.add(image.path));
+  suggestions.blurryImages
+    .filter((image) => !protectedPaths.has(image.path))
+    .forEach((image) => rejects.add(image.path));
   return rejects;
 }
 
