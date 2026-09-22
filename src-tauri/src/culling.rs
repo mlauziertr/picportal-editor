@@ -134,8 +134,6 @@ struct ImageAnalysisData {
 const SUBJECT_OVERLAP_MIN: f32 = 0.5;
 const NOSE_DISTANCE_FACTOR: f32 = 1.5;
 const TORSO_INSIDE_MIN: usize = 2;
-const SUBJECT_PAD_TOP: f32 = 0.25;
-const SUBJECT_PAD_SIDE: f32 = 0.15;
 const WEIGHT_SHARPNESS: f64 = 0.40;
 const WEIGHT_CENTER_FOCUS: f64 = 0.35;
 const WEIGHT_EXPOSURE: f64 = 0.25;
@@ -490,15 +488,15 @@ fn scale_pose_frame(
         .collect()
 }
 
-fn padded_subject_crop(
+fn exact_subject_crop(
     image: &DynamicImage,
     subject: &SubjectBox,
 ) -> Option<(DynamicImage, f32, f32, f32, f32)> {
     let width = image.width() as f32;
     let height = image.height() as f32;
-    let x0 = (subject.x - SUBJECT_PAD_SIDE * subject.width).max(0.0);
-    let y0 = (subject.y - SUBJECT_PAD_TOP * subject.height).max(0.0);
-    let x1 = (subject.x + subject.width * (1.0 + SUBJECT_PAD_SIDE)).min(width);
+    let x0 = subject.x.max(0.0);
+    let y0 = subject.y.max(0.0);
+    let x1 = (subject.x + subject.width).min(width);
     let y1 = (subject.y + subject.height).min(height);
     let x = x0.floor() as u32;
     let y = y0.floor() as u32;
@@ -541,7 +539,7 @@ fn collect_association_poses(
     );
     for subject in boxes {
         if let Some((crop, origin_x, origin_y, crop_width, crop_height)) =
-            padded_subject_crop(image, subject)
+            exact_subject_crop(image, subject)
             && let Ok(crop_frame) = worker.pose(&crop)
         {
             poses.extend(scale_pose_frame(
@@ -1466,6 +1464,18 @@ mod tests {
             &[covering_bust],
         );
         assert_eq!(roles, vec![AttributedRole::Primary]);
+    }
+
+    #[test]
+    fn subject_pose_crop_uses_only_the_exact_subject_box() {
+        let image = DynamicImage::new_rgba8(100, 100);
+        let subject = box_at(20.0, 30.0, 40.0, 50.0);
+        let (crop, origin_x, origin_y, crop_width, crop_height) =
+            exact_subject_crop(&image, &subject).unwrap();
+
+        assert_eq!((origin_x, origin_y), (20.0, 30.0));
+        assert_eq!((crop_width, crop_height), (40.0, 50.0));
+        assert_eq!((crop.width(), crop.height()), (40, 50));
     }
 
     #[test]

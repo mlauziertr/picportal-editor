@@ -13,14 +13,16 @@ Le programme n’infère qu’avec des fichiers locaux vérifiés par
   est vide ;
 - MediaPipe Pose Landmarker lite (`Apache-2.0`) pour lier un visage au buste
   du sujet. Chaque visage est jugé seul : il est principal si au moins la
-  moitié de son aire est dans la boîte et qu’un nez de buste (au moins deux
-  points parmi épaules et hanches dans la boîte d’origine) est à moins de
-  1,5 hauteur de visage. Un visage qui rate ce test reste non lié. Le même
+  moitié de son aire est dans une même boîte et qu’un nez de buste (au moins
+  deux points parmi épaules et hanches, chacun dans l’une quelconque des
+  boîtes sujet) est à moins de 1,5 × max(largeur, hauteur) du visage. Le nez
+  retenu peut provenir de n’importe quelle boîte sujet : aucune contrainte de
+  même boîte n’est ajoutée. Un visage qui rate ce test reste non lié. Le même
   prédicat peut encore lier un danseur supplémentaire dont le visage est à
-  moitié dans la boîte et à moins de 1,5 hauteur d’un nez retenu (cas mesuré
-  img_125 : recouvrement 0,74, 148 px pour une limite 159 px). Ce faux lien
-  est une limite connue, pas une abstention. Sans le poids de pose, il n’y a
-  pas de repli par recouvrement ;
+  moitié dans une boîte et à moins de 1,5 × max(largeur, hauteur) d’un nez
+  retenu (cas mesuré img_125 : recouvrement 0,74, 148 px pour une limite
+  159 px). Ce faux lien est une limite connue, pas une abstention. Sans le
+  poids de pose, il n’y a pas de repli par recouvrement ;
 - le détecteur YuNet (`MIT`) dans `models/face` pour les visages et le repli
   de seuil ;
 - la sortie VGG16 (`MIT`) comme signal facultatif, pas comme rejet.
