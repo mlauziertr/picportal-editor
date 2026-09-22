@@ -22,6 +22,7 @@ import {
   beginCullingInvocation,
   createCullingInvocationId,
   cullingAnalysisMessageKey,
+  cullingReviewStage,
   emptyCullingResultsHeadline,
   hasCullingResultItems,
   initialCullingRejectPaths,
@@ -204,7 +205,7 @@ export default function CullingModal({
   const { t } = useTranslation();
   const [isMounted, setIsMounted] = useState(false);
   const [show, setShow] = useState(false);
-  const [stage, setStage] = useState<'settings' | 'progress' | 'results' | 'cancelled'>('settings');
+  const stage = cullingReviewStage({ progress, suggestions, error, cancelled });
 
   const [settings, setSettings] = useState<CullingSettings>({
     groupSimilar: true,
@@ -251,29 +252,16 @@ export default function CullingModal({
     }
     const timer = setTimeout(() => {
       setIsMounted(false);
-      setStage('settings');
       setSelectedRejects(new Set());
     }, 300);
     return () => clearTimeout(timer);
   }, [isOpen]);
 
   useEffect(() => {
-    if (suggestions || error) {
-      setStage('results');
-    } else if (cancelled) {
-      setStage('cancelled');
-    } else if (progress) {
-      setStage('progress');
-    } else if (isOpen) {
-      setStage('settings');
-    }
-  }, [progress, suggestions, error, cancelled, isOpen]);
-
-  useEffect(() => {
-    if (stage === 'results' && suggestions) {
+    if (suggestions) {
       setSelectedRejects(initialCullingRejectPaths(suggestions, settings.selectionAmount));
     }
-  }, [stage, suggestions, settings.selectionAmount]);
+  }, [suggestions, settings.selectionAmount]);
 
   useEffect(() => {
     if (suggestions) {
@@ -323,6 +311,12 @@ export default function CullingModal({
       );
     }
   }, []);
+
+  const handleClose = useCallback(() => {
+    const current = useUIStore.getState().cullingModalState;
+    if (current.invocationId || current.isCancelling || cullingReviewStage(current) === 'progress') return;
+    onClose();
+  }, [onClose]);
 
   const handleToggleReject = (path: string) => {
     setSelectedRejects((prev) => {
@@ -464,7 +458,7 @@ export default function CullingModal({
       <div className="flex justify-end gap-3 mt-8">
         <button
           className="px-4 py-2 rounded-md text-text-secondary hover:bg-surface transition-colors"
-          onClick={onClose}
+          onClick={handleClose}
         >
           {t('modals.culling.cancel')}
         </button>
@@ -506,7 +500,7 @@ export default function CullingModal({
       <div className="flex gap-3 mt-6">
         <button
           className="px-4 py-2 rounded-md text-text-secondary hover:bg-surface transition-colors"
-          onClick={onClose}
+          onClick={handleClose}
         >
           {t('modals.culling.close')}
         </button>
@@ -525,7 +519,7 @@ export default function CullingModal({
           </Text>
           <Text>{error}</Text>
           <div className="mt-6">
-            <Button onClick={onClose}>{t('modals.culling.close')}</Button>
+            <Button onClick={handleClose}>{t('modals.culling.close')}</Button>
           </div>
         </div>
       );
@@ -543,7 +537,7 @@ export default function CullingModal({
               {t(`modals.culling.${headline}`)}
             </Text>
             <div className="mt-6">
-              <Button onClick={onClose}>{t('modals.culling.done')}</Button>
+              <Button onClick={handleClose}>{t('modals.culling.done')}</Button>
             </div>
           </div>
         );
@@ -556,7 +550,7 @@ export default function CullingModal({
           </Text>
           <Text>{t('modals.culling.noIssuesDesc')}</Text>
           <div className="mt-6">
-            <Button onClick={onClose}>{t('modals.culling.done')}</Button>
+            <Button onClick={handleClose}>{t('modals.culling.done')}</Button>
           </div>
         </div>
       );
@@ -762,7 +756,7 @@ export default function CullingModal({
           <div className="flex gap-3">
             <button
               className="px-4 py-2 rounded-md text-text-secondary hover:bg-surface transition-colors"
-              onClick={onClose}
+              onClick={handleClose}
             >
               {t('modals.culling.cancel')}
             </button>
@@ -797,7 +791,7 @@ export default function CullingModal({
       className={`fixed inset-0 flex items-center justify-center z-50 bg-black/30 backdrop-blur-xs transition-opacity duration-300 ease-in-out ${
         show ? 'opacity-100' : 'opacity-0'
       }`}
-      onClick={progress || isCancelling ? undefined : onClose}
+      onClick={handleClose}
       role="dialog"
       aria-modal="true"
     >

@@ -5,6 +5,7 @@ import {
   createCullingInvocationId,
   cullingAnalysisMessageKey,
   cullingEventMatches,
+  cullingReviewStage,
   emptyCullingResultsHeadline,
   hasCullingResultItems,
   hideCullingReviewForEditor,
@@ -72,6 +73,8 @@ assert.equal(started.suggestions, null);
 assert.deepEqual(started.progress, { current: 0, total: 0, stage: 'Starting...' });
 assert.equal(started.isCancelling, false);
 assert.equal(started.cancelled, false);
+assert.equal(cullingReviewStage(started), 'progress');
+assert.notEqual(cullingReviewStage(started), 'settings');
 assert.equal(cullingEventMatches(started, secondId), true);
 assert.equal(cullingEventMatches(started, firstId), false);
 assert.equal(cullingEventMatches({ invocationId: null }, secondId), false);
@@ -86,9 +89,11 @@ assert.equal(cancellationComplete.cancelled, true);
 assert.equal(cancellationComplete.isCancelling, false);
 assert.equal(cancellationComplete.invocationId, null);
 assert.equal(cancellationComplete.progress, null);
+assert.equal(cullingReviewStage(cancellationComplete), 'cancelled');
 const restarted = beginCullingInvocation(cancellationComplete, createCullingInvocationId());
 assert.equal(restarted.cancelled, false);
 assert.equal(restarted.isCancelling, false);
+assert.equal(cullingReviewStage(restarted), 'progress');
 assert.notEqual(restarted.invocationId, secondId);
 
 const emptyLists = { similarGroups: [], blurryImages: [], reviewAlerts: [], unknownImages: [], failedPaths: [] };

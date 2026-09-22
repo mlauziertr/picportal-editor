@@ -62,6 +62,20 @@ export function hideCullingReviewForEditor<T extends CullingReviewSession>(sessi
   return { ...session, isOpen: false, hiddenForEditor: true };
 }
 
+export type CullingReviewStage = 'settings' | 'progress' | 'results' | 'cancelled';
+
+export function cullingReviewStage(session: {
+  progress: unknown;
+  suggestions: unknown;
+  error: string | null;
+  cancelled?: boolean;
+}): CullingReviewStage {
+  if (session.suggestions != null || session.error != null) return 'results';
+  if (session.cancelled) return 'cancelled';
+  if (session.progress != null) return 'progress';
+  return 'settings';
+}
+
 export function cullingAnalysisMessageKey(status: string): string | null {
   switch (status) {
     case 'ready':
