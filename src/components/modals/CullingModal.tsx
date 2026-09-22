@@ -23,6 +23,8 @@ import {
   createCullingInvocationId,
   cullingAnalysisMessageKey,
   emptyCullingResultsHeadline,
+  hasCullingResultItems,
+  initialCullingRejectPaths,
   populatedCullingResultsTab,
 } from '../../utils/cullingReviewSession';
 
@@ -153,7 +155,7 @@ function ReviewImageCard({ image, thumbnails, isSelected, onToggle, onOpenImage 
         <Text variant={TextVariants.small} className="text-text-secondary">
           {t('modals.culling.subjectStatus')}:{' '}
           {image.subjectStatus === 'multiple' ? t('modals.culling.multipleSubjects') : image.subjectStatus};{' '}
-          {t('modals.culling.focusStatus')}: {image.focusStatus}
+          {t('modals.culling.focusStatus')}: {image.focusStatus}; {t('modals.culling.eyeStatus')}: {image.eyeState}
         </Text>
         {image.focusSignal !== null && (
           <Text variant={TextVariants.small} className="text-text-secondary">
@@ -216,7 +218,7 @@ export default function CullingModal({
 
   const [selectedRejects, setSelectedRejects] = useState<Set<string>>(new Set());
   const [action, setAction] = useState<CullAction>('reject');
-  const [activeTab, setActiveTab] = useState<'similar' | 'blurry' | 'alerts' | 'unknown'>('similar');
+  const [activeTab, setActiveTab] = useState<'similar' | 'blurry' | 'alerts' | 'unknown' | 'failed'>('similar');
   const retainedReviewRef = useRef(false);
   retainedReviewRef.current = Boolean(suggestions || error || progress);
 
@@ -264,20 +266,7 @@ export default function CullingModal({
 
   useEffect(() => {
     if (stage === 'results' && suggestions) {
-      const initialRejects = new Set<string>();
-      suggestions.similarGroups.forEach((group) => {
-        const keepCount =
-          settings.selectionAmount === 'extreme'
-            ? 1
-            : settings.selectionAmount === 'few'
-              ? Math.max(1, Math.ceil((group.duplicates.length + 1) * 0.25))
-              : settings.selectionAmount === 'more'
-                ? Math.max(1, Math.ceil((group.duplicates.length + 1) * 0.75))
-                : Math.max(1, Math.ceil((group.duplicates.length + 1) * 0.5));
-        group.duplicates.slice(Math.max(0, keepCount - 1)).forEach((dup) => initialRejects.add(dup.path));
-      });
-      suggestions.blurryImages.forEach((img) => initialRejects.add(img.path));
-      setSelectedRejects(initialRejects);
+      setSelectedRejects(initialCullingRejectPaths(suggestions, settings.selectionAmount));
     }
   }, [stage, suggestions, settings.selectionAmount]);
 
@@ -320,6 +309,7 @@ export default function CullingModal({
   const numBlurry = suggestions?.blurryImages.length || 0;
   const numAlerts = suggestions?.reviewAlerts.length || 0;
   const numUnknown = suggestions?.unknownImages.length || 0;
+  const numFailed = suggestions?.failedPaths.length || 0;
 
   const renderSettings = () => (
     <>
@@ -481,9 +471,8 @@ export default function CullingModal({
 
     if (!suggestions) return null;
 
-    const totalSuggestions = numSimilar + numBlurry + numAlerts + numUnknown;
     const analysisMessageKey = cullingAnalysisMessageKey(suggestions.subjectAnalysisStatus);
-    if (totalSuggestions === 0) {
+    if (!hasCullingResultItems(suggestions)) {
       const headline = emptyCullingResultsHeadline(suggestions.subjectAnalysisStatus);
       if (headline !== 'noIssuesFound') {
         return (
@@ -575,6 +564,19 @@ export default function CullingModal({
                 <span className="bg-surface text-text-secondary rounded-full px-2 py-0.5 text-xs">{numUnknown}</span>
               </button>
             )}
+            {numFailed > 0 && (
+              <button
+                onClick={() => setActiveTab('failed')}
+                className={`${
+                  activeTab === 'failed'
+                    ? 'border-accent text-accent'
+                    : 'border-transparent text-text-secondary hover:text-text-primary hover:border-gray-300'
+                } whitespace-nowrap py-2 px-1 border-b-2 font-medium text-sm`}
+              >
+                {t('modals.culling.unprocessedTab')}{' '}
+                <span className="bg-surface text-text-secondary rounded-full px-2 py-0.5 text-xs">{numFailed}</span>
+              </button>
+            )}
           </nav>
         </div>
 
@@ -664,6 +666,21 @@ export default function CullingModal({
                       onToggle={() => handleToggleReject(img.path)}
                       onOpenImage={() => onOpenImage(img.path)}
                     />
+                  ))}
+                </div>
+              )}
+              {activeTab === 'failed' && (
+                <div className="space-y-2">
+                  {suggestions.failedPaths.map((path) => (
+                    <div key={path} className="flex items-center gap-3 rounded-md bg-surface p-3">
+                      <XCircle size={20} className="shrink-0 text-red-500" />
+                      <div className="min-w-0">
+                        <Text variant={TextVariants.small}>{t('modals.culling.unprocessedFile')}</Text>
+                        <Text variant={TextVariants.small} className="truncate text-text-secondary" title={path}>
+                          {path}
+                        </Text>
+                      </div>
+                    </div>
                   ))}
                 </div>
               )}

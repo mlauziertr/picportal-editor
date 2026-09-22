@@ -64,19 +64,57 @@ export function cullingAnalysisMessageKey(status: string): string | null {
   }
 }
 
-export type CullingResultsTab = 'similar' | 'blurry' | 'alerts' | 'unknown';
+export type CullingResultsTab = 'similar' | 'blurry' | 'alerts' | 'unknown' | 'failed';
 
-export function populatedCullingResultsTab(suggestions: {
+type CullingResultLists = {
   similarGroups: readonly unknown[];
   blurryImages: readonly unknown[];
   reviewAlerts: readonly unknown[];
   unknownImages: readonly unknown[];
-}): CullingResultsTab {
+  failedPaths: readonly string[];
+};
+
+export function hasCullingResultItems(suggestions: CullingResultLists): boolean {
+  return (
+    suggestions.similarGroups.length > 0 ||
+    suggestions.blurryImages.length > 0 ||
+    suggestions.reviewAlerts.length > 0 ||
+    suggestions.unknownImages.length > 0 ||
+    suggestions.failedPaths.length > 0
+  );
+}
+
+export function populatedCullingResultsTab(suggestions: CullingResultLists): CullingResultsTab {
   if (suggestions.similarGroups.length > 0) return 'similar';
   if (suggestions.blurryImages.length > 0) return 'blurry';
   if (suggestions.reviewAlerts.length > 0) return 'alerts';
   if (suggestions.unknownImages.length > 0) return 'unknown';
+  if (suggestions.failedPaths.length > 0) return 'failed';
   return 'similar';
+}
+
+export function initialCullingRejectPaths(
+  suggestions: {
+    similarGroups: readonly { duplicates: readonly { path: string }[] }[];
+    blurryImages: readonly { path: string }[];
+    failedPaths: readonly string[];
+  },
+  selectionAmount: 'extreme' | 'few' | 'standard' | 'more',
+): Set<string> {
+  const rejects = new Set<string>();
+  suggestions.similarGroups.forEach((group) => {
+    const keepCount =
+      selectionAmount === 'extreme'
+        ? 1
+        : selectionAmount === 'few'
+          ? Math.max(1, Math.ceil((group.duplicates.length + 1) * 0.25))
+          : selectionAmount === 'more'
+            ? Math.max(1, Math.ceil((group.duplicates.length + 1) * 0.75))
+            : Math.max(1, Math.ceil((group.duplicates.length + 1) * 0.5));
+    group.duplicates.slice(Math.max(0, keepCount - 1)).forEach((duplicate) => rejects.add(duplicate.path));
+  });
+  suggestions.blurryImages.forEach((image) => rejects.add(image.path));
+  return rejects;
 }
 
 export function emptyCullingResultsHeadline(status: string): string {

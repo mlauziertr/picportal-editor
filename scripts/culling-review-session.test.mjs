@@ -5,7 +5,9 @@ import {
   cullingAnalysisMessageKey,
   cullingEventMatches,
   emptyCullingResultsHeadline,
+  hasCullingResultItems,
   hideCullingReviewForEditor,
+  initialCullingRejectPaths,
   populatedCullingResultsTab,
   restoreCullingReviewOnLibraryReturn,
 } from '../src/utils/cullingReviewSession.ts';
@@ -70,7 +72,7 @@ assert.equal(cullingEventMatches(started, firstId), false);
 assert.equal(cullingEventMatches({ invocationId: null }, secondId), false);
 assert.equal(cullingEventMatches(dismissedWithLateResults, firstId), false);
 
-const emptyLists = { similarGroups: [], blurryImages: [], reviewAlerts: [], unknownImages: [] };
+const emptyLists = { similarGroups: [], blurryImages: [], reviewAlerts: [], unknownImages: [], failedPaths: [] };
 for (const status of [
   'subject-ready-focus-calibration-unavailable',
   'focus-calibration-unavailable',
@@ -91,12 +93,14 @@ const unevaluablePass = {
   blurryImages: [],
   reviewAlerts: [],
   unknownImages: [],
+  failedPaths: [],
 };
 const similarPass = {
   similarGroups: [{ duplicates: [{ path: '/photos/soft.jpg' }] }],
   blurryImages: [],
   reviewAlerts: [],
   unknownImages: [],
+  failedPaths: [],
 };
 const afterUnevaluable = populatedCullingResultsTab(unevaluablePass);
 const afterSimilar = populatedCullingResultsTab(similarPass);
@@ -108,8 +112,31 @@ assert.equal(
     blurryImages: [{ path: '/photos/blur.jpg' }],
     reviewAlerts: [],
     unknownImages: [],
+    failedPaths: [],
   }),
   'blurry',
 );
 
-console.log('culling review session preserves the list across editor return');
+const failedOnlyPass = {
+  ...emptyLists,
+  failedPaths: ['/photos/unreadable.raw'],
+};
+assert.equal(hasCullingResultItems(failedOnlyPass), true);
+assert.equal(populatedCullingResultsTab(failedOnlyPass), 'failed');
+assert.deepEqual([...initialCullingRejectPaths(failedOnlyPass, 'standard')], []);
+
+const mixedCoveragePass = {
+  similarGroups: [{ duplicates: [{ path: '/photos/duplicate.raw' }] }],
+  blurryImages: [{ path: '/photos/blurry.raw' }],
+  reviewAlerts: [],
+  unknownImages: [{ path: '/photos/eyes-not-evaluated.raw' }],
+  failedPaths: ['/photos/unreadable.raw'],
+};
+const mixedRejects = initialCullingRejectPaths(mixedCoveragePass, 'extreme');
+assert.equal(hasCullingResultItems(mixedCoveragePass), true);
+assert.equal(mixedRejects.has('/photos/duplicate.raw'), true);
+assert.equal(mixedRejects.has('/photos/blurry.raw'), true);
+assert.equal(mixedRejects.has('/photos/eyes-not-evaluated.raw'), false);
+assert.equal(mixedRejects.has('/photos/unreadable.raw'), false);
+
+console.log('culling review session preserves explicit review coverage');

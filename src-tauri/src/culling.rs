@@ -597,6 +597,17 @@ fn primary_eye_review_alert(states: &[face_processing::EyeState]) -> Option<&'st
     }
 }
 
+fn review_coverage_is_unknown(
+    settings: &CullingSettings,
+    subject_status: &str,
+    focus_status: &str,
+    eye_state: &str,
+) -> bool {
+    subject_status == "unknown"
+        || (settings.review_focus && matches!(focus_status, "unknown" | "unavailable"))
+        || (settings.detect_closed_eyes && eye_state == "not-evaluated")
+}
+
 fn subject_status_label(
     detect_subject: bool,
     has_subject_boxes: bool,
@@ -1189,10 +1200,12 @@ pub async fn cull_images(
         if !data.result.review_alerts.is_empty() {
             suggestions.review_alerts.push(data.result.clone());
         }
-        if data.result.subject_status == "unknown"
-            || (settings.review_focus
-                && matches!(data.result.focus_status.as_str(), "unknown" | "unavailable"))
-        {
+        if review_coverage_is_unknown(
+            &settings,
+            &data.result.subject_status,
+            &data.result.focus_status,
+            &data.result.eye_state,
+        ) {
             suggestions.unknown_images.push(data.result.clone());
         }
     }
@@ -1262,6 +1275,30 @@ mod tests {
             primary_eye_review_alert(&[EyeState::Closed]),
             Some("eyesClosed")
         );
+    }
+
+    #[test]
+    fn eyes_only_without_a_detected_face_stays_explicitly_unknown() {
+        let settings = CullingSettings {
+            detect_subject: false,
+            detect_closed_eyes: true,
+            review_focus: false,
+            ..Default::default()
+        };
+
+        assert!(review_coverage_is_unknown(
+            &settings,
+            "not-evaluated",
+            "disabled",
+            "not-evaluated"
+        ));
+        assert!(!review_coverage_is_unknown(
+            &settings,
+            "not-evaluated",
+            "disabled",
+            "open"
+        ));
+        assert_eq!(primary_eye_review_alert(&[]), None);
     }
 
     #[test]
