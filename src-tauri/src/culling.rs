@@ -320,6 +320,31 @@ fn eye_state_label(state: face_processing::EyeState) -> &'static str {
     }
 }
 
+fn reviewed_primary_eye_state(states: &[face_processing::EyeState]) -> &'static str {
+    if states
+        .iter()
+        .any(|state| *state == face_processing::EyeState::Closed)
+    {
+        "closed"
+    } else if states.is_empty()
+        || states
+            .iter()
+            .any(|state| *state == face_processing::EyeState::Unknown)
+    {
+        "unknown"
+    } else {
+        "open"
+    }
+}
+
+fn primary_eye_review_alert(states: &[face_processing::EyeState]) -> Option<&'static str> {
+    match reviewed_primary_eye_state(states) {
+        "closed" => Some("eyesClosed"),
+        "unknown" => Some("eyesUnknown"),
+        _ => None,
+    }
+}
+
 fn subject_status_label(
     detect_subject: bool,
     has_subject_boxes: bool,
@@ -537,25 +562,13 @@ fn update_assisted_result(
     );
     let eye_state = if !settings.detect_closed_eyes {
         "disabled"
-    } else if eye_states.is_empty() {
-        "unknown"
-    } else if eye_states
-        .iter()
-        .all(|state| *state == face_processing::EyeState::Open)
-    {
-        "open"
-    } else if eye_states
-        .iter()
-        .all(|state| *state == face_processing::EyeState::Closed)
-    {
-        "closed"
     } else {
-        "unknown"
+        reviewed_primary_eye_state(&eye_states)
     };
-    if settings.detect_closed_eyes && eye_state == "closed" {
-        review_alerts.push("eyesClosed".to_owned());
-    } else if settings.detect_closed_eyes && eye_state == "unknown" {
-        review_alerts.push("eyesUnknown".to_owned());
+    if settings.detect_closed_eyes
+        && let Some(alert) = primary_eye_review_alert(&eye_states)
+    {
+        review_alerts.push(alert.to_owned());
     }
     if subject_status == "unknown" {
         review_alerts.push("subjectUnknown".to_owned());
@@ -929,6 +942,42 @@ mod tests {
         assert_eq!(
             (true_positive, false_negative, false_positive, true_negative),
             (5, 3, 1, 19)
+        );
+    }
+
+    #[test]
+    fn mixed_primary_eyes_report_closed_when_any_face_is_closed() {
+        use face_processing::EyeState;
+
+        assert_eq!(
+            reviewed_primary_eye_state(&[EyeState::Closed, EyeState::Open]),
+            "closed"
+        );
+        assert_eq!(
+            primary_eye_review_alert(&[EyeState::Closed, EyeState::Open]),
+            Some("eyesClosed")
+        );
+        assert_eq!(
+            reviewed_primary_eye_state(&[EyeState::Closed, EyeState::Unknown]),
+            "closed"
+        );
+        assert_eq!(
+            primary_eye_review_alert(&[EyeState::Open, EyeState::Unknown]),
+            Some("eyesUnknown")
+        );
+        assert_eq!(
+            reviewed_primary_eye_state(&[EyeState::Unknown, EyeState::Unknown]),
+            "unknown"
+        );
+        assert_eq!(
+            reviewed_primary_eye_state(&[EyeState::Open, EyeState::Open]),
+            "open"
+        );
+        assert_eq!(primary_eye_review_alert(&[EyeState::Open]), None);
+        assert_eq!(reviewed_primary_eye_state(&[]), "unknown");
+        assert_eq!(
+            primary_eye_review_alert(&[EyeState::Closed]),
+            Some("eyesClosed")
         );
     }
 
