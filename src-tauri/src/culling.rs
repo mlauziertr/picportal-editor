@@ -141,12 +141,11 @@ const WEIGHT_CENTER_FOCUS: f64 = 0.35;
 const WEIGHT_EXPOSURE: f64 = 0.25;
 
 fn effective_blur_threshold(settings: &CullingSettings) -> f64 {
-    let multiplier = match settings.blur_severity.as_str() {
-        "lenient" => 0.75,
-        "strict" => 1.5,
-        _ => 1.0,
-    };
-    settings.blur_threshold * multiplier
+    match settings.blur_severity.as_str() {
+        "lenient" => 75.0,
+        "strict" => 150.0,
+        _ => 100.0,
+    }
 }
 
 fn calculate_laplacian_variance(image: &GrayImage) -> f64 {
@@ -982,18 +981,28 @@ mod tests {
     }
 
     #[test]
-    fn blur_severity_scales_only_the_existing_technical_threshold() {
-        let mut settings = CullingSettings::default();
-        settings.blur_threshold = 100.0;
+    fn blur_severity_is_stricter_than_lenient_without_the_numeric_slider() {
+        let mut strict_at_low_slider = CullingSettings::default();
+        strict_at_low_slider.blur_threshold = 25.0;
+        strict_at_low_slider.blur_severity = "strict".to_owned();
 
-        settings.blur_severity = "lenient".to_owned();
-        assert_eq!(effective_blur_threshold(&settings), 75.0);
+        let mut lenient_at_high_slider = CullingSettings::default();
+        lenient_at_high_slider.blur_threshold = 100.0;
+        lenient_at_high_slider.blur_severity = "lenient".to_owned();
 
-        settings.blur_severity = "moderate".to_owned();
-        assert_eq!(effective_blur_threshold(&settings), 100.0);
+        let strict = effective_blur_threshold(&strict_at_low_slider);
+        let lenient = effective_blur_threshold(&lenient_at_high_slider);
+        assert!(
+            strict > lenient,
+            "strict threshold {strict} must flag more than lenient {lenient}"
+        );
+        assert_eq!(lenient, 75.0);
+        assert_eq!(strict, 150.0);
 
-        settings.blur_severity = "strict".to_owned();
-        assert_eq!(effective_blur_threshold(&settings), 150.0);
+        let mut moderate = CullingSettings::default();
+        moderate.blur_threshold = 25.0;
+        moderate.blur_severity = "moderate".to_owned();
+        assert_eq!(effective_blur_threshold(&moderate), 100.0);
     }
 
     #[test]

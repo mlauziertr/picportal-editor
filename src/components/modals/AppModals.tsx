@@ -20,6 +20,7 @@ import CullingModal from './CullingModal';
 import CollageModal from './CollageModal';
 import { AppSettings, Invokes, AlbumItem, Album, AlbumGroup } from '../ui/AppProperties';
 import { CopyPasteSettings } from '../../utils/adjustments';
+import { hideCullingReviewForEditor } from '../../utils/cullingReviewSession';
 
 export interface AppModalsProps {
   handleImageSelect: (path: string) => void;
@@ -335,9 +336,9 @@ export default function AppModals(props: AppModalsProps) {
         imagePaths={cullingModalState.pathsToCull}
         thumbnails={thumbnails}
         onOpenImage={(path) => {
-          setUI({
-            cullingModalState: { isOpen: false, progress: null, suggestions: null, error: null, pathsToCull: [] },
-          });
+          setUI((state) => ({
+            cullingModalState: hideCullingReviewForEditor(state.cullingModalState),
+          }));
           props.handleImageSelect(path);
         }}
         onApply={(action, paths) => {

@@ -71,6 +71,7 @@ struct CullingManifest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SubjectModel {
     license_filename: String,
     license_sha256: String,
@@ -79,6 +80,7 @@ struct SubjectModel {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct FocusModel {
     checkpoint: String,
     bytes: u64,
@@ -88,6 +90,7 @@ struct FocusModel {
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 struct ModelArtifact {
     filename: String,
     sha256: String,
@@ -384,7 +387,9 @@ fn encode_image(image: &DynamicImage, max_dimension: u32) -> Result<String, Stri
 
 #[cfg(test)]
 mod tests {
-    use super::{development_model_directory, select_model_directory};
+    use super::{
+        development_model_directory, select_model_directory, CullingManifest, CANONICAL_MANIFEST,
+    };
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -464,5 +469,34 @@ mod tests {
             development_model_directory().canonicalize().unwrap()
         );
         assert!(selected.join("manifest.json").is_file());
+    }
+
+    #[test]
+    fn shipped_manifest_loads_camel_case_licenses_and_sha256_digests() {
+        let manifest: CullingManifest =
+            serde_json::from_str(CANONICAL_MANIFEST).expect("shipped culling manifest");
+        assert_eq!(manifest.subject_model.license_filename, "DINO-LICENSE.txt");
+        assert_eq!(manifest.subject_model.license_bytes, 11355);
+        assert_eq!(manifest.focus_model.source_license_filename, "VGG-LICENSE.txt");
+        assert_eq!(manifest.focus_model.checkpoint, "vgg_best.pth");
+        let config = manifest
+            .subject_model
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.filename == "dino/config.json")
+            .expect("config artifact");
+        assert_eq!(config.bytes, 1644);
+        assert_eq!(
+            config.sha256,
+            "eec82c5ab66e16df12a9a212e68ac011779927c2536cf9078658e35d85f0c67a"
+        );
+        for artifact in &manifest.subject_model.artifacts {
+            assert_eq!(artifact.sha256.len(), 64, "{}", artifact.filename);
+            assert!(
+                artifact.sha256.chars().all(|character| character.is_ascii_hexdigit()),
+                "{}",
+                artifact.filename
+            );
+        }
     }
 }

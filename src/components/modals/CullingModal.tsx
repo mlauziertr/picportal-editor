@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import type { ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useTranslation } from 'react-i18next';
@@ -209,6 +209,8 @@ export default function CullingModal({
   const [selectedRejects, setSelectedRejects] = useState<Set<string>>(new Set());
   const [action, setAction] = useState<CullAction>('reject');
   const [activeTab, setActiveTab] = useState<'similar' | 'blurry' | 'alerts' | 'unknown'>('similar');
+  const retainedReviewRef = useRef(false);
+  retainedReviewRef.current = Boolean(suggestions || error || progress);
 
   const CULL_ACTIONS = useMemo(
     () => [
@@ -228,15 +230,18 @@ export default function CullingModal({
       setIsMounted(true);
       const timer = setTimeout(() => setShow(true), 10);
       return () => clearTimeout(timer);
-    } else {
-      setShow(false);
-      const timer = setTimeout(() => {
-        setIsMounted(false);
-        setStage('settings');
-        setSelectedRejects(new Set());
-      }, 300);
-      return () => clearTimeout(timer);
     }
+    setShow(false);
+    if (retainedReviewRef.current) {
+      setIsMounted(false);
+      return;
+    }
+    const timer = setTimeout(() => {
+      setIsMounted(false);
+      setStage('settings');
+      setSelectedRejects(new Set());
+    }, 300);
+    return () => clearTimeout(timer);
   }, [isOpen]);
 
   useEffect(() => {
@@ -348,6 +353,9 @@ export default function CullingModal({
                 value={settings.blurSeverity}
                 onChange={(value) => setSettings((s) => ({ ...s, blurSeverity: value }))}
               />
+              <Text variant={TextVariants.small} className="mt-1">
+                {t('modals.culling.blurThresholdDesc')}
+              </Text>
             </div>
           </div>
         </div>
@@ -417,23 +425,6 @@ export default function CullingModal({
             checked={settings.filterBlurry}
             onChange={(v) => setSettings((s) => ({ ...s, filterBlurry: v }))}
           />
-          {settings.filterBlurry && (
-            <div className="mt-2  pl-4 border-l-2 border-border-color ml-1">
-              <Slider
-                label={t('modals.culling.blurThreshold')}
-                min={25}
-                max={500}
-                step={25}
-                value={settings.blurThreshold}
-                defaultValue={100.0}
-                onChange={(e) => setSettings((s) => ({ ...s, blurThreshold: Number(e.target.value) }))}
-                fillOrigin="min"
-              />
-              <Text variant={TextVariants.small} className="mt-1">
-                {t('modals.culling.blurThresholdDesc')}
-              </Text>
-            </div>
-          )}
         </div>
       </div>
       <div className="flex justify-end gap-3 mt-8">

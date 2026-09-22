@@ -63,7 +63,7 @@ fetch_verified \
 fetch_verified \
   "${base_url}/config.json?download=true" \
   "$dino_dir/config.json" \
-  'eec82c5ab66e16df12a9a212e68ac011779927c2536cf9078658e35d85f0c67a3' \
+  'eec82c5ab66e16df12a9a212e68ac011779927c2536cf9078658e35d85f0c67a' \
   '1644'
 fetch_verified \
   "${base_url}/preprocessor_config.json?download=true" \

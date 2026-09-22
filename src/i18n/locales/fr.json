@@ -1277,7 +1277,7 @@
       "applyButton_other": "Appliquer à {{count}} images",
       "bestImage": "Meilleure image",
       "blurThreshold": "Seuil de flou",
-      "blurThresholdDesc": "Les images avec un score de netteté inférieur à cette valeur sont signalées. Une valeur plus élevée est plus stricte.",
+      "blurThresholdDesc": "Tolérante, modérée et stricte fixent le seul seuil de netteté. Une sévérité plus élevée signale plus de photos.",
       "blurSeverity": "Sévérité du flou",
       "blurSeverityLenient": "Tolérante",
       "blurSeverityModerate": "Modérée",

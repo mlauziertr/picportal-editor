@@ -1252,7 +1252,7 @@
       "applyButton_other": "Apply to {{count}} images",
       "bestImage": "Best Image",
       "blurThreshold": "Blur Threshold",
-      "blurThresholdDesc": "Images with a sharpness score below this value are flagged. Higher is stricter.",
+      "blurThresholdDesc": "Lenient, moderate, and strict set the only sharpness cutoff. Higher severity flags more photos.",
       "blurSeverity": "Blur severity",
       "blurSeverityLenient": "Lenient",
       "blurSeverityModerate": "Moderate",

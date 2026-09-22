@@ -12,6 +12,7 @@ import { Invokes, LibraryViewMode, ImageFile } from '../components/ui/AppPropert
 import { INITIAL_ADJUSTMENTS, normalizeLoadedAdjustments } from '../utils/adjustments';
 import { globalImageCache } from '../utils/ImageLRUCache';
 import { debouncedSave, debouncedSetHistory } from './useEditorActions';
+import { restoreCullingReviewOnLibraryReturn } from '../utils/cullingReviewSession';
 
 export interface AppNavigationProps {
   clearThumbnailQueue: () => void;
@@ -141,9 +142,14 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
     debouncedSetHistory.cancel();
 
     const lastActivePath = selectedImage?.path ?? null;
+    const { cullingModalState } = useUIStore.getState();
 
     setLibrary({ libraryActivePath: lastActivePath });
-    setUI({ activeView: 'library', slideDirection: 1 });
+    setUI({
+      activeView: 'library',
+      slideDirection: 1,
+      cullingModalState: restoreCullingReviewOnLibraryReturn(cullingModalState),
+    });
   }, [refs]);
 
   const handleImageSelect = useCallback(
