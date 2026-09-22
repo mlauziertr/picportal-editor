@@ -259,7 +259,7 @@ export default function CullingModal({
           progress: null,
           pathsToCull: [],
           isCancelling: false,
-          isStarting: false,
+          startClaim: null,
         },
       };
     });
@@ -320,32 +320,30 @@ export default function CullingModal({
   }, [suggestions]);
 
   const handleStartCulling = useCallback(async () => {
+    const startClaim = createCullingInvocationId();
     let claimed = false;
     useUIStore.getState().setUI((state) => {
-      const session = claimCullingStart(state.cullingModalState);
+      const session = claimCullingStart(state.cullingModalState, startClaim);
       if (session === state.cullingModalState) return {};
       claimed = true;
       return { cullingModalState: session };
     });
     if (!claimed) return;
 
-    let invocationId: string | null = null;
     try {
       if (await reconcileActiveCulling()) return;
-      const nextInvocationId = createCullingInvocationId();
-      invocationId = nextInvocationId;
       useUIStore.getState().setUI((state) => ({
-        cullingModalState: beginCullingInvocation(state.cullingModalState, nextInvocationId),
+        cullingModalState: beginCullingInvocation(state.cullingModalState, startClaim),
       }));
-      await invoke(Invokes.CullImages, { paths: imagePaths, settings, invocationId: nextInvocationId });
+      await invoke(Invokes.CullImages, { paths: imagePaths, settings, invocationId: startClaim });
     } catch (err) {
       console.error('Culling failed to start:', err);
-      if (invocationId && useUIStore.getState().cullingModalState.invocationId === invocationId) {
+      if (useUIStore.getState().cullingModalState.invocationId === startClaim) {
         onError(String(err));
       }
     } finally {
       useUIStore.getState().setUI((state) => {
-        const session = releaseCullingStart(state.cullingModalState);
+        const session = releaseCullingStart(state.cullingModalState, startClaim);
         return session === state.cullingModalState ? {} : { cullingModalState: session };
       });
     }
@@ -379,7 +377,7 @@ export default function CullingModal({
 
   const handleClose = useCallback(() => {
     const current = useUIStore.getState().cullingModalState;
-    if (current.invocationId || current.isCancelling || current.isStarting || cullingReviewStage(current) === 'progress')
+    if (current.invocationId || current.isCancelling || current.startClaim || cullingReviewStage(current) === 'progress')
       return;
     onClose();
   }, [onClose]);

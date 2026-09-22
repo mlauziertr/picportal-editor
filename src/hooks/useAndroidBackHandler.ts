@@ -81,7 +81,7 @@ export function useAndroidBackHandler() {
         return;
       }
       if (ui.cullingModalState.isOpen) {
-        if (ui.cullingModalState.progress || ui.cullingModalState.isCancelling || ui.cullingModalState.isStarting)
+        if (ui.cullingModalState.progress || ui.cullingModalState.isCancelling || ui.cullingModalState.startClaim)
           return;
         ui.setUI({
           cullingModalState: { isOpen: false, progress: null, suggestions: null, error: null, pathsToCull: [] },

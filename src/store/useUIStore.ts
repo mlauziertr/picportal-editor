@@ -91,7 +91,7 @@ interface CullingModalState {
   invocationId?: string | null;
   hiddenForEditor?: boolean;
   isCancelling?: boolean;
-  isStarting?: boolean;
+  startClaim?: string | null;
   cancelled?: boolean;
 }
 
