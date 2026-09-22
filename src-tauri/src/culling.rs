@@ -314,6 +314,24 @@ fn effective_blur_threshold(settings: &CullingSettings) -> f64 {
     }
 }
 
+fn record_similarity_group(grouped_indices: &mut [bool], indices: &[usize]) -> bool {
+    if indices.len() < 2 {
+        return false;
+    }
+    for &index in indices {
+        grouped_indices[index] = true;
+    }
+    true
+}
+
+fn should_list_as_blurry(
+    in_similarity_group: bool,
+    sharpness_metric: f64,
+    settings: &CullingSettings,
+) -> bool {
+    !in_similarity_group && sharpness_metric < effective_blur_threshold(settings)
+}
+
 fn calculate_laplacian_variance(image: &GrayImage) -> f64 {
     let (width, height) = image.dimensions();
     if width < 3 || height < 3 {
@@ -1401,21 +1419,22 @@ pub async fn cull_images(
         subject_analysis_status,
         ..Default::default()
     };
-    let mut processed_indices = vec![false; successful_analyses.len()];
+    let mut visited_indices = vec![false; successful_analyses.len()];
+    let mut grouped_indices = vec![false; successful_analyses.len()];
 
     if settings.group_similar {
         for i in 0..successful_analyses.len() {
             if cancellation.is_requested() {
                 return finish_cancelled_culling(&mut invocation, &app_handle, &invocation_id);
             }
-            if processed_indices[i] {
+            if visited_indices[i] {
                 continue;
             }
 
             let mut current_group_indices = vec![];
             let mut queue = VecDeque::new();
 
-            processed_indices[i] = true;
+            visited_indices[i] = true;
             current_group_indices.push(i);
             queue.push_back(i);
 
@@ -1424,7 +1443,7 @@ pub async fn cull_images(
                     return finish_cancelled_culling(&mut invocation, &app_handle, &invocation_id);
                 }
                 for j in (current_idx + 1)..successful_analyses.len() {
-                    if processed_indices[j] {
+                    if visited_indices[j] {
                         continue;
                     }
 
@@ -1432,14 +1451,14 @@ pub async fn cull_images(
                         .hash
                         .dist(&successful_analyses[j].hash);
                     if dist <= settings.similarity_threshold {
-                        processed_indices[j] = true;
+                        visited_indices[j] = true;
                         current_group_indices.push(j);
                         queue.push_back(j);
                     }
                 }
             }
 
-            if current_group_indices.len() > 1 {
+            if record_similarity_group(&mut grouped_indices, &current_group_indices) {
                 current_group_indices.sort_by(|&a, &b| {
                     successful_analyses[b]
                         .result
@@ -1467,11 +1486,13 @@ pub async fn cull_images(
             if cancellation.is_requested() {
                 return finish_cancelled_culling(&mut invocation, &app_handle, &invocation_id);
             }
-            if !processed_indices[i] {
-                let item = &successful_analyses[i];
-                if item.result.sharpness_metric < effective_blur_threshold(&settings) {
-                    suggestions.blurry_images.push(item.result.clone());
-                }
+            let item = &successful_analyses[i];
+            if should_list_as_blurry(
+                grouped_indices[i],
+                item.result.sharpness_metric,
+                &settings,
+            ) {
+                suggestions.blurry_images.push(item.result.clone());
             }
         }
         suggestions.blurry_images.sort_by(|a, b| {
@@ -1676,6 +1697,23 @@ mod tests {
             &data.result.focus_status,
             &data.result.eye_state,
         ));
+    }
+
+    #[test]
+    fn singleton_remains_eligible_for_blur_filtering_with_grouping_enabled() {
+        let mut settings = CullingSettings::default();
+        settings.blur_severity = "strict".to_owned();
+        assert!(settings.group_similar);
+        assert!(settings.filter_blurry);
+
+        let mut grouped_indices = vec![false];
+        assert!(!record_similarity_group(&mut grouped_indices, &[0]));
+        assert!(should_list_as_blurry(grouped_indices[0], 0.0, &settings));
+
+        let mut grouped_pair = vec![false, false];
+        assert!(record_similarity_group(&mut grouped_pair, &[0, 1]));
+        assert!(!should_list_as_blurry(grouped_pair[0], 0.0, &settings));
+        assert!(!should_list_as_blurry(grouped_pair[1], 0.0, &settings));
     }
 
     #[test]
