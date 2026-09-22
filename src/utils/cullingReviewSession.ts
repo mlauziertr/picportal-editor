@@ -66,10 +66,7 @@ export function recoverCullingInvocation<T extends CullingReviewSession>(
   };
 }
 
-export function cullingEventMatches(
-  session: { invocationId?: string | null },
-  eventInvocationId: unknown,
-): boolean {
+export function cullingEventMatches(session: { invocationId?: string | null }, eventInvocationId: unknown): boolean {
   return (
     typeof session.invocationId === 'string' &&
     session.invocationId.length > 0 &&
@@ -115,7 +112,18 @@ export function cullingReviewStage(session: {
   return 'settings';
 }
 
-export function cullingAnalysisMessageKey(status: string): string | null {
+export type CullingAnalysisMessageKey =
+  | 'subjectAnalysisDisabled'
+  | 'subjectAnalysisSubjectReadyFocusUnavailable'
+  | 'subjectAnalysisPoseUnavailable'
+  | 'subjectAnalysisFocusCalibrationUnavailable'
+  | 'focusCalibrationUnavailable'
+  | 'subjectAnalysisFocusUnavailable'
+  | 'subjectAnalysisFaceUnavailable'
+  | 'subjectAnalysisError'
+  | 'subjectAnalysisUnavailable';
+
+export function cullingAnalysisMessageKey(status: string): CullingAnalysisMessageKey | null {
   switch (status) {
     case 'ready':
       return null;
@@ -203,7 +211,7 @@ export function initialCullingRejectPaths(
   return rejects;
 }
 
-export function emptyCullingResultsHeadline(status: string): string {
+export function emptyCullingResultsHeadline(status: string): CullingAnalysisMessageKey | 'noIssuesFound' {
   if (status === 'ready' || status === 'disabled') {
     return 'noIssuesFound';
   }

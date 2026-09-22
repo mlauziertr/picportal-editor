@@ -1267,7 +1267,7 @@
       "eyesUnknownAlert": "État des yeux inconnu",
       "focusScore": "Signal de focus natif : {{score}}",
       "nativeCrop": "crop natif {{width}}×{{height}}",
-      "facesDetected": "Visages détectés : {{count}}",
+      "facesDetected": "Visages détectés : {{faceCount}}",
       "focusStatus": "focus",
       "eyeStatus": "yeux",
       "subjectStatus": "sujet",

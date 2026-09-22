@@ -135,10 +135,7 @@ assert.notEqual(restartedAfterReload.invocationId, secondId);
 assert.equal(cullingReviewStage(restartedAfterReload), 'progress');
 
 const emptyLists = { similarGroups: [], blurryImages: [], reviewAlerts: [], unknownImages: [], failedPaths: [] };
-for (const status of [
-  'subject-ready-focus-calibration-unavailable',
-  'focus-calibration-unavailable',
-]) {
+for (const status of ['subject-ready-focus-calibration-unavailable', 'focus-calibration-unavailable']) {
   const headline = emptyCullingResultsHeadline(status);
   assert.notEqual(headline, 'noIssuesFound');
   assert.equal(headline, cullingAnalysisMessageKey(status));
@@ -207,11 +204,7 @@ const mixedCoveragePass = {
     { path: '/photos/eyes-not-evaluated-duplicate.raw', eyeState: 'not-evaluated' },
     { path: '/photos/eyes-not-evaluated-blurry.raw', eyeState: 'not-evaluated' },
   ],
-  failedPaths: [
-    '/photos/unreadable.raw',
-    '/photos/reread-failed-duplicate.raw',
-    '/photos/reread-failed-blurry.raw',
-  ],
+  failedPaths: ['/photos/unreadable.raw', '/photos/reread-failed-duplicate.raw', '/photos/reread-failed-blurry.raw'],
 };
 const mixedRejects = initialCullingRejectPaths(mixedCoveragePass, 'extreme');
 assert.equal(hasCullingResultItems(mixedCoveragePass), true);

@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { Status } from '../components/ui/ExportImportProperties';
+import type { CullingSuggestions } from '../components/ui/AppProperties';
 import { useProcessStore } from '../store/useProcessStore';
 import { useEditorStore } from '../store/useEditorStore';
 import { useUIStore } from '../store/useUIStore';
@@ -11,6 +12,17 @@ import {
   cullingEventMatches,
   requestCullingCancellation,
 } from '../utils/cullingReviewSession';
+
+interface CullingBoundEvent<T> {
+  invocationId: string;
+  body: T;
+}
+
+interface CullingProgress {
+  current: number;
+  total: number;
+  stage: string;
+}
 
 interface TauriListenerProps {
   refreshAllFolderTrees: () => void;
@@ -361,7 +373,7 @@ export function useTauriListeners({
           }));
         }
       }),
-      listen('culling-start', (event: any) => {
+      listen<CullingBoundEvent<number>>('culling-start', (event) => {
         if (isEffectActive) {
           useUIStore.getState().setUI((state) => {
             if (!cullingEventMatches(state.cullingModalState, event.payload?.invocationId)) {
@@ -381,7 +393,7 @@ export function useTauriListeners({
           });
         }
       }),
-      listen('culling-progress', (event: any) => {
+      listen<CullingBoundEvent<CullingProgress>>('culling-progress', (event) => {
         if (isEffectActive) {
           useUIStore.getState().setUI((state) => {
             if (!cullingEventMatches(state.cullingModalState, event.payload?.invocationId)) {
@@ -391,7 +403,7 @@ export function useTauriListeners({
           });
         }
       }),
-      listen('culling-cancelling', (event: any) => {
+      listen<CullingBoundEvent<null>>('culling-cancelling', (event) => {
         if (isEffectActive) {
           useUIStore.getState().setUI((state) => {
             if (!cullingEventMatches(state.cullingModalState, event.payload?.invocationId)) {
@@ -403,7 +415,7 @@ export function useTauriListeners({
           });
         }
       }),
-      listen('culling-cancelled', (event: any) => {
+      listen<CullingBoundEvent<null>>('culling-cancelled', (event) => {
         if (isEffectActive) {
           useUIStore.getState().setUI((state) => {
             if (!cullingEventMatches(state.cullingModalState, event.payload?.invocationId)) {
@@ -415,7 +427,7 @@ export function useTauriListeners({
           });
         }
       }),
-      listen('culling-complete', (event: any) => {
+      listen<CullingBoundEvent<CullingSuggestions>>('culling-complete', (event) => {
         if (isEffectActive) {
           useUIStore.getState().setUI((state) => {
             if (!cullingEventMatches(state.cullingModalState, event.payload?.invocationId)) {
@@ -434,7 +446,7 @@ export function useTauriListeners({
           });
         }
       }),
-      listen('culling-error', (event: any) => {
+      listen<CullingBoundEvent<string>>('culling-error', (event) => {
         if (isEffectActive) {
           useUIStore.getState().setUI((state) => {
             if (!cullingEventMatches(state.cullingModalState, event.payload?.invocationId)) {

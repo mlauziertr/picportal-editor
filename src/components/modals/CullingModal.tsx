@@ -4,13 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useTranslation } from 'react-i18next';
 import { CheckCircle, XCircle, Loader2, Users, Trash2, Star, Tag } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
-import {
-  CullingSettings,
-  CullingSuggestions,
-  ImageAnalysisResult,
-  Invokes,
-  Progress,
-} from '../ui/AppProperties';
+import { CullingSettings, CullingSuggestions, ImageAnalysisResult, Invokes } from '../ui/AppProperties';
 import Button from '../ui/Button';
 import Switch from '../ui/Switch';
 import Slider from '../ui/Slider';
@@ -37,7 +31,7 @@ import {
 interface CullingModalProps {
   isOpen: boolean;
   onClose(): void;
-  progress: Progress | null;
+  progress: { current: number; total: number; stage: string } | null;
   suggestions: CullingSuggestions | null;
   error: string | null;
   isCancelling: boolean;
@@ -120,7 +114,9 @@ function ReviewImageCard({ image, thumbnails, isSelected, onToggle, onOpenImage 
     role === 'primary' ? 'border-amber-300' : role === 'unknown' ? 'border-red-300' : 'border-slate-300';
 
   return (
-    <div className={`bg-surface rounded-md overflow-hidden border ${isSelected ? 'border-accent' : 'border-transparent'}`}>
+    <div
+      className={`bg-surface rounded-md overflow-hidden border ${isSelected ? 'border-accent' : 'border-transparent'}`}
+    >
       <button
         type="button"
         className="relative block w-full bg-black cursor-pointer"
@@ -159,11 +155,14 @@ function ReviewImageCard({ image, thumbnails, isSelected, onToggle, onOpenImage 
         <Text variant={TextVariants.small} className="truncate" title={image.path}>
           {alertLabels.join(', ') || t('modals.culling.unknownReason')}
         </Text>
-        <Text variant={TextVariants.small} className="text-text-secondary">
-          {t('modals.culling.subjectStatus')}:{' '}
-          {image.subjectStatus === 'multiple' ? t('modals.culling.multipleSubjects') : image.subjectStatus};{' '}
-          {t('modals.culling.focusStatus')}: {image.focusStatus}; {t('modals.culling.eyeStatus')}: {image.eyeState}
-        </Text>
+        <dl className="grid grid-cols-[auto_1fr] gap-x-1 text-xs text-text-secondary">
+          <dt>{t('modals.culling.subjectStatus')}</dt>
+          <dd>{image.subjectStatus === 'multiple' ? t('modals.culling.multipleSubjects') : image.subjectStatus}</dd>
+          <dt>{t('modals.culling.focusStatus')}</dt>
+          <dd>{image.focusStatus}</dd>
+          <dt>{t('modals.culling.eyeStatus')}</dt>
+          <dd>{image.eyeState}</dd>
+        </dl>
         {image.focusSignal !== null && (
           <Text variant={TextVariants.small} className="text-text-secondary">
             {t('modals.culling.focusScore', { score: image.focusSignal.toFixed(3) })}
@@ -174,7 +173,7 @@ function ReviewImageCard({ image, thumbnails, isSelected, onToggle, onOpenImage 
         )}
         {image.attributedFaces.length > 0 && (
           <Text variant={TextVariants.small} className="text-text-secondary">
-            {t('modals.culling.facesDetected', { count: image.attributedFaces.length })}:{' '}
+            {t('modals.culling.facesDetected', { faceCount: image.attributedFaces.length })}:{' '}
             {image.attributedFaces.map((face) => `${face.role}/${face.eyeState}`).join(', ')}
           </Text>
         )}
@@ -359,25 +358,34 @@ export default function CullingModal({
     try {
       const accepted = await invoke<boolean>(Invokes.CancelCulling, { invocationId });
       if (!accepted) {
-        useUIStore.getState().setUI((state) =>
+        useUIStore
+          .getState()
+          .setUI((state) =>
+            state.cullingModalState.invocationId === invocationId
+              ? { cullingModalState: { ...state.cullingModalState, isCancelling: false } }
+              : {},
+          );
+      }
+    } catch (err) {
+      console.error('Culling cancellation failed:', err);
+      useUIStore
+        .getState()
+        .setUI((state) =>
           state.cullingModalState.invocationId === invocationId
             ? { cullingModalState: { ...state.cullingModalState, isCancelling: false } }
             : {},
         );
-      }
-    } catch (err) {
-      console.error('Culling cancellation failed:', err);
-      useUIStore.getState().setUI((state) =>
-        state.cullingModalState.invocationId === invocationId
-          ? { cullingModalState: { ...state.cullingModalState, isCancelling: false } }
-          : {},
-      );
     }
   }, []);
 
   const handleClose = useCallback(() => {
     const current = useUIStore.getState().cullingModalState;
-    if (current.invocationId || current.isCancelling || current.startClaim || cullingReviewStage(current) === 'progress')
+    if (
+      current.invocationId ||
+      current.isCancelling ||
+      current.startClaim ||
+      cullingReviewStage(current) === 'progress'
+    )
       return;
     onClose();
   }, [onClose]);
@@ -635,7 +643,7 @@ export default function CullingModal({
           </Text>
         )}
         <div className="border-b border-surface mb-4">
-          <nav className="-mb-px flex space-x-4" aria-label="Tabs">
+          <nav className="-mb-px flex space-x-4" aria-label={t('modals.culling.cullingSuggestions')}>
             {numSimilar > 0 && (
               <button
                 onClick={() => setActiveTab('similar')}
@@ -728,7 +736,7 @@ export default function CullingModal({
                           <div className="relative rounded-md overflow-hidden border-2 border-green-500">
                             <img
                               src={thumbnails[group.representative.path]}
-                              alt="Representative"
+                              alt={t('modals.culling.bestImage')}
                               className="w-full h-full object-cover"
                             />
                             <Text

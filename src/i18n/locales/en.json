@@ -1243,7 +1243,7 @@
       "eyesUnknownAlert": "Eye state unknown",
       "focusScore": "Native focus signal: {{score}}",
       "nativeCrop": "native crop {{width}}×{{height}}",
-      "facesDetected": "Detected faces: {{count}}",
+      "facesDetected": "Detected faces: {{faceCount}}",
       "focusStatus": "focus",
       "eyeStatus": "eyes",
       "subjectStatus": "subject",

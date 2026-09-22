@@ -218,7 +218,11 @@ struct CullingInvocationGuard {
 }
 
 impl CullingInvocationGuard {
-    fn register(invocation_id: &str, owner: &str, paths_to_cull: &[String]) -> Result<Self, String> {
+    fn register(
+        invocation_id: &str,
+        owner: &str,
+        paths_to_cull: &[String],
+    ) -> Result<Self, String> {
         let cancellation = Arc::new(CullingCancellation::new(owner, paths_to_cull));
         let mut active = ACTIVE_CULLING_INVOCATIONS
             .lock()
@@ -498,9 +502,9 @@ fn subject_phrases(profile: &str) -> Vec<SubjectPhrase> {
     }
 }
 
-fn choose_subject_phrase<'a>(
-    passes: &'a [(SubjectPhrase, Vec<SubjectBox>)],
-) -> Option<&'a (SubjectPhrase, Vec<SubjectBox>)> {
+fn choose_subject_phrase(
+    passes: &[(SubjectPhrase, Vec<SubjectBox>)],
+) -> Option<&(SubjectPhrase, Vec<SubjectBox>)> {
     passes.iter().find(|(_, boxes)| !boxes.is_empty())
 }
 
@@ -594,8 +598,7 @@ fn face_linked_to_subject_bust(
     let center_y = face.y + face.height / 2.0;
     let limit = NOSE_DISTANCE_FACTOR * face.width.max(face.height);
     subject_busts(poses, boxes).into_iter().any(|bust| {
-        let distance =
-            ((center_x - bust.nose_x).powi(2) + (center_y - bust.nose_y).powi(2)).sqrt();
+        let distance = ((center_x - bust.nose_x).powi(2) + (center_y - bust.nose_y).powi(2)).sqrt();
         distance <= limit
     })
 }
@@ -689,12 +692,8 @@ fn exact_subject_crop(
     if x >= image.width() || y >= image.height() {
         return None;
     }
-    let crop_width = (x1.ceil() as u32)
-        .saturating_sub(x)
-        .min(image.width() - x);
-    let crop_height = (y1.ceil() as u32)
-        .saturating_sub(y)
-        .min(image.height() - y);
+    let crop_width = (x1.ceil() as u32).saturating_sub(x).min(image.width() - x);
+    let crop_height = (y1.ceil() as u32).saturating_sub(y).min(image.height() - y);
     if crop_width < 8 || crop_height < 8 {
         return None;
     }
@@ -749,17 +748,11 @@ fn eye_state_label(state: face_processing::EyeState) -> &'static str {
 }
 
 fn reviewed_primary_eye_state(states: &[face_processing::EyeState]) -> &'static str {
-    if states
-        .iter()
-        .any(|state| *state == face_processing::EyeState::Closed)
-    {
+    if states.contains(&face_processing::EyeState::Closed) {
         "closed"
     } else if states.is_empty() {
         "not-evaluated"
-    } else if states
-        .iter()
-        .any(|state| *state == face_processing::EyeState::Unknown)
-    {
+    } else if states.contains(&face_processing::EyeState::Unknown) {
         "unknown"
     } else {
         "open"
@@ -767,16 +760,9 @@ fn reviewed_primary_eye_state(states: &[face_processing::EyeState]) -> &'static 
 }
 
 fn primary_eye_review_alert(states: &[face_processing::EyeState]) -> Option<&'static str> {
-    if states
-        .iter()
-        .any(|state| *state == face_processing::EyeState::Closed)
-    {
+    if states.contains(&face_processing::EyeState::Closed) {
         Some("eyesClosed")
-    } else if !states.is_empty()
-        && states
-            .iter()
-            .any(|state| *state == face_processing::EyeState::Unknown)
-    {
+    } else if !states.is_empty() && states.contains(&face_processing::EyeState::Unknown) {
         Some("eyesUnknown")
     } else {
         None
@@ -957,7 +943,11 @@ fn update_assisted_result(
 
     for (index, face) in faces.iter().enumerate() {
         let is_primary = roles.get(index) == Some(&AttributedRole::Primary);
-        let role = match roles.get(index).copied().unwrap_or(AttributedRole::Secondary) {
+        let role = match roles
+            .get(index)
+            .copied()
+            .unwrap_or(AttributedRole::Secondary)
+        {
             AttributedRole::Primary => "primary",
             AttributedRole::Unknown => "unknown",
             AttributedRole::Secondary => "secondary",
@@ -1205,11 +1195,7 @@ pub fn get_active_culling(window: WebviewWindow) -> Option<ActiveCullingInvocati
 }
 
 #[tauri::command]
-pub fn cancel_culling(
-    invocation_id: String,
-    app_handle: AppHandle,
-    window: WebviewWindow,
-) -> bool {
+pub fn cancel_culling(invocation_id: String, app_handle: AppHandle, window: WebviewWindow) -> bool {
     let accepted = request_culling_cancel(window.label(), &invocation_id);
     if accepted {
         emit_culling(&app_handle, "culling-cancelling", &invocation_id, ());
@@ -1487,11 +1473,7 @@ pub async fn cull_images(
                 return finish_cancelled_culling(&mut invocation, &app_handle, &invocation_id);
             }
             let item = &successful_analyses[i];
-            if should_list_as_blurry(
-                grouped_indices[i],
-                item.result.sharpness_metric,
-                &settings,
-            ) {
+            if should_list_as_blurry(grouped_indices[i], item.result.sharpness_metric, &settings) {
                 suggestions.blurry_images.push(item.result.clone());
             }
         }
@@ -1701,8 +1683,10 @@ mod tests {
 
     #[test]
     fn singleton_remains_eligible_for_blur_filtering_with_grouping_enabled() {
-        let mut settings = CullingSettings::default();
-        settings.blur_severity = "strict".to_owned();
+        let settings = CullingSettings {
+            blur_severity: "strict".to_owned(),
+            ..Default::default()
+        };
         assert!(settings.group_similar);
         assert!(settings.filter_blurry);
 
@@ -1718,13 +1702,17 @@ mod tests {
 
     #[test]
     fn blur_severity_is_stricter_than_lenient_without_the_numeric_slider() {
-        let mut strict_at_low_slider = CullingSettings::default();
-        strict_at_low_slider.blur_threshold = 25.0;
-        strict_at_low_slider.blur_severity = "strict".to_owned();
+        let strict_at_low_slider = CullingSettings {
+            blur_threshold: 25.0,
+            blur_severity: "strict".to_owned(),
+            ..Default::default()
+        };
 
-        let mut lenient_at_high_slider = CullingSettings::default();
-        lenient_at_high_slider.blur_threshold = 100.0;
-        lenient_at_high_slider.blur_severity = "lenient".to_owned();
+        let lenient_at_high_slider = CullingSettings {
+            blur_threshold: 100.0,
+            blur_severity: "lenient".to_owned(),
+            ..Default::default()
+        };
 
         let strict = effective_blur_threshold(&strict_at_low_slider);
         let lenient = effective_blur_threshold(&lenient_at_high_slider);
@@ -1735,9 +1723,11 @@ mod tests {
         assert_eq!(lenient, 75.0);
         assert_eq!(strict, 150.0);
 
-        let mut moderate = CullingSettings::default();
-        moderate.blur_threshold = 25.0;
-        moderate.blur_severity = "moderate".to_owned();
+        let moderate = CullingSettings {
+            blur_threshold: 25.0,
+            blur_severity: "moderate".to_owned(),
+            ..Default::default()
+        };
         assert_eq!(effective_blur_threshold(&moderate), 100.0);
     }
 
@@ -1780,7 +1770,11 @@ mod tests {
         assert_eq!(phrases.len(), 2);
         assert_eq!(phrases[0].phrase, "a couple dancing together.");
         assert_eq!(phrases[1].phrase, "a person dancing.");
-        assert!(phrases.iter().all(|phrase| phrase.phrase != "a couple or group of people dancing together."));
+        assert!(
+            phrases
+                .iter()
+                .all(|phrase| phrase.phrase != "a couple or group of people dancing together.")
+        );
 
         let couple = box_at(0.0, 0.0, 10.0, 10.0);
         let person = box_at(20.0, 20.0, 5.0, 5.0);
@@ -1792,10 +1786,7 @@ mod tests {
         assert_eq!(selected.0.phrase, "a couple dancing together.");
         assert_eq!(selected.1[0].x, couple.x);
 
-        let empty_first = [
-            (phrases[0], Vec::new()),
-            (phrases[1], vec![person.clone()]),
-        ];
+        let empty_first = [(phrases[0], Vec::new()), (phrases[1], vec![person.clone()])];
         let selected = choose_subject_phrase(&empty_first).unwrap();
         assert_eq!(selected.0.phrase, "a person dancing.");
         assert_eq!(selected.1[0].x, person.x);
@@ -1810,10 +1801,17 @@ mod tests {
         let extra_limit = NOSE_DISTANCE_FACTOR * extra.width.max(extra.height);
         let extra_distance = ((250.0 - 140.0_f32).powi(2) + (160.0 - 150.0_f32).powi(2)).sqrt();
         assert!(extra_distance <= extra_limit);
-        assert!(face_overlap(&extra, &[subject.clone()]) >= SUBJECT_OVERLAP_MIN);
+        assert!(face_overlap(&extra, std::slice::from_ref(&subject)) >= SUBJECT_OVERLAP_MIN);
 
-        let roles = attribute_faces(&[couple, extra.clone()], &[subject.clone()], &[bust.clone()]);
-        assert_eq!(roles, vec![AttributedRole::Primary, AttributedRole::Primary]);
+        let roles = attribute_faces(
+            &[couple, extra.clone()],
+            std::slice::from_ref(&subject),
+            std::slice::from_ref(&bust),
+        );
+        assert_eq!(
+            roles,
+            vec![AttributedRole::Primary, AttributedRole::Primary]
+        );
 
         let beyond = face_at(500.0, 100.0, 80.0, 80.0);
         let beyond_limit = NOSE_DISTANCE_FACTOR * beyond.width.max(beyond.height);
@@ -1828,7 +1826,7 @@ mod tests {
         let subject = box_at(0.0, 0.0, 400.0, 400.0);
         let mostly_outside = face_at(380.0, 180.0, 80.0, 80.0);
         let bust = bust_at(200.0, 200.0, &subject);
-        let roles = attribute_faces(&[mostly_outside], &[subject.clone()], &[bust]);
+        let roles = attribute_faces(&[mostly_outside], std::slice::from_ref(&subject), &[bust]);
         assert_eq!(roles[0], AttributedRole::Secondary);
 
         let half_short = face_at(360.0, 100.0, 100.0, 100.0);
@@ -1845,7 +1843,7 @@ mod tests {
         let extra = face_at(400.0, 80.0, 80.0, 100.0);
         let roles = attribute_faces(
             &[left, right, extra],
-            &[subject.clone()],
+            std::slice::from_ref(&subject),
             &[
                 bust_at(125.0, 135.0, &subject),
                 bust_at(745.0, 145.0, &subject),
@@ -1866,7 +1864,7 @@ mod tests {
     fn half_overlap_and_bust_nose_links_without_a_center_shortcut() {
         let subject = box_at(0.0, 0.0, 200.0, 200.0);
         let face = face_at(150.0, 40.0, 100.0, 80.0);
-        assert!((face_overlap(&face, &[subject.clone()]) - 0.5).abs() < 0.001);
+        assert!((face_overlap(&face, std::slice::from_ref(&subject)) - 0.5).abs() < 0.001);
         let bust = bust_at(180.0, 80.0, &subject);
         let roles = attribute_faces(&[face], &[subject], &[bust]);
         assert_eq!(roles[0], AttributedRole::Primary);
@@ -1884,7 +1882,10 @@ mod tests {
         ] {
             assert_eq!(status_when_face_model_missing(status), "face-unavailable");
         }
-        assert_eq!(status_when_face_model_missing("disabled"), "face-unavailable");
+        assert_eq!(
+            status_when_face_model_missing("disabled"),
+            "face-unavailable"
+        );
         assert_eq!(status_when_face_model_missing("unavailable"), "unavailable");
         assert_eq!(
             status_when_face_model_missing("subject-unavailable"),
@@ -1905,7 +1906,11 @@ mod tests {
         assert!(repeated_overlap < SUBJECT_OVERLAP_MIN);
 
         let bust = bust_at(20.0, 50.0, &repeated);
-        let roles = attribute_faces(&[face.clone()], &[repeated.clone(), repeated], &[bust]);
+        let roles = attribute_faces(
+            std::slice::from_ref(&face),
+            &[repeated.clone(), repeated],
+            &[bust],
+        );
         assert_eq!(roles, vec![AttributedRole::Secondary]);
 
         let covering = box_at(0.0, 0.0, 60.0, 100.0);

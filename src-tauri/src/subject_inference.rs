@@ -1,9 +1,9 @@
-//! Local Grounding-DINO/VGG worker boundary.
+//! Local Grounding DINO, MediaPipe Pose, and VGG worker boundary.
 //!
-//! Python is an optional local adapter because the approved DINO and VGG
-//! checkpoints are distributed in Python formats. The Rust culling pipeline
-//! treats this adapter as unavailable unless every model artifact is present
-//! and verified. There is no remote fallback.
+//! Python is an optional local adapter for the DINO and VGG checkpoints and
+//! MediaPipe Pose runtime. The Rust culling pipeline enables each capability
+//! only when its local model artifacts are present and verified. There is no
+//! remote fallback.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Cursor, Write};
@@ -294,10 +294,12 @@ impl LocalWorker {
         }
         let width = response
             .width
-            .ok_or_else(|| "LOCAL_CULLING_POSE_WIDTH_MISSING".to_owned())? as f32;
+            .ok_or_else(|| "LOCAL_CULLING_POSE_WIDTH_MISSING".to_owned())?
+            as f32;
         let height = response
             .height
-            .ok_or_else(|| "LOCAL_CULLING_POSE_HEIGHT_MISSING".to_owned())? as f32;
+            .ok_or_else(|| "LOCAL_CULLING_POSE_HEIGHT_MISSING".to_owned())?
+            as f32;
         let bodies = response
             .poses
             .unwrap_or_default()
@@ -305,7 +307,11 @@ impl LocalWorker {
             .map(|pose| PoseBody {
                 nose_x: pose.nose.x,
                 nose_y: pose.nose.y,
-                torso: pose.torso.into_iter().map(|point| (point.x, point.y)).collect(),
+                torso: pose
+                    .torso
+                    .into_iter()
+                    .map(|point| (point.x, point.y))
+                    .collect(),
             })
             .collect();
         Ok(PoseFrame {
@@ -517,7 +523,7 @@ fn encode_image(image: &DynamicImage, max_dimension: u32) -> Result<String, Stri
 #[cfg(test)]
 mod tests {
     use super::{
-        development_model_directory, select_model_directory, CullingManifest, CANONICAL_MANIFEST,
+        CANONICAL_MANIFEST, CullingManifest, development_model_directory, select_model_directory,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -606,7 +612,10 @@ mod tests {
             serde_json::from_str(CANONICAL_MANIFEST).expect("shipped culling manifest");
         assert_eq!(manifest.subject_model.license_filename, "DINO-LICENSE.txt");
         assert_eq!(manifest.subject_model.license_bytes, 11355);
-        assert_eq!(manifest.focus_model.source_license_filename, "VGG-LICENSE.txt");
+        assert_eq!(
+            manifest.focus_model.source_license_filename,
+            "VGG-LICENSE.txt"
+        );
         assert_eq!(manifest.focus_model.checkpoint, "vgg_best.pth");
         assert_eq!(manifest.pose_model.filename, "pose_landmarker_lite.task");
         assert_eq!(manifest.pose_model.bytes, 5_777_746);
@@ -628,7 +637,10 @@ mod tests {
         for artifact in &manifest.subject_model.artifacts {
             assert_eq!(artifact.sha256.len(), 64, "{}", artifact.filename);
             assert!(
-                artifact.sha256.chars().all(|character| character.is_ascii_hexdigit()),
+                artifact
+                    .sha256
+                    .chars()
+                    .all(|character| character.is_ascii_hexdigit()),
                 "{}",
                 artifact.filename
             );

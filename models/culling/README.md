@@ -12,7 +12,9 @@ Le programme n’infère qu’avec des fichiers locaux vérifiés par
   dancing together. », puis « a person dancing. » seulement si la première
   est vide ;
 - MediaPipe Pose Landmarker lite (`Apache-2.0`) pour lier un visage au buste
-  du sujet. Chaque visage est jugé seul : il est principal si au moins la
+  du sujet. Pose analyse la frame entière puis chaque recadrage exact d’une
+  boîte sujet, sans marge ajoutée autour de ce recadrage. Chaque visage est
+  jugé seul : il est principal si au moins la
   moitié de son aire est dans une même boîte et qu’un nez de buste (au moins
   deux points parmi épaules et hanches, chacun dans l’une quelconque des
   boîtes sujet) est à moins de 1,5 × max(largeur, hauteur) du visage. Le nez
