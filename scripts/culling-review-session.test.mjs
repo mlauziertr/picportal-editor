@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import {
   beginCullingInvocation,
   createCullingInvocationId,
+  cullingAnalysisMessageKey,
   cullingEventMatches,
+  emptyCullingResultsHeadline,
   hideCullingReviewForEditor,
   restoreCullingReviewOnLibraryReturn,
 } from '../src/utils/cullingReviewSession.ts';
@@ -66,5 +68,21 @@ assert.equal(cullingEventMatches(started, secondId), true);
 assert.equal(cullingEventMatches(started, firstId), false);
 assert.equal(cullingEventMatches({ invocationId: null }, secondId), false);
 assert.equal(cullingEventMatches(dismissedWithLateResults, firstId), false);
+
+const emptyLists = { similarGroups: [], blurryImages: [], reviewAlerts: [], unknownImages: [] };
+for (const status of [
+  'subject-ready-focus-calibration-unavailable',
+  'focus-calibration-unavailable',
+]) {
+  const headline = emptyCullingResultsHeadline(status);
+  assert.notEqual(headline, 'noIssuesFound');
+  assert.equal(headline, cullingAnalysisMessageKey(status));
+  assert.equal(emptyLists.blurryImages.length, 0);
+  assert.equal(emptyLists.reviewAlerts.length, 0);
+  assert.equal(emptyLists.unknownImages.length, 0);
+}
+assert.equal(emptyCullingResultsHeadline('ready'), 'noIssuesFound');
+assert.equal(emptyCullingResultsHeadline('disabled'), 'noIssuesFound');
+assert.equal(cullingAnalysisMessageKey('focus-ready'), 'subjectAnalysisUnavailable');
 
 console.log('culling review session preserves the list across editor return');

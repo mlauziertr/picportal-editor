@@ -18,7 +18,12 @@ import Dropdown from '../ui/Dropdown';
 import Text from '../ui/Text';
 import { TextColors, TextVariants } from '../../types/typography';
 import { useUIStore } from '../../store/useUIStore';
-import { beginCullingInvocation, createCullingInvocationId } from '../../utils/cullingReviewSession';
+import {
+  beginCullingInvocation,
+  createCullingInvocationId,
+  cullingAnalysisMessageKey,
+  emptyCullingResultsHeadline,
+} from '../../utils/cullingReviewSession';
 
 interface CullingModalProps {
   isOpen: boolean;
@@ -479,7 +484,21 @@ export default function CullingModal({
     if (!suggestions) return null;
 
     const totalSuggestions = numSimilar + numBlurry + numAlerts + numUnknown;
+    const analysisMessageKey = cullingAnalysisMessageKey(suggestions.subjectAnalysisStatus);
     if (totalSuggestions === 0) {
+      const headline = emptyCullingResultsHeadline(suggestions.subjectAnalysisStatus);
+      if (headline !== 'noIssuesFound') {
+        return (
+          <div className="flex flex-col items-center justify-center h-48 text-center">
+            <Text variant={TextVariants.heading} className="mt-4">
+              {t(`modals.culling.${headline}`)}
+            </Text>
+            <div className="mt-6">
+              <Button onClick={onClose}>{t('modals.culling.done')}</Button>
+            </div>
+          </div>
+        );
+      }
       return (
         <div className="flex flex-col items-center justify-center h-48">
           <CheckCircle className="w-16 h-16 text-green-500" />
@@ -499,27 +518,9 @@ export default function CullingModal({
         <Text variant={TextVariants.title} className="mb-4">
           {t('modals.culling.cullingSuggestions')}
         </Text>
-        {suggestions.subjectAnalysisStatus !== 'ready' && (
+        {analysisMessageKey && (
           <Text variant={TextVariants.small} className="mb-3 text-text-secondary">
-            {suggestions.subjectAnalysisStatus === 'disabled'
-              ? t('modals.culling.subjectAnalysisDisabled')
-              : suggestions.subjectAnalysisStatus === 'focus-ready'
-                ? t('modals.culling.subjectAnalysisFocusReady')
-                : suggestions.subjectAnalysisStatus === 'subject-ready-focus-unavailable'
-                  ? t('modals.culling.subjectAnalysisSubjectReadyFocusUnavailable')
-                  : suggestions.subjectAnalysisStatus === 'subject-ready-pose-unavailable'
-                    ? t('modals.culling.subjectAnalysisPoseUnavailable')
-                    : suggestions.subjectAnalysisStatus === 'subject-ready-focus-calibration-unavailable'
-                      ? t('modals.culling.subjectAnalysisFocusCalibrationUnavailable')
-                      : suggestions.subjectAnalysisStatus === 'focus-calibration-unavailable'
-                        ? t('modals.culling.focusCalibrationUnavailable')
-                        : suggestions.subjectAnalysisStatus === 'focus-unavailable'
-                          ? t('modals.culling.subjectAnalysisFocusUnavailable')
-                          : suggestions.subjectAnalysisStatus === 'face-unavailable'
-                            ? t('modals.culling.subjectAnalysisFaceUnavailable')
-                            : suggestions.subjectAnalysisStatus === 'error'
-                              ? t('modals.culling.subjectAnalysisError')
-                              : t('modals.culling.subjectAnalysisUnavailable')}
+            {t(`modals.culling.${analysisMessageKey}`)}
           </Text>
         )}
         <div className="border-b border-surface mb-4">

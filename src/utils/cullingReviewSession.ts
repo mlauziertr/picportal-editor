@@ -39,6 +39,38 @@ export function hideCullingReviewForEditor<T extends CullingReviewSession>(sessi
   return { ...session, isOpen: false, hiddenForEditor: true };
 }
 
+export function cullingAnalysisMessageKey(status: string): string | null {
+  switch (status) {
+    case 'ready':
+      return null;
+    case 'disabled':
+      return 'subjectAnalysisDisabled';
+    case 'subject-ready-focus-unavailable':
+      return 'subjectAnalysisSubjectReadyFocusUnavailable';
+    case 'subject-ready-pose-unavailable':
+      return 'subjectAnalysisPoseUnavailable';
+    case 'subject-ready-focus-calibration-unavailable':
+      return 'subjectAnalysisFocusCalibrationUnavailable';
+    case 'focus-calibration-unavailable':
+      return 'focusCalibrationUnavailable';
+    case 'focus-unavailable':
+      return 'subjectAnalysisFocusUnavailable';
+    case 'face-unavailable':
+      return 'subjectAnalysisFaceUnavailable';
+    case 'error':
+      return 'subjectAnalysisError';
+    default:
+      return 'subjectAnalysisUnavailable';
+  }
+}
+
+export function emptyCullingResultsHeadline(status: string): string {
+  if (status === 'ready' || status === 'disabled') {
+    return 'noIssuesFound';
+  }
+  return cullingAnalysisMessageKey(status) ?? 'subjectAnalysisUnavailable';
+}
+
 export function restoreCullingReviewOnLibraryReturn<T extends CullingReviewSession>(session: T): T {
   if (!session.hiddenForEditor) {
     return session;
