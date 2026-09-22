@@ -230,47 +230,37 @@ impl Drop for LocalWorker {
 }
 
 pub fn model_directory(app: &AppHandle) -> Result<PathBuf, String> {
-    if let Some(path) = std::env::var_os("PICPORTAL_CULLING_MODEL_DIR") {
-        let path = PathBuf::from(path);
-        if path.join("manifest.json").is_file() {
-            return Ok(path);
-        }
-    }
-    if let Ok(path) = app
+    let explicit = std::env::var_os("PICPORTAL_CULLING_MODEL_DIR").map(PathBuf::from);
+    let packaged = app
         .path()
         .resolve("models/culling", tauri::path::BaseDirectory::Resource)
+        .ok();
+    select_model_directory(explicit, packaged, development_model_directory())
+}
+
+fn development_model_directory() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../models/culling")
+}
+
+fn select_model_directory(
+    explicit: Option<PathBuf>,
+    packaged: Option<PathBuf>,
+    development: PathBuf,
+) -> Result<PathBuf, String> {
+    if let Some(path) = explicit
         && path.join("manifest.json").is_file()
     {
         return Ok(path);
     }
-    if let Ok(path) = app
-        .path()
-        .app_data_dir()
-        .map(|path| path.join("models/culling"))
+    if let Some(path) = packaged
         && path.join("manifest.json").is_file()
     {
         return Ok(path);
     }
-    let development = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../models/culling");
     if development.join("manifest.json").is_file() {
         return Ok(development);
     }
     Err("LOCAL_CULLING_MODEL_MANIFEST_UNAVAILABLE".to_owned())
-}
-
-#[tauri::command]
-pub fn culling_runtime_status(app: AppHandle) -> String {
-    match model_directory(&app).and_then(|path| {
-        verify_subject_bundle(&path)?;
-        Ok(path)
-    }) {
-        Ok(path) => match focus_model_ready(&path) {
-            Ok(true) => "subject-and-focus-ready".to_owned(),
-            Ok(false) => "subject-ready-focus-unavailable".to_owned(),
-            Err(error) => format!("focus-unavailable:{error}"),
-        },
-        Err(error) => format!("unavailable:{error}"),
-    }
 }
 
 fn worker_script_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -390,4 +380,89 @@ fn encode_image(image: &DynamicImage, max_dimension: u32) -> Result<String, Stri
         .write_to(&mut output, format)
         .map_err(|error| format!("LOCAL_CULLING_IMAGE_ENCODE_FAILED: {error}"))?;
     Ok(BASE64.encode(output.into_inner()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{development_model_directory, select_model_directory};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    fn manifest_dir(path: &Path) -> PathBuf {
+        fs::create_dir_all(path).unwrap();
+        fs::write(path.join("manifest.json"), b"{}").unwrap();
+        path.to_path_buf()
+    }
+
+    #[test]
+    fn explicit_model_directory_wins_when_its_manifest_exists() {
+        let root = tempfile::tempdir().unwrap();
+        let explicit = manifest_dir(&root.path().join("explicit"));
+        let packaged = manifest_dir(&root.path().join("packaged"));
+        let development = manifest_dir(&root.path().join("development"));
+        let stale_app_data =
+            manifest_dir(&root.path().join("app-data").join("models").join("culling"));
+
+        let selected =
+            select_model_directory(Some(explicit.clone()), Some(packaged), development).unwrap();
+
+        assert_eq!(selected, explicit);
+        assert_ne!(selected, stale_app_data);
+    }
+
+    #[test]
+    fn packaged_resource_wins_when_explicit_directory_has_no_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        let explicit = root.path().join("explicit");
+        fs::create_dir_all(&explicit).unwrap();
+        let packaged = manifest_dir(&root.path().join("packaged"));
+        let development = manifest_dir(&root.path().join("development"));
+
+        let selected =
+            select_model_directory(Some(explicit), Some(packaged.clone()), development).unwrap();
+
+        assert_eq!(selected, packaged);
+    }
+
+    #[test]
+    fn development_models_are_used_when_earlier_sources_have_no_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        let development = manifest_dir(&root.path().join("development"));
+        let stale_app_data =
+            manifest_dir(&root.path().join("app-data").join("models").join("culling"));
+
+        let selected = select_model_directory(
+            None,
+            Some(root.path().join("missing-resource")),
+            development.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(selected, development);
+        assert_ne!(selected, stale_app_data);
+    }
+
+    #[test]
+    fn missing_manifests_stay_unavailable_instead_of_using_another_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let stale_app_data =
+            manifest_dir(&root.path().join("app-data").join("models").join("culling"));
+
+        let error = select_model_directory(None, None, root.path().join("missing-development"))
+            .unwrap_err();
+
+        assert_eq!(error, "LOCAL_CULLING_MODEL_MANIFEST_UNAVAILABLE");
+        assert!(stale_app_data.join("manifest.json").is_file());
+    }
+
+    #[test]
+    fn development_fallback_resolves_the_repo_culling_models() {
+        let selected = select_model_directory(None, None, development_model_directory()).unwrap();
+
+        assert_eq!(
+            selected.canonicalize().unwrap(),
+            development_model_directory().canonicalize().unwrap()
+        );
+        assert!(selected.join("manifest.json").is_file());
+    }
 }
