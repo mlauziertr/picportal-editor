@@ -368,15 +368,16 @@ fn face_overlap(face: &AssociationFace, boxes: &[SubjectBox]) -> f32 {
     if area <= 0.0 {
         return 0.0;
     }
-    let mut intersection = 0.0;
-    for subject in boxes {
-        let left = face.x.max(subject.x);
-        let top = face.y.max(subject.y);
-        let right = (face.x + face.width).min(subject.x + subject.width);
-        let bottom = (face.y + face.height).min(subject.y + subject.height);
-        intersection += (right - left).max(0.0) * (bottom - top).max(0.0);
-    }
-    intersection / area
+    boxes
+        .iter()
+        .map(|subject| {
+            let left = face.x.max(subject.x);
+            let top = face.y.max(subject.y);
+            let right = (face.x + face.width).min(subject.x + subject.width);
+            let bottom = (face.y + face.height).min(subject.y + subject.height);
+            ((right - left).max(0.0) * (bottom - top).max(0.0)) / area
+        })
+        .fold(0.0, f32::max)
 }
 
 fn subject_busts(poses: &[AssociationPose], boxes: &[SubjectBox]) -> Vec<SubjectBust> {
@@ -441,6 +442,7 @@ fn status_when_face_model_missing(status: &str) -> &'static str {
             | "subject-ready-focus-calibration-unavailable"
             | "focus-calibration-unavailable"
             | "focus-unavailable"
+            | "disabled"
     ) {
         "face-unavailable"
     } else {
@@ -1432,12 +1434,38 @@ mod tests {
         ] {
             assert_eq!(status_when_face_model_missing(status), "face-unavailable");
         }
+        assert_eq!(status_when_face_model_missing("disabled"), "face-unavailable");
         assert_eq!(status_when_face_model_missing("unavailable"), "unavailable");
         assert_eq!(
             status_when_face_model_missing("subject-unavailable"),
             "unavailable"
         );
         assert_eq!(status_when_face_model_missing("focus-ready"), "unavailable");
+    }
+
+    #[test]
+    fn overlap_is_the_largest_single_box_not_the_sum() {
+        let face = face_at(0.0, 0.0, 100.0, 100.0);
+        let repeated = box_at(0.0, 0.0, 40.0, 100.0);
+        let adjacent = box_at(40.0, 0.0, 30.0, 100.0);
+        let repeated_overlap = face_overlap(&face, &[repeated.clone(), repeated.clone()]);
+        let split_overlap = face_overlap(&face, &[repeated.clone(), adjacent]);
+        assert!((repeated_overlap - 0.4).abs() < 0.001);
+        assert!((split_overlap - 0.4).abs() < 0.001);
+        assert!(repeated_overlap < SUBJECT_OVERLAP_MIN);
+
+        let bust = bust_at(20.0, 50.0, &repeated);
+        let roles = attribute_faces(&[face.clone()], &[repeated.clone(), repeated], &[bust]);
+        assert_eq!(roles, vec![AttributedRole::Secondary]);
+
+        let covering = box_at(0.0, 0.0, 60.0, 100.0);
+        let covering_bust = bust_at(30.0, 50.0, &covering);
+        let roles = attribute_faces(
+            &[face],
+            &[covering, box_at(70.0, 0.0, 20.0, 100.0)],
+            &[covering_bust],
+        );
+        assert_eq!(roles, vec![AttributedRole::Primary]);
     }
 
     #[test]

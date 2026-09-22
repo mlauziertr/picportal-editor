@@ -33,12 +33,8 @@ reste `unknown`.
 
 Le score VGG natif est la moyenne de `sigmoid(fusion)` après padding
 `reflect` aux multiples de 32, normalisation ImageNet, et recoupe hors
-padding. Sur les poids autorisés, un flou gaussien a fait baisser cette
-moyenne sur les 20 crops nets du diagnostic (delta médian −0,325) : une
-moyenne plus basse est plus de flou, pas l’inverse. Les lots annotés se
-recouvrent encore (nets jusqu’à 0,0249, mous jusqu’à 0,2981). Le point
-historique `native_mean < 0,060` n’est pas adopté. Le score peut être
-affiché ; il ne déclenche pas `focusReview`. L’étalonnage reste indisponible.
+padding. L’étalonnage de ce score n’est pas établi ici. Le score peut être
+affiché ; il ne déclenche pas `focusReview` et aucun seuil n’est appliqué.
 
 Le worker Python doit être installé dans un environnement utilisateur isolé
 avec `torch`, `transformers`, `numpy`, `Pillow` et `mediapipe` (par exemple

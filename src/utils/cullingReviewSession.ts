@@ -8,11 +8,8 @@ export interface CullingReviewSession {
   hiddenForEditor?: boolean;
 }
 
-let invocationSequence = 0;
-
 export function createCullingInvocationId(): string {
-  invocationSequence += 1;
-  return `cull-${invocationSequence}`;
+  return globalThis.crypto.randomUUID();
 }
 
 export function beginCullingInvocation<T extends CullingReviewSession>(session: T, invocationId: string): T {

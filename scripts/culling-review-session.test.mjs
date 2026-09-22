@@ -56,6 +56,8 @@ assert.equal(restoreCullingReviewOnLibraryReturn(dismissedWithLateResults).isOpe
 const firstId = createCullingInvocationId();
 const secondId = createCullingInvocationId();
 assert.notEqual(firstId, secondId);
+assert.notEqual(firstId, 'cull-1');
+assert.equal(cullingEventMatches({ invocationId: secondId }, 'cull-1'), false);
 const started = beginCullingInvocation({ ...hidden, hiddenForEditor: true }, secondId);
 assert.equal(started.invocationId, secondId);
 assert.equal(started.hiddenForEditor, false);
