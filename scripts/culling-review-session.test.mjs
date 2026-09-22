@@ -6,6 +6,7 @@ import {
   cullingEventMatches,
   emptyCullingResultsHeadline,
   hideCullingReviewForEditor,
+  populatedCullingResultsTab,
   restoreCullingReviewOnLibraryReturn,
 } from '../src/utils/cullingReviewSession.ts';
 
@@ -84,5 +85,31 @@ for (const status of [
 assert.equal(emptyCullingResultsHeadline('ready'), 'noIssuesFound');
 assert.equal(emptyCullingResultsHeadline('disabled'), 'noIssuesFound');
 assert.equal(cullingAnalysisMessageKey('focus-ready'), 'subjectAnalysisUnavailable');
+
+const unevaluablePass = {
+  similarGroups: [],
+  blurryImages: [],
+  reviewAlerts: [],
+  unknownImages: [],
+};
+const similarPass = {
+  similarGroups: [{ duplicates: [{ path: '/photos/soft.jpg' }] }],
+  blurryImages: [],
+  reviewAlerts: [],
+  unknownImages: [],
+};
+const afterUnevaluable = populatedCullingResultsTab(unevaluablePass);
+const afterSimilar = populatedCullingResultsTab(similarPass);
+assert.equal(afterSimilar, 'similar');
+assert.notEqual(afterSimilar, 'unknown');
+assert.equal(
+  populatedCullingResultsTab({
+    similarGroups: [],
+    blurryImages: [{ path: '/photos/blur.jpg' }],
+    reviewAlerts: [],
+    unknownImages: [],
+  }),
+  'blurry',
+);
 
 console.log('culling review session preserves the list across editor return');

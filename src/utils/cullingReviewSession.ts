@@ -64,6 +64,21 @@ export function cullingAnalysisMessageKey(status: string): string | null {
   }
 }
 
+export type CullingResultsTab = 'similar' | 'blurry' | 'alerts' | 'unknown';
+
+export function populatedCullingResultsTab(suggestions: {
+  similarGroups: readonly unknown[];
+  blurryImages: readonly unknown[];
+  reviewAlerts: readonly unknown[];
+  unknownImages: readonly unknown[];
+}): CullingResultsTab {
+  if (suggestions.similarGroups.length > 0) return 'similar';
+  if (suggestions.blurryImages.length > 0) return 'blurry';
+  if (suggestions.reviewAlerts.length > 0) return 'alerts';
+  if (suggestions.unknownImages.length > 0) return 'unknown';
+  return 'similar';
+}
+
 export function emptyCullingResultsHeadline(status: string): string {
   if (status === 'ready' || status === 'disabled') {
     return 'noIssuesFound';

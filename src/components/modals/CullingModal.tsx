@@ -23,6 +23,7 @@ import {
   createCullingInvocationId,
   cullingAnalysisMessageKey,
   emptyCullingResultsHeadline,
+  populatedCullingResultsTab,
 } from '../../utils/cullingReviewSession';
 
 interface CullingModalProps {
@@ -277,17 +278,14 @@ export default function CullingModal({
       });
       suggestions.blurryImages.forEach((img) => initialRejects.add(img.path));
       setSelectedRejects(initialRejects);
-      if (suggestions.similarGroups.length === 0) {
-        setActiveTab(
-          suggestions.blurryImages.length > 0
-            ? 'blurry'
-            : suggestions.reviewAlerts.length > 0
-              ? 'alerts'
-              : 'unknown',
-        );
-      }
     }
   }, [stage, suggestions, settings.selectionAmount]);
+
+  useEffect(() => {
+    if (suggestions) {
+      setActiveTab(populatedCullingResultsTab(suggestions));
+    }
+  }, [suggestions]);
 
   const handleStartCulling = useCallback(async () => {
     const invocationId = createCullingInvocationId();
