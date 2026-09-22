@@ -287,7 +287,6 @@ fn analyze_image(
 #[derive(Clone, Copy)]
 struct SubjectPhrase {
     phrase: &'static str,
-    capacity: Option<usize>,
 }
 
 fn subject_phrases(profile: &str) -> Vec<SubjectPhrase> {
@@ -295,28 +294,22 @@ fn subject_phrases(profile: &str) -> Vec<SubjectPhrase> {
         "dance" => vec![
             SubjectPhrase {
                 phrase: "a couple dancing together.",
-                capacity: Some(2),
             },
             SubjectPhrase {
                 phrase: "a person dancing.",
-                capacity: Some(1),
             },
         ],
         "portrait" => vec![SubjectPhrase {
             phrase: "a person being photographed.",
-            capacity: Some(1),
         }],
         "sports" => vec![SubjectPhrase {
             phrase: "a person participating in a sport.",
-            capacity: Some(1),
         }],
         "wedding" => vec![SubjectPhrase {
             phrase: "a couple or group of people at a wedding.",
-            capacity: None,
         }],
         _ => vec![SubjectPhrase {
             phrase: "a person or group of people.",
-            capacity: None,
         }],
     }
 }
@@ -404,78 +397,55 @@ fn subject_busts(poses: &[AssociationPose], boxes: &[SubjectBox]) -> Vec<Subject
     busts
 }
 
+fn face_linked_to_subject_bust(
+    face: &AssociationFace,
+    boxes: &[SubjectBox],
+    poses: &[AssociationPose],
+) -> bool {
+    if face_overlap(face, boxes) < SUBJECT_OVERLAP_MIN {
+        return false;
+    }
+    let center_x = face.x + face.width / 2.0;
+    let center_y = face.y + face.height / 2.0;
+    let limit = NOSE_DISTANCE_FACTOR * face.width.max(face.height);
+    subject_busts(poses, boxes).into_iter().any(|bust| {
+        let distance =
+            ((center_x - bust.nose_x).powi(2) + (center_y - bust.nose_y).powi(2)).sqrt();
+        distance <= limit
+    })
+}
+
 fn attribute_faces(
     faces: &[AssociationFace],
     boxes: &[SubjectBox],
     poses: &[AssociationPose],
-    capacity: Option<usize>,
 ) -> Vec<AttributedRole> {
-    let busts = subject_busts(poses, boxes);
-    let mut nearest_bust = vec![None; faces.len()];
-    let mut geometric = vec![false; faces.len()];
-    for (index, face) in faces.iter().enumerate() {
-        if face_overlap(face, boxes) < SUBJECT_OVERLAP_MIN {
-            continue;
-        }
-        let center_x = face.x + face.width / 2.0;
-        let center_y = face.y + face.height / 2.0;
-        let limit = NOSE_DISTANCE_FACTOR * face.width.max(face.height);
-        let mut best: Option<(usize, f32)> = None;
-        for (bust_index, bust) in busts.iter().enumerate() {
-            let distance =
-                ((center_x - bust.nose_x).powi(2) + (center_y - bust.nose_y).powi(2)).sqrt();
-            if distance <= limit
-                && best
-                    .map(|(_, best_distance)| distance < best_distance)
-                    .unwrap_or(true)
-            {
-                best = Some((bust_index, distance));
-            }
-        }
-        if let Some((bust_index, distance)) = best {
-            geometric[index] = true;
-            nearest_bust[index] = Some((bust_index, distance));
-        }
-    }
-
-    let mut owner: Vec<Option<(usize, f32)>> = vec![None; busts.len()];
-    for (index, candidate) in nearest_bust.iter().enumerate() {
-        if let Some((bust_index, distance)) = candidate {
-            let replace = match owner[*bust_index] {
-                None => true,
-                Some((_, owned_distance)) => *distance < owned_distance,
-            };
-            if replace {
-                owner[*bust_index] = Some((index, *distance));
-            }
-        }
-    }
-
-    let mut primary = vec![false; faces.len()];
-    for owned in &owner {
-        if let Some((index, _)) = owned {
-            primary[*index] = true;
-        }
-    }
-    if let Some(limit) = capacity
-        && primary.iter().filter(|is_primary| **is_primary).count() > limit
-    {
-        primary.fill(false);
-    }
-
     faces
         .iter()
-        .enumerate()
-        .map(|(index, _)| {
-            if primary[index] {
+        .map(|face| {
+            if face_linked_to_subject_bust(face, boxes, poses) {
                 AttributedRole::Primary
-            } else if geometric[index] {
-                AttributedRole::Unknown
             } else {
                 AttributedRole::Secondary
             }
         })
         .collect()
+}
+
+fn status_when_face_model_missing(status: &str) -> &'static str {
+    if matches!(
+        status,
+        "ready"
+            | "subject-ready-pose-unavailable"
+            | "subject-ready-focus-unavailable"
+            | "subject-ready-focus-calibration-unavailable"
+            | "focus-calibration-unavailable"
+            | "focus-unavailable"
+    ) {
+        "face-unavailable"
+    } else {
+        "unavailable"
+    }
 }
 
 fn display_subject_boxes(boxes: Vec<SubjectBox>, width: f32, height: f32) -> Vec<SubjectBox> {
@@ -658,7 +628,6 @@ fn update_assisted_result(
     let mut subject_boxes = Vec::new();
     let mut subject_method = "grounding-dino-unavailable".to_owned();
 
-    let mut phrase_capacity = None;
     if settings.detect_subject {
         if let Some(local_worker) = worker.as_mut() {
             let mut passes = Vec::new();
@@ -692,8 +661,7 @@ fn update_assisted_result(
             }
             if failed {
                 subject_method = "grounding-dino-error".to_owned();
-            } else if let Some((phrase, boxes)) = choose_subject_phrase(&passes) {
-                phrase_capacity = phrase.capacity;
+            } else if let Some((_, boxes)) = choose_subject_phrase(&passes) {
                 subject_boxes = boxes.clone();
                 subject_method = "grounding-dino-local".to_owned();
             } else if !passes.is_empty() {
@@ -756,7 +724,6 @@ fn update_assisted_result(
                             .collect::<Vec<_>>(),
                         &subject_boxes,
                         &poses,
-                        phrase_capacity,
                     )
                 }
                 Err(_) => {
@@ -1080,14 +1047,8 @@ pub async fn cull_images(
             match face_processing::load_for_app(&app_handle) {
                 Ok(runtime) => Some(runtime),
                 Err(_) => {
-                    subject_analysis_status = if matches!(
-                        subject_analysis_status.as_str(),
-                        "ready" | "focus-ready" | "subject-ready-focus-unavailable"
-                    ) {
-                        "face-unavailable".to_owned()
-                    } else {
-                        "unavailable".to_owned()
-                    };
+                    subject_analysis_status =
+                        status_when_face_model_missing(&subject_analysis_status).to_owned();
                     None
                 }
             }
@@ -1385,20 +1346,29 @@ mod tests {
         ];
         let selected = choose_subject_phrase(&empty_first).unwrap();
         assert_eq!(selected.0.phrase, "a person dancing.");
-        assert_eq!(selected.0.capacity, Some(1));
         assert_eq!(selected.1[0].x, person.x);
     }
 
     #[test]
-    fn nose_bust_association_leaves_a_competing_dancer_unknown() {
+    fn measured_link_keeps_every_face_inside_the_nose_limit() {
         let subject = box_at(0.0, 0.0, 1000.0, 1600.0);
         let couple = face_at(100.0, 100.0, 80.0, 100.0);
         let extra = face_at(200.0, 100.0, 100.0, 120.0);
         let bust = bust_at(140.0, 150.0, &subject);
-        let roles = attribute_faces(&[couple, extra], &[subject], &[bust], Some(2));
+        let extra_limit = NOSE_DISTANCE_FACTOR * extra.width.max(extra.height);
+        let extra_distance = ((250.0 - 140.0_f32).powi(2) + (160.0 - 150.0_f32).powi(2)).sqrt();
+        assert!(extra_distance <= extra_limit);
+        assert!(face_overlap(&extra, &[subject.clone()]) >= SUBJECT_OVERLAP_MIN);
 
-        assert_eq!(roles[0], AttributedRole::Primary);
-        assert_eq!(roles[1], AttributedRole::Unknown);
+        let roles = attribute_faces(&[couple, extra.clone()], &[subject.clone()], &[bust.clone()]);
+        assert_eq!(roles, vec![AttributedRole::Primary, AttributedRole::Primary]);
+
+        let beyond = face_at(500.0, 100.0, 80.0, 80.0);
+        let beyond_limit = NOSE_DISTANCE_FACTOR * beyond.width.max(beyond.height);
+        let beyond_distance = ((540.0 - 140.0_f32).powi(2) + (140.0 - 150.0_f32).powi(2)).sqrt();
+        assert!(beyond_distance > beyond_limit);
+        let roles = attribute_faces(&[beyond], &[subject], &[bust]);
+        assert_eq!(roles, vec![AttributedRole::Secondary]);
     }
 
     #[test]
@@ -1406,40 +1376,38 @@ mod tests {
         let subject = box_at(0.0, 0.0, 400.0, 400.0);
         let mostly_outside = face_at(380.0, 180.0, 80.0, 80.0);
         let bust = bust_at(200.0, 200.0, &subject);
-        let roles = attribute_faces(&[mostly_outside], &[subject.clone()], &[bust], Some(2));
+        let roles = attribute_faces(&[mostly_outside], &[subject.clone()], &[bust]);
         assert_eq!(roles[0], AttributedRole::Secondary);
 
         let half_short = face_at(360.0, 100.0, 100.0, 100.0);
         let close_bust = bust_at(390.0, 150.0, &subject);
-        let roles = attribute_faces(&[half_short], &[subject], &[close_bust], Some(2));
+        let roles = attribute_faces(&[half_short], &[subject], &[close_bust]);
         assert_ne!(roles[0], AttributedRole::Primary);
     }
 
     #[test]
-    fn a_couple_with_distinct_busts_stays_primary_and_a_third_abstains() {
+    fn distinct_busts_link_independently_including_a_third_face() {
         let subject = box_at(0.0, 0.0, 1000.0, 1600.0);
         let left = face_at(80.0, 80.0, 90.0, 110.0);
         let right = face_at(700.0, 90.0, 90.0, 110.0);
-        let left_bust = bust_at(125.0, 135.0, &subject);
-        let right_bust = bust_at(745.0, 145.0, &subject);
-        let roles = attribute_faces(
-            &[left.clone(), right.clone()],
-            &[subject.clone()],
-            &[left_bust.clone(), right_bust.clone()],
-            Some(2),
-        );
-        assert_eq!(roles, vec![AttributedRole::Primary, AttributedRole::Primary]);
-
         let extra = face_at(400.0, 80.0, 80.0, 100.0);
-        let extra_bust = bust_at(440.0, 130.0, &subject);
         let roles = attribute_faces(
             &[left, right, extra],
-            &[subject],
-            &[left_bust, right_bust, extra_bust],
-            Some(2),
+            &[subject.clone()],
+            &[
+                bust_at(125.0, 135.0, &subject),
+                bust_at(745.0, 145.0, &subject),
+                bust_at(440.0, 130.0, &subject),
+            ],
         );
-        assert!(roles.iter().all(|role| *role != AttributedRole::Primary));
-        assert!(roles.iter().any(|role| *role == AttributedRole::Unknown));
+        assert_eq!(
+            roles,
+            vec![
+                AttributedRole::Primary,
+                AttributedRole::Primary,
+                AttributedRole::Primary
+            ]
+        );
     }
 
     #[test]
@@ -1448,8 +1416,28 @@ mod tests {
         let face = face_at(150.0, 40.0, 100.0, 80.0);
         assert!((face_overlap(&face, &[subject.clone()]) - 0.5).abs() < 0.001);
         let bust = bust_at(180.0, 80.0, &subject);
-        let roles = attribute_faces(&[face], &[subject], &[bust], Some(1));
+        let roles = attribute_faces(&[face], &[subject], &[bust]);
         assert_eq!(roles[0], AttributedRole::Primary);
+    }
+
+    #[test]
+    fn face_model_failure_stays_face_unavailable_for_live_pipeline_statuses() {
+        for status in [
+            "ready",
+            "subject-ready-pose-unavailable",
+            "subject-ready-focus-unavailable",
+            "subject-ready-focus-calibration-unavailable",
+            "focus-calibration-unavailable",
+            "focus-unavailable",
+        ] {
+            assert_eq!(status_when_face_model_missing(status), "face-unavailable");
+        }
+        assert_eq!(status_when_face_model_missing("unavailable"), "unavailable");
+        assert_eq!(
+            status_when_face_model_missing("subject-unavailable"),
+            "unavailable"
+        );
+        assert_eq!(status_when_face_model_missing("focus-ready"), "unavailable");
     }
 
     #[test]
