@@ -2245,6 +2245,7 @@ pub fn run() {
             tagging::remove_tag_for_paths,
             culling::cancel_culling,
             culling::cull_images,
+            culling::get_active_culling,
             lens_correction::get_lensfun_makers,
             lens_correction::get_lensfun_lenses_for_maker,
             lens_correction::autodetect_lens,

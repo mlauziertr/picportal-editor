@@ -14,6 +14,13 @@ export function createCullingInvocationId(): string {
   return globalThis.crypto.randomUUID();
 }
 
+export interface ActiveCullingInvocation {
+  invocationId: string;
+  progress: { current: number; total: number; stage: string };
+  pathsToCull: string[];
+  isCancelling: boolean;
+}
+
 export function beginCullingInvocation<T extends CullingReviewSession>(session: T, invocationId: string): T {
   return {
     ...session,
@@ -24,6 +31,24 @@ export function beginCullingInvocation<T extends CullingReviewSession>(session: 
     error: null,
     hiddenForEditor: false,
     isCancelling: false,
+    cancelled: false,
+  };
+}
+
+export function recoverCullingInvocation<T extends CullingReviewSession>(
+  session: T,
+  active: ActiveCullingInvocation,
+): T {
+  return {
+    ...session,
+    invocationId: active.invocationId,
+    isOpen: true,
+    suggestions: null,
+    progress: active.progress,
+    error: null,
+    pathsToCull: active.pathsToCull,
+    hiddenForEditor: false,
+    isCancelling: active.isCancelling,
     cancelled: false,
   };
 }

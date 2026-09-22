@@ -7,7 +7,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, WebviewWindow};
 
 use crate::{face_processing, image_loader, subject_inference};
 
@@ -139,13 +139,23 @@ const WEIGHT_CENTER_FOCUS: f64 = 0.35;
 const WEIGHT_EXPOSURE: f64 = 0.25;
 
 struct CullingCancellation {
+    owner: String,
+    paths_to_cull: Vec<String>,
+    progress: Mutex<CullingProgress>,
     requested: AtomicBool,
     worker: Mutex<Option<subject_inference::LocalWorkerCancellation>>,
 }
 
 impl CullingCancellation {
-    fn new() -> Self {
+    fn new(owner: &str, paths_to_cull: &[String]) -> Self {
         Self {
+            owner: owner.to_owned(),
+            paths_to_cull: paths_to_cull.to_vec(),
+            progress: Mutex::new(CullingProgress {
+                current: 0,
+                total: paths_to_cull.len(),
+                stage: "Initializing...".to_owned(),
+            }),
             requested: AtomicBool::new(false),
             worker: Mutex::new(None),
         }
@@ -153,6 +163,16 @@ impl CullingCancellation {
 
     fn is_requested(&self) -> bool {
         self.requested.load(Ordering::Acquire)
+    }
+
+    fn update_progress(&self, progress: &CullingProgress) {
+        let mut current = self
+            .progress
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if progress.stage != current.stage || progress.current >= current.current {
+            *current = progress.clone();
+        }
     }
 
     fn request(&self) {
@@ -198,13 +218,16 @@ struct CullingInvocationGuard {
 }
 
 impl CullingInvocationGuard {
-    fn register(invocation_id: &str) -> Result<Self, String> {
-        let cancellation = Arc::new(CullingCancellation::new());
+    fn register(invocation_id: &str, owner: &str, paths_to_cull: &[String]) -> Result<Self, String> {
+        let cancellation = Arc::new(CullingCancellation::new(owner, paths_to_cull));
         let mut active = ACTIVE_CULLING_INVOCATIONS
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if active.contains_key(invocation_id) {
             return Err("CULLING_INVOCATION_ALREADY_ACTIVE".to_owned());
+        }
+        if active.values().any(|value| value.owner == owner) {
+            return Err("CULLING_OWNER_ALREADY_ACTIVE".to_owned());
         }
         active.insert(invocation_id.to_owned(), Arc::clone(&cancellation));
         Ok(Self {
@@ -238,13 +261,47 @@ impl Drop for CullingInvocationGuard {
     }
 }
 
-fn request_culling_cancel(invocation_id: &str) -> bool {
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveCullingInvocation {
+    invocation_id: String,
+    progress: CullingProgress,
+    paths_to_cull: Vec<String>,
+    is_cancelling: bool,
+}
+
+fn active_culling_for_owner(owner: &str) -> Option<ActiveCullingInvocation> {
+    let active = ACTIVE_CULLING_INVOCATIONS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    active.iter().find_map(|(invocation_id, cancellation)| {
+        if cancellation.owner != owner {
+            return None;
+        }
+        let progress = cancellation
+            .progress
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        Some(ActiveCullingInvocation {
+            invocation_id: invocation_id.clone(),
+            progress,
+            paths_to_cull: cancellation.paths_to_cull.clone(),
+            is_cancelling: cancellation.is_requested(),
+        })
+    })
+}
+
+fn request_culling_cancel(owner: &str, invocation_id: &str) -> bool {
     let active = ACTIVE_CULLING_INVOCATIONS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let Some(cancellation) = active.get(invocation_id) else {
         return false;
     };
+    if cancellation.owner != owner {
+        return false;
+    }
     cancellation.request();
     true
 }
@@ -1093,9 +1150,28 @@ fn emit_culling<T: Serialize + Clone>(
     );
 }
 
+fn emit_culling_progress(
+    app_handle: &AppHandle,
+    invocation_id: &str,
+    cancellation: &CullingCancellation,
+    progress: CullingProgress,
+) {
+    cancellation.update_progress(&progress);
+    emit_culling(app_handle, "culling-progress", invocation_id, progress);
+}
+
 #[tauri::command]
-pub fn cancel_culling(invocation_id: String, app_handle: AppHandle) -> bool {
-    let accepted = request_culling_cancel(&invocation_id);
+pub fn get_active_culling(window: WebviewWindow) -> Option<ActiveCullingInvocation> {
+    active_culling_for_owner(window.label())
+}
+
+#[tauri::command]
+pub fn cancel_culling(
+    invocation_id: String,
+    app_handle: AppHandle,
+    window: WebviewWindow,
+) -> bool {
+    let accepted = request_culling_cancel(window.label(), &invocation_id);
     if accepted {
         emit_culling(&app_handle, "culling-cancelling", &invocation_id, ());
     }
@@ -1118,8 +1194,9 @@ pub async fn cull_images(
     settings: CullingSettings,
     invocation_id: String,
     app_handle: AppHandle,
+    window: WebviewWindow,
 ) -> Result<CullingSuggestions, String> {
-    let mut invocation = CullingInvocationGuard::register(&invocation_id)?;
+    let mut invocation = CullingInvocationGuard::register(&invocation_id, window.label(), &paths)?;
     let cancellation = Arc::clone(&invocation.cancellation);
     let total_count = paths.len();
     emit_culling(&app_handle, "culling-start", &invocation_id, total_count);
@@ -1163,10 +1240,10 @@ pub async fn cull_images(
                 let result =
                     analyze_image(path, &hasher, &app_settings).map_err(|e| (path.to_string(), e));
                 let completed = completed_count.fetch_add(1, Ordering::Relaxed) + 1;
-                emit_culling(
+                emit_culling_progress(
                     &app_handle,
-                    "culling-progress",
                     &invocation_id,
+                    &cancellation,
                     CullingProgress {
                         current: completed,
                         total: total_count,
@@ -1234,10 +1311,10 @@ pub async fn cull_images(
         };
 
     if settings.detect_subject || settings.detect_closed_eyes || settings.review_focus {
-        emit_culling(
+        emit_culling_progress(
             &app_handle,
-            "culling-progress",
             &invocation_id,
+            &cancellation,
             CullingProgress {
                 current: total_count,
                 total: total_count,
@@ -1294,10 +1371,10 @@ pub async fn cull_images(
         return finish_cancelled_culling(&mut invocation, &app_handle, &invocation_id);
     }
 
-    emit_culling(
+    emit_culling_progress(
         &app_handle,
-        "culling-progress",
         &invocation_id,
+        &cancellation,
         CullingProgress {
             current: total_count,
             total: total_count,
@@ -1431,19 +1508,34 @@ mod tests {
     fn cancellation_is_scoped_and_allows_restart_after_settlement() {
         let first_id = "culling-cancel-test-first";
         let second_id = "culling-cancel-test-second";
+        let owner = "culling-owner-main";
+        let other_owner = "culling-owner-other";
+        let paths = vec!["/photos/one.raw".to_owned(), "/photos/two.raw".to_owned()];
         let (mut first, mut second) = (
-            CullingInvocationGuard::register(first_id).unwrap(),
-            CullingInvocationGuard::register(second_id).unwrap(),
+            CullingInvocationGuard::register(first_id, owner, &paths).unwrap(),
+            CullingInvocationGuard::register(second_id, other_owner, &paths).unwrap(),
         );
 
-        assert!(request_culling_cancel(first_id));
+        assert!(CullingInvocationGuard::register("duplicate-owner", owner, &paths).is_err());
+        first.cancellation.update_progress(&CullingProgress {
+            current: 1,
+            total: 2,
+            stage: "Analyzing images...".to_owned(),
+        });
+        let recovered = active_culling_for_owner(owner).unwrap();
+        assert_eq!(recovered.invocation_id, first_id);
+        assert_eq!(recovered.paths_to_cull, paths);
+        assert_eq!(recovered.progress.current, 1);
+        assert!(!request_culling_cancel(other_owner, first_id));
+        assert!(request_culling_cancel(owner, first_id));
         assert!(first.cancellation.is_requested());
         assert!(!second.cancellation.is_requested());
         assert!(first.conclude());
-        assert!(!request_culling_cancel(first_id));
+        assert!(active_culling_for_owner(owner).is_none());
+        assert!(!request_culling_cancel(owner, first_id));
         assert!(!second.conclude());
 
-        let mut restarted = CullingInvocationGuard::register(first_id).unwrap();
+        let mut restarted = CullingInvocationGuard::register(first_id, owner, &paths).unwrap();
         assert!(!restarted.cancellation.is_requested());
         assert!(!restarted.conclude());
     }

@@ -11,6 +11,7 @@ import {
   hideCullingReviewForEditor,
   initialCullingRejectPaths,
   populatedCullingResultsTab,
+  recoverCullingInvocation,
   requestCullingCancellation,
   restoreCullingReviewOnLibraryReturn,
 } from '../src/utils/cullingReviewSession.ts';
@@ -95,6 +96,25 @@ assert.equal(restarted.cancelled, false);
 assert.equal(restarted.isCancelling, false);
 assert.equal(cullingReviewStage(restarted), 'progress');
 assert.notEqual(restarted.invocationId, secondId);
+
+const recoveredAfterReload = recoverCullingInvocation(dismissed, {
+  invocationId: secondId,
+  progress: { current: 12, total: 40, stage: 'Analyzing images...' },
+  pathsToCull: review.pathsToCull,
+  isCancelling: false,
+});
+assert.equal(recoveredAfterReload.isOpen, true);
+assert.equal(recoveredAfterReload.invocationId, secondId);
+assert.equal(cullingEventMatches(recoveredAfterReload, secondId), true);
+assert.deepEqual(recoveredAfterReload.pathsToCull, review.pathsToCull);
+assert.equal(cullingReviewStage(recoveredAfterReload), 'progress');
+const reloadedCancellation = requestCullingCancellation(recoveredAfterReload);
+assert.equal(reloadedCancellation.isCancelling, true);
+const reloadedCancellationComplete = completeCullingCancellation(reloadedCancellation);
+assert.equal(reloadedCancellationComplete.cancelled, true);
+const restartedAfterReload = beginCullingInvocation(reloadedCancellationComplete, createCullingInvocationId());
+assert.notEqual(restartedAfterReload.invocationId, secondId);
+assert.equal(cullingReviewStage(restartedAfterReload), 'progress');
 
 const emptyLists = { similarGroups: [], blurryImages: [], reviewAlerts: [], unknownImages: [], failedPaths: [] };
 for (const status of [

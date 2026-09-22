@@ -106,6 +106,7 @@ export enum Invokes {
   GenerateAllCommunityPreviews = 'generate_all_community_previews',
   SaveCommunityPreset = 'save_community_preset',
   SaveTempFile = 'save_temp_file',
+  GetActiveCulling = 'get_active_culling',
   GetAlbums = 'get_albums',
   SaveAlbums = 'save_albums',
   AddToAlbum = 'add_to_album',

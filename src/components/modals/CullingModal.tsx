@@ -19,6 +19,7 @@ import Text from '../ui/Text';
 import { TextColors, TextVariants } from '../../types/typography';
 import { useUIStore } from '../../store/useUIStore';
 import {
+  type ActiveCullingInvocation,
   beginCullingInvocation,
   createCullingInvocationId,
   cullingAnalysisMessageKey,
@@ -27,6 +28,7 @@ import {
   hasCullingResultItems,
   initialCullingRejectPaths,
   populatedCullingResultsTab,
+  recoverCullingInvocation,
   requestCullingCancellation,
 } from '../../utils/cullingReviewSession';
 
@@ -226,6 +228,49 @@ export default function CullingModal({
   const retainedReviewRef = useRef(false);
   retainedReviewRef.current = Boolean(suggestions || error || progress);
 
+  const reconcileActiveCulling = useCallback(async (): Promise<boolean> => {
+    const recovered = await invoke<ActiveCullingInvocation | null>(Invokes.GetActiveCulling);
+    if (!recovered) return false;
+    useUIStore.getState().setUI((state) => {
+      const currentId = state.cullingModalState.invocationId;
+      if (currentId && currentId !== recovered.invocationId) return {};
+      return {
+        cullingModalState: recoverCullingInvocation(state.cullingModalState, recovered),
+      };
+    });
+
+    const confirmed = await invoke<ActiveCullingInvocation | null>(Invokes.GetActiveCulling);
+    useUIStore.getState().setUI((state) => {
+      if (state.cullingModalState.invocationId !== recovered.invocationId) return {};
+      if (confirmed?.invocationId === recovered.invocationId) {
+        return {
+          cullingModalState: recoverCullingInvocation(state.cullingModalState, confirmed),
+        };
+      }
+      return {
+        cullingModalState: {
+          ...state.cullingModalState,
+          invocationId: null,
+          isOpen: false,
+          progress: null,
+          pathsToCull: [],
+          isCancelling: false,
+        },
+      };
+    });
+    return true;
+  }, []);
+
+  useEffect(() => {
+    let isActive = true;
+    void reconcileActiveCulling().catch((err) => {
+      if (isActive) console.error('Culling recovery failed:', err);
+    });
+    return () => {
+      isActive = false;
+    };
+  }, [reconcileActiveCulling]);
+
   const CULL_ACTIONS = useMemo(
     () => [
       {
@@ -272,19 +317,22 @@ export default function CullingModal({
   const handleStartCulling = useCallback(async () => {
     const current = useUIStore.getState().cullingModalState;
     if (current.progress || current.isCancelling) return;
-    const invocationId = createCullingInvocationId();
-    useUIStore.getState().setUI((state) => ({
-      cullingModalState: beginCullingInvocation(state.cullingModalState, invocationId),
-    }));
+    let invocationId: string | null = null;
     try {
-      await invoke(Invokes.CullImages, { paths: imagePaths, settings, invocationId });
+      if (await reconcileActiveCulling()) return;
+      const nextInvocationId = createCullingInvocationId();
+      invocationId = nextInvocationId;
+      useUIStore.getState().setUI((state) => ({
+        cullingModalState: beginCullingInvocation(state.cullingModalState, nextInvocationId),
+      }));
+      await invoke(Invokes.CullImages, { paths: imagePaths, settings, invocationId: nextInvocationId });
     } catch (err) {
       console.error('Culling failed to start:', err);
-      if (useUIStore.getState().cullingModalState.invocationId === invocationId) {
+      if (invocationId && useUIStore.getState().cullingModalState.invocationId === invocationId) {
         onError(String(err));
       }
     }
-  }, [imagePaths, settings, onError]);
+  }, [imagePaths, settings, onError, reconcileActiveCulling]);
 
   const handleCancelCulling = useCallback(async () => {
     const current = useUIStore.getState().cullingModalState;
