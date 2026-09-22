@@ -208,18 +208,39 @@ pub fn load_for_app(app: &AppHandle) -> Result<FaceRuntime, String> {
 }
 
 pub fn model_directory(app: &AppHandle) -> Result<PathBuf, String> {
-    if let Ok(path) = app
+    let packaged = app
         .path()
         .resolve("models/face", tauri::path::BaseDirectory::Resource)
-        && path.join("manifest.json").is_file()
-    {
-        return Ok(path);
-    }
+        .ok();
     let development = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../models/face");
-    if development.join("manifest.json").is_file() {
-        return Ok(development);
-    }
-    Err("YU_NET_MODEL_MANIFEST_UNAVAILABLE".to_owned())
+    select_model_directory(packaged, development)
+}
+
+fn select_model_directory(
+    packaged: Option<PathBuf>,
+    development: PathBuf,
+) -> Result<PathBuf, String> {
+    packaged
+        .filter(|path| face_model_assets_present(path))
+        .or_else(|| face_model_assets_present(&development).then_some(development))
+        .ok_or_else(|| "YU_NET_MODEL_MANIFEST_UNAVAILABLE".to_owned())
+}
+
+fn face_model_assets_present(directory: &Path) -> bool {
+    let Ok(manifest_bytes) = fs::read(directory.join("manifest.json")) else {
+        return false;
+    };
+    let Ok(manifest) = serde_json::from_slice::<FaceModelManifest>(&manifest_bytes) else {
+        return false;
+    };
+    let Ok(canonical) = serde_json::from_str::<FaceModelManifest>(CANONICAL_MANIFEST) else {
+        return false;
+    };
+    manifest == canonical
+        && directory.join(&manifest.artifact.filename).is_file()
+        && directory
+            .join(&manifest.artifact.license_filename)
+            .is_file()
 }
 
 pub fn choose_fallback_threshold(
@@ -451,6 +472,25 @@ fn non_maximum_suppression(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incomplete_packaged_assets_fall_back_to_complete_development_assets() {
+        let root = tempfile::tempdir().unwrap();
+        let packaged = root.path().join("packaged");
+        let development = root.path().join("development");
+        fs::create_dir_all(&packaged).unwrap();
+        fs::create_dir_all(&development).unwrap();
+        fs::write(packaged.join("manifest.json"), CANONICAL_MANIFEST).unwrap();
+        fs::write(development.join("manifest.json"), CANONICAL_MANIFEST).unwrap();
+        let manifest: FaceModelManifest = serde_json::from_str(CANONICAL_MANIFEST).unwrap();
+        fs::write(development.join(&manifest.artifact.filename), []).unwrap();
+        fs::write(development.join(&manifest.artifact.license_filename), []).unwrap();
+
+        assert_eq!(
+            select_model_directory(Some(packaged), development.clone()).unwrap(),
+            development
+        );
+    }
 
     #[test]
     fn fallback_is_only_requested_when_primary_is_empty() {
