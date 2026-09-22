@@ -179,9 +179,10 @@ export function initialCullingRejectPaths(
   selectionAmount: 'extreme' | 'few' | 'standard' | 'more',
 ): Set<string> {
   const rejects = new Set<string>();
-  const protectedPaths = new Set(
-    suggestions.unknownImages.filter((image) => image.eyeState === 'not-evaluated').map((image) => image.path),
-  );
+  const protectedPaths = new Set(suggestions.failedPaths);
+  suggestions.unknownImages
+    .filter((image) => image.eyeState === 'not-evaluated')
+    .forEach((image) => protectedPaths.add(image.path));
   suggestions.similarGroups.forEach((group) => {
     const keepCount =
       selectionAmount === 'extreme'

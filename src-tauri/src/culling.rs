@@ -1102,6 +1102,27 @@ fn update_assisted_result(
     data.result.review_alerts = review_alerts;
 }
 
+fn apply_assisted_image_load(
+    data: &mut ImageAnalysisData,
+    loaded: Result<DynamicImage, String>,
+    settings: &CullingSettings,
+    worker: &mut Option<subject_inference::LocalWorker>,
+    face_runtime: &mut Option<face_processing::FaceRuntime>,
+    failed_paths: &mut Vec<String>,
+) {
+    match loaded {
+        Ok(image) => update_assisted_result(data, &image, settings, worker, face_runtime),
+        Err(error) => {
+            failed_paths.push(data.result.path.clone());
+            data.result.subject_status = "unknown".to_owned();
+            data.result.subject_method = format!("image-unavailable:{error}");
+            data.result.focus_status = "unknown".to_owned();
+            data.result.eye_state = "not-evaluated".to_owned();
+            data.result.review_alerts.push("subjectUnknown".to_owned());
+        }
+    }
+}
+
 fn subject_analysis_status_for(
     worker: &subject_inference::LocalWorker,
     subject_requested: bool,
@@ -1328,22 +1349,15 @@ pub async fn cull_images(
                 drop(face_runtime.take());
                 return finish_cancelled_culling(&mut invocation, &app_handle, &invocation_id);
             }
-            match load_analysis_image(&data.result.path, &app_settings) {
-                Ok(image) => {
-                    update_assisted_result(data, &image, &settings, &mut worker, &mut face_runtime);
-                }
-                Err(error) => {
-                    data.result.subject_status = "unknown".to_owned();
-                    data.result.subject_method = format!("image-unavailable:{error}");
-                    data.result.focus_status = "unknown".to_owned();
-                    data.result.eye_state = if settings.detect_closed_eyes {
-                        "unknown".to_owned()
-                    } else {
-                        "disabled".to_owned()
-                    };
-                    data.result.review_alerts.push("subjectUnknown".to_owned());
-                }
-            }
+            let loaded = load_analysis_image(&data.result.path, &app_settings);
+            apply_assisted_image_load(
+                data,
+                loaded,
+                &settings,
+                &mut worker,
+                &mut face_runtime,
+                &mut failed_paths,
+            );
             if cancellation.is_requested() {
                 drop(worker.take());
                 cancellation.detach_worker();
@@ -1610,6 +1624,58 @@ mod tests {
             "open"
         ));
         assert_eq!(primary_eye_review_alert(&[]), None);
+    }
+
+    #[test]
+    fn assisted_reread_failure_is_unprocessed_and_not_evaluated() {
+        let path = std::env::temp_dir().join(format!(
+            "picportal-culling-reread-{}-{}.png",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        image::RgbImage::from_pixel(16, 16, image::Rgb([96, 128, 160]))
+            .save(&path)
+            .unwrap();
+
+        let app_settings = crate::app_settings::AppSettings::default();
+        let hasher = HasherConfig::new()
+            .hash_alg(HashAlg::DoubleGradient)
+            .hash_size(16, 16)
+            .to_hasher();
+        let path_string = path.to_string_lossy().into_owned();
+        let mut data = analyze_image(&path_string, &hasher, &app_settings).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let reread = load_analysis_image(&path_string, &app_settings);
+        assert!(reread.is_err());
+
+        let settings = CullingSettings {
+            detect_closed_eyes: true,
+            ..Default::default()
+        };
+        let mut worker = None;
+        let mut face_runtime = None;
+        let mut failed_paths = Vec::new();
+        apply_assisted_image_load(
+            &mut data,
+            reread,
+            &settings,
+            &mut worker,
+            &mut face_runtime,
+            &mut failed_paths,
+        );
+
+        assert_eq!(failed_paths, vec![path_string]);
+        assert_eq!(data.result.eye_state, "not-evaluated");
+        assert_eq!(data.result.subject_status, "unknown");
+        assert!(review_coverage_is_unknown(
+            &settings,
+            &data.result.subject_status,
+            &data.result.focus_status,
+            &data.result.eye_state,
+        ));
     }
 
     #[test]

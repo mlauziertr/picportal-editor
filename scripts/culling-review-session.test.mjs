@@ -192,12 +192,14 @@ const mixedCoveragePass = {
     {
       duplicates: [
         { path: '/photos/eyes-not-evaluated-duplicate.raw' },
+        { path: '/photos/reread-failed-duplicate.raw' },
         { path: '/photos/regular-duplicate.raw' },
       ],
     },
   ],
   blurryImages: [
     { path: '/photos/eyes-not-evaluated-blurry.raw' },
+    { path: '/photos/reread-failed-blurry.raw' },
     { path: '/photos/regular-blurry.raw' },
   ],
   reviewAlerts: [],
@@ -205,7 +207,11 @@ const mixedCoveragePass = {
     { path: '/photos/eyes-not-evaluated-duplicate.raw', eyeState: 'not-evaluated' },
     { path: '/photos/eyes-not-evaluated-blurry.raw', eyeState: 'not-evaluated' },
   ],
-  failedPaths: ['/photos/unreadable.raw'],
+  failedPaths: [
+    '/photos/unreadable.raw',
+    '/photos/reread-failed-duplicate.raw',
+    '/photos/reread-failed-blurry.raw',
+  ],
 };
 const mixedRejects = initialCullingRejectPaths(mixedCoveragePass, 'extreme');
 assert.equal(hasCullingResultItems(mixedCoveragePass), true);
@@ -213,6 +219,8 @@ assert.equal(mixedRejects.has('/photos/regular-duplicate.raw'), true);
 assert.equal(mixedRejects.has('/photos/regular-blurry.raw'), true);
 assert.equal(mixedRejects.has('/photos/eyes-not-evaluated-duplicate.raw'), false);
 assert.equal(mixedRejects.has('/photos/eyes-not-evaluated-blurry.raw'), false);
+assert.equal(mixedRejects.has('/photos/reread-failed-duplicate.raw'), false);
+assert.equal(mixedRejects.has('/photos/reread-failed-blurry.raw'), false);
 assert.equal(mixedRejects.has('/photos/unreadable.raw'), false);
 
 console.log('culling review session preserves explicit review coverage');
