@@ -4,15 +4,50 @@ export interface CullingReviewSession {
   progress: unknown;
   error: string | null;
   pathsToCull: string[];
+  invocationId?: string | null;
+  hiddenForEditor?: boolean;
+}
+
+let invocationSequence = 0;
+
+export function createCullingInvocationId(): string {
+  invocationSequence += 1;
+  return `cull-${invocationSequence}`;
+}
+
+export function beginCullingInvocation<T extends CullingReviewSession>(session: T, invocationId: string): T {
+  return {
+    ...session,
+    invocationId,
+    isOpen: true,
+    suggestions: null,
+    progress: null,
+    error: null,
+    hiddenForEditor: false,
+  };
+}
+
+export function cullingEventMatches(
+  session: { invocationId?: string | null },
+  eventInvocationId: unknown,
+): boolean {
+  return (
+    typeof session.invocationId === 'string' &&
+    session.invocationId.length > 0 &&
+    eventInvocationId === session.invocationId
+  );
 }
 
 export function hideCullingReviewForEditor<T extends CullingReviewSession>(session: T): T {
-  return { ...session, isOpen: false };
+  return { ...session, isOpen: false, hiddenForEditor: true };
 }
 
 export function restoreCullingReviewOnLibraryReturn<T extends CullingReviewSession>(session: T): T {
-  if (session.isOpen || (session.suggestions == null && session.error == null)) {
+  if (!session.hiddenForEditor) {
     return session;
   }
-  return { ...session, isOpen: true };
+  if (session.suggestions == null && session.error == null) {
+    return { ...session, hiddenForEditor: false };
+  }
+  return { ...session, isOpen: true, hiddenForEditor: false };
 }

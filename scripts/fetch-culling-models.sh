@@ -108,6 +108,12 @@ fetch_verified \
   'fca4fb2b7af053895c597466a6dcfc7b40c38924cfc679ebd337d9c7a52ce8f9' \
   '1067'
 
+fetch_verified \
+  'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task' \
+  "$culling_dir/pose_landmarker_lite.task" \
+  '59929e1d1ee95287735ddd833b19cf4ac46d29bc7afddbbf6753c459690d574a' \
+  '5777746'
+
 if [[ "${1:-}" == "--with-vgg" ]]; then
   : "${VGG_SOURCE_URL:?Set VGG_SOURCE_URL to the reviewed checkpoint source}"
   : "${VGG_SHA256:?Set VGG_SHA256 to the independently verified checkpoint digest}"

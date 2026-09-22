@@ -1,0 +1,5 @@
+Pose Landmarker lite weights are licensed under the Apache License, Version 2.0.
+
+Model card: https://storage.googleapis.com/mediapipe-assets/Model%20Card%20BlazePose%20GHUM%203D.pdf
+Task code: https://github.com/google/mediapipe/blob/master/mediapipe/tasks/python/vision/pose_landmarker.py
+Weight URL: https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task

@@ -72,10 +72,20 @@
     "sha256": null,
     "verification": "A user-provided SHA-256 sidecar is required before this optional model is enabled."
   },
+  "poseModel": {
+    "id": "google/pose-landmarker-lite-float16",
+    "filename": "pose_landmarker_lite.task",
+    "sourceUrl": "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+    "license": "Apache-2.0",
+    "licenseFilename": "POSE-LICENSE.txt",
+    "sha256": "59929e1d1ee95287735ddd833b19cf4ac46d29bc7afddbbf6753c459690d574a",
+    "bytes": 5777746,
+    "runtime": "MediaPipe Pose Landmarker lite 0.10.x, num_poses 8, confidence 0.5"
+  },
   "runtime": {
     "inference": "local-only",
     "worker": "scripts/culling_worker.py",
-    "pythonPackages": ["torch", "transformers", "numpy", "Pillow"],
+    "pythonPackages": ["torch", "transformers", "numpy", "Pillow", "mediapipe"],
     "remoteInference": false
   }
 }

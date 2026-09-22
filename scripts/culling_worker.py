@@ -29,13 +29,7 @@ STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 VGG16 = [64, 64, "M", 128, 128, "M", 256, 256, 256, "M", 512, 512, 512, "M", 512, 512, 512, "M"]
 RANGES = ((0, 5), (5, 10), (10, 17), (17, 24), (24, 31))
 
-PROFILE_PHRASES = {
-    "general": "a person or group of people.",
-    "portrait": "a person being photographed.",
-    "wedding": "a couple or group of people at a wedding.",
-    "sports": "a person participating in a sport.",
-    "dance": "a couple or group of people dancing together.",
-}
+
 
 
 def device() -> torch.device:
@@ -70,7 +64,9 @@ def load_dino() -> tuple[Any, Any, torch.device]:
 
 def dino_detect(processor: Any, model: Any, target: torch.device, request: dict[str, Any]) -> dict[str, Any]:
     image = decode_image(request["image"])
-    phrase = PROFILE_PHRASES.get(request.get("profile", "general"), PROFILE_PHRASES["general"])
+    phrase = request.get("phrase")
+    if not isinstance(phrase, str) or not phrase.strip():
+        raise ValueError("phrase is required")
     inputs = processor(images=image, text=phrase, return_tensors="pt")
     inputs = inputs.to(target)
     with torch.inference_mode():
@@ -268,9 +264,50 @@ def focus_score(model: DefocusVGG, target: torch.device, request: dict[str, Any]
     }
 
 
+def pose_path() -> Path:
+    return Path(os.environ["PICPORTAL_CULLING_MODEL_DIR"]) / "pose_landmarker_lite.task"
+
+
+def load_pose() -> Any:
+    import mediapipe as mp
+    from mediapipe.tasks import python as mp_python
+    from mediapipe.tasks.python import vision as mp_vision
+
+    model_path = pose_path()
+    if not model_path.is_file():
+        raise FileNotFoundError(str(model_path))
+    options = mp_vision.PoseLandmarkerOptions(
+        base_options=mp_python.BaseOptions(model_asset_path=str(model_path)),
+        running_mode=mp_vision.RunningMode.IMAGE,
+        num_poses=8,
+        min_pose_detection_confidence=0.5,
+        min_pose_presence_confidence=0.5,
+        output_segmentation_masks=False,
+    )
+    return mp, mp_vision.PoseLandmarker.create_from_options(options)
+
+
+def pose_detect(runtime: tuple[Any, Any], request: dict[str, Any]) -> dict[str, Any]:
+    mp, landmarker = runtime
+    image = decode_image(request["image"])
+    array = np.ascontiguousarray(np.asarray(image))
+    height, width = array.shape[:2]
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=array)
+    result = landmarker.detect(mp_image)
+    poses = []
+    for landmarks in result.pose_landmarks:
+        def point(index: int) -> dict[str, float]:
+            landmark = landmarks[index]
+            return {"x": float(landmark.x * width), "y": float(landmark.y * height)}
+
+        poses.append({"nose": point(0), "torso": [point(11), point(12), point(23), point(24)]})
+    return {"poses": poses, "width": width, "height": height}
+
+
 def run() -> None:
     dino: tuple[Any, Any, torch.device] | None = None
     focus: tuple[DefocusVGG, torch.device] | None = None
+    pose: tuple[Any, Any] | None = None
     for line in sys.stdin:
         try:
             request = json.loads(line)
@@ -283,6 +320,10 @@ def run() -> None:
                 if focus is None:
                     focus = load_focus()
                 response = focus_score(*focus, request)
+            elif operation == "pose":
+                if pose is None:
+                    pose = load_pose()
+                response = pose_detect(pose, request)
             else:
                 raise ValueError(f"unsupported operation: {operation}")
             print(json.dumps({"ok": True, **response}), flush=True)

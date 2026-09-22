@@ -131,11 +131,11 @@ struct ImageAnalysisData {
     result: ImageAnalysisResult,
 }
 
-const NATIVE_IN_FOCUS_REVIEW_FLOOR: f64 = 0.060;
-
-fn native_focus_needs_review(in_focus_mean: f64) -> bool {
-    in_focus_mean < NATIVE_IN_FOCUS_REVIEW_FLOOR
-}
+const SUBJECT_OVERLAP_MIN: f32 = 0.5;
+const NOSE_DISTANCE_FACTOR: f32 = 1.5;
+const TORSO_INSIDE_MIN: usize = 2;
+const SUBJECT_PAD_TOP: f32 = 0.25;
+const SUBJECT_PAD_SIDE: f32 = 0.15;
 const WEIGHT_SHARPNESS: f64 = 0.40;
 const WEIGHT_CENTER_FOCUS: f64 = 0.35;
 const WEIGHT_EXPOSURE: f64 = 0.25;
@@ -284,31 +284,304 @@ fn analyze_image(
     })
 }
 
-fn profile_allows_multiple_subjects(profile: &str) -> bool {
-    matches!(profile, "dance" | "wedding" | "general")
+#[derive(Clone, Copy)]
+struct SubjectPhrase {
+    phrase: &'static str,
+    capacity: Option<usize>,
 }
 
-fn point_in_subject(face: &face_processing::FaceBox, subject: &SubjectBox) -> bool {
-    let center_x = face.x + face.width / 2.0;
-    let center_y = face.y + face.height / 2.0;
-    center_x >= subject.x
-        && center_x <= subject.x + subject.width
-        && center_y >= subject.y
-        && center_y <= subject.y + subject.height
-}
-
-fn subject_box_iou(face: &face_processing::FaceBox, subject: &SubjectBox) -> f32 {
-    let left = face.x.max(subject.x);
-    let top = face.y.max(subject.y);
-    let right = (face.x + face.width).min(subject.x + subject.width);
-    let bottom = (face.y + face.height).min(subject.y + subject.height);
-    let intersection = (right - left).max(0.0) * (bottom - top).max(0.0);
-    let face_area = face.width * face.height;
-    if face_area > 0.0 {
-        intersection / face_area
-    } else {
-        0.0
+fn subject_phrases(profile: &str) -> Vec<SubjectPhrase> {
+    match profile {
+        "dance" => vec![
+            SubjectPhrase {
+                phrase: "a couple dancing together.",
+                capacity: Some(2),
+            },
+            SubjectPhrase {
+                phrase: "a person dancing.",
+                capacity: Some(1),
+            },
+        ],
+        "portrait" => vec![SubjectPhrase {
+            phrase: "a person being photographed.",
+            capacity: Some(1),
+        }],
+        "sports" => vec![SubjectPhrase {
+            phrase: "a person participating in a sport.",
+            capacity: Some(1),
+        }],
+        "wedding" => vec![SubjectPhrase {
+            phrase: "a couple or group of people at a wedding.",
+            capacity: None,
+        }],
+        _ => vec![SubjectPhrase {
+            phrase: "a person or group of people.",
+            capacity: None,
+        }],
     }
+}
+
+fn choose_subject_phrase<'a>(
+    passes: &'a [(SubjectPhrase, Vec<SubjectBox>)],
+) -> Option<&'a (SubjectPhrase, Vec<SubjectBox>)> {
+    passes.iter().find(|(_, boxes)| !boxes.is_empty())
+}
+
+fn focus_review_alerts(score: f64) -> Vec<&'static str> {
+    let _ = score;
+    Vec::new()
+}
+
+fn focus_calibration_status() -> &'static str {
+    "calibration-unavailable"
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AttributedRole {
+    Primary,
+    Unknown,
+    Secondary,
+}
+
+#[derive(Clone)]
+struct AssociationFace {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+#[derive(Clone)]
+struct AssociationPose {
+    nose_x: f32,
+    nose_y: f32,
+    torso: Vec<(f32, f32)>,
+}
+
+struct SubjectBust {
+    nose_x: f32,
+    nose_y: f32,
+}
+
+fn point_in_box(x: f32, y: f32, subject: &SubjectBox) -> bool {
+    x >= subject.x
+        && x <= subject.x + subject.width
+        && y >= subject.y
+        && y <= subject.y + subject.height
+}
+
+fn face_overlap(face: &AssociationFace, boxes: &[SubjectBox]) -> f32 {
+    let area = face.width * face.height;
+    if area <= 0.0 {
+        return 0.0;
+    }
+    let mut intersection = 0.0;
+    for subject in boxes {
+        let left = face.x.max(subject.x);
+        let top = face.y.max(subject.y);
+        let right = (face.x + face.width).min(subject.x + subject.width);
+        let bottom = (face.y + face.height).min(subject.y + subject.height);
+        intersection += (right - left).max(0.0) * (bottom - top).max(0.0);
+    }
+    intersection / area
+}
+
+fn subject_busts(poses: &[AssociationPose], boxes: &[SubjectBox]) -> Vec<SubjectBust> {
+    let mut busts = Vec::new();
+    for pose in poses {
+        let inside = pose
+            .torso
+            .iter()
+            .filter(|(x, y)| boxes.iter().any(|subject| point_in_box(*x, *y, subject)))
+            .count();
+        if inside >= TORSO_INSIDE_MIN {
+            busts.push(SubjectBust {
+                nose_x: pose.nose_x,
+                nose_y: pose.nose_y,
+            });
+        }
+    }
+    busts
+}
+
+fn attribute_faces(
+    faces: &[AssociationFace],
+    boxes: &[SubjectBox],
+    poses: &[AssociationPose],
+    capacity: Option<usize>,
+) -> Vec<AttributedRole> {
+    let busts = subject_busts(poses, boxes);
+    let mut nearest_bust = vec![None; faces.len()];
+    let mut geometric = vec![false; faces.len()];
+    for (index, face) in faces.iter().enumerate() {
+        if face_overlap(face, boxes) < SUBJECT_OVERLAP_MIN {
+            continue;
+        }
+        let center_x = face.x + face.width / 2.0;
+        let center_y = face.y + face.height / 2.0;
+        let limit = NOSE_DISTANCE_FACTOR * face.width.max(face.height);
+        let mut best: Option<(usize, f32)> = None;
+        for (bust_index, bust) in busts.iter().enumerate() {
+            let distance =
+                ((center_x - bust.nose_x).powi(2) + (center_y - bust.nose_y).powi(2)).sqrt();
+            if distance <= limit
+                && best
+                    .map(|(_, best_distance)| distance < best_distance)
+                    .unwrap_or(true)
+            {
+                best = Some((bust_index, distance));
+            }
+        }
+        if let Some((bust_index, distance)) = best {
+            geometric[index] = true;
+            nearest_bust[index] = Some((bust_index, distance));
+        }
+    }
+
+    let mut owner: Vec<Option<(usize, f32)>> = vec![None; busts.len()];
+    for (index, candidate) in nearest_bust.iter().enumerate() {
+        if let Some((bust_index, distance)) = candidate {
+            let replace = match owner[*bust_index] {
+                None => true,
+                Some((_, owned_distance)) => *distance < owned_distance,
+            };
+            if replace {
+                owner[*bust_index] = Some((index, *distance));
+            }
+        }
+    }
+
+    let mut primary = vec![false; faces.len()];
+    for owned in &owner {
+        if let Some((index, _)) = owned {
+            primary[*index] = true;
+        }
+    }
+    if let Some(limit) = capacity
+        && primary.iter().filter(|is_primary| **is_primary).count() > limit
+    {
+        primary.fill(false);
+    }
+
+    faces
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            if primary[index] {
+                AttributedRole::Primary
+            } else if geometric[index] {
+                AttributedRole::Unknown
+            } else {
+                AttributedRole::Secondary
+            }
+        })
+        .collect()
+}
+
+fn display_subject_boxes(boxes: Vec<SubjectBox>, width: f32, height: f32) -> Vec<SubjectBox> {
+    let width = width.max(1.0);
+    let height = height.max(1.0);
+    boxes
+        .into_iter()
+        .map(|subject_box| SubjectBox {
+            x: subject_box.x / width,
+            y: subject_box.y / height,
+            width: subject_box.width / width,
+            height: subject_box.height / height,
+            score: subject_box.score,
+            label: subject_box.label,
+        })
+        .collect()
+}
+
+fn scale_pose_frame(
+    frame: subject_inference::PoseFrame,
+    origin_x: f32,
+    origin_y: f32,
+    target_width: f32,
+    target_height: f32,
+) -> Vec<AssociationPose> {
+    let scale_x = target_width / frame.width.max(1.0);
+    let scale_y = target_height / frame.height.max(1.0);
+    frame
+        .bodies
+        .into_iter()
+        .map(|body| AssociationPose {
+            nose_x: origin_x + body.nose_x * scale_x,
+            nose_y: origin_y + body.nose_y * scale_y,
+            torso: body
+                .torso
+                .into_iter()
+                .map(|(x, y)| (origin_x + x * scale_x, origin_y + y * scale_y))
+                .collect(),
+        })
+        .collect()
+}
+
+fn padded_subject_crop(
+    image: &DynamicImage,
+    subject: &SubjectBox,
+) -> Option<(DynamicImage, f32, f32, f32, f32)> {
+    let width = image.width() as f32;
+    let height = image.height() as f32;
+    let x0 = (subject.x - SUBJECT_PAD_SIDE * subject.width).max(0.0);
+    let y0 = (subject.y - SUBJECT_PAD_TOP * subject.height).max(0.0);
+    let x1 = (subject.x + subject.width * (1.0 + SUBJECT_PAD_SIDE)).min(width);
+    let y1 = (subject.y + subject.height).min(height);
+    let x = x0.floor() as u32;
+    let y = y0.floor() as u32;
+    if x >= image.width() || y >= image.height() {
+        return None;
+    }
+    let crop_width = (x1.ceil() as u32)
+        .saturating_sub(x)
+        .min(image.width() - x);
+    let crop_height = (y1.ceil() as u32)
+        .saturating_sub(y)
+        .min(image.height() - y);
+    if crop_width < 8 || crop_height < 8 {
+        return None;
+    }
+    let cropped = DynamicImage::ImageRgba8(
+        image::imageops::crop_imm(image, x, y, crop_width, crop_height).to_image(),
+    );
+    Some((
+        cropped,
+        x as f32,
+        y as f32,
+        crop_width as f32,
+        crop_height as f32,
+    ))
+}
+
+fn collect_association_poses(
+    worker: &mut subject_inference::LocalWorker,
+    image: &DynamicImage,
+    frame: &DynamicImage,
+    boxes: &[SubjectBox],
+) -> Result<Vec<AssociationPose>, String> {
+    let mut poses = scale_pose_frame(
+        worker.pose(frame)?,
+        0.0,
+        0.0,
+        image.width() as f32,
+        image.height() as f32,
+    );
+    for subject in boxes {
+        if let Some((crop, origin_x, origin_y, crop_width, crop_height)) =
+            padded_subject_crop(image, subject)
+            && let Ok(crop_frame) = worker.pose(&crop)
+        {
+            poses.extend(scale_pose_frame(
+                crop_frame,
+                origin_x,
+                origin_y,
+                crop_width,
+                crop_height,
+            ));
+        }
+    }
+    Ok(poses)
 }
 
 fn eye_state_label(state: face_processing::EyeState) -> &'static str {
@@ -325,10 +598,11 @@ fn reviewed_primary_eye_state(states: &[face_processing::EyeState]) -> &'static 
         .any(|state| *state == face_processing::EyeState::Closed)
     {
         "closed"
-    } else if states.is_empty()
-        || states
-            .iter()
-            .any(|state| *state == face_processing::EyeState::Unknown)
+    } else if states.is_empty() {
+        "not-evaluated"
+    } else if states
+        .iter()
+        .any(|state| *state == face_processing::EyeState::Unknown)
     {
         "unknown"
     } else {
@@ -337,27 +611,32 @@ fn reviewed_primary_eye_state(states: &[face_processing::EyeState]) -> &'static 
 }
 
 fn primary_eye_review_alert(states: &[face_processing::EyeState]) -> Option<&'static str> {
-    match reviewed_primary_eye_state(states) {
-        "closed" => Some("eyesClosed"),
-        "unknown" => Some("eyesUnknown"),
-        _ => None,
+    if states
+        .iter()
+        .any(|state| *state == face_processing::EyeState::Closed)
+    {
+        Some("eyesClosed")
+    } else if !states.is_empty()
+        && states
+            .iter()
+            .any(|state| *state == face_processing::EyeState::Unknown)
+    {
+        Some("eyesUnknown")
+    } else {
+        None
     }
 }
 
 fn subject_status_label(
     detect_subject: bool,
     has_subject_boxes: bool,
-    attribution_is_ambiguous: bool,
     primary_count: usize,
-    multiple_is_valid: bool,
 ) -> &'static str {
     if !detect_subject {
         "not-evaluated"
-    } else if !has_subject_boxes {
+    } else if !has_subject_boxes || primary_count == 0 {
         "unknown"
-    } else if attribution_is_ambiguous || primary_count == 0 {
-        "unknown"
-    } else if primary_count > 1 && multiple_is_valid {
+    } else if primary_count > 1 {
         "multiple"
     } else {
         "primary"
@@ -379,27 +658,46 @@ fn update_assisted_result(
     let mut subject_boxes = Vec::new();
     let mut subject_method = "grounding-dino-unavailable".to_owned();
 
+    let mut phrase_capacity = None;
     if settings.detect_subject {
         if let Some(local_worker) = worker.as_mut() {
-            match local_worker.detect(&frame, &settings.subject_profile) {
-                Ok(boxes) => {
-                    subject_method = "grounding-dino-local".to_owned();
-                    subject_boxes = boxes
-                        .into_iter()
-                        .filter(|item| item.width > 0.0 && item.height > 0.0)
-                        .map(|item| SubjectBox {
-                            x: item.x * source_width / frame_width,
-                            y: item.y * source_height / frame_height,
-                            width: item.width * source_width / frame_width,
-                            height: item.height * source_height / frame_height,
-                            score: item.score,
-                            label: item.label,
-                        })
-                        .collect();
+            let mut passes = Vec::new();
+            let mut failed = false;
+            for phrase in subject_phrases(&settings.subject_profile) {
+                match local_worker.detect(&frame, phrase.phrase) {
+                    Ok(boxes) => {
+                        let mapped = boxes
+                            .into_iter()
+                            .filter(|item| item.width > 0.0 && item.height > 0.0)
+                            .map(|item| SubjectBox {
+                                x: item.x * source_width / frame_width,
+                                y: item.y * source_height / frame_height,
+                                width: item.width * source_width / frame_width,
+                                height: item.height * source_height / frame_height,
+                                score: item.score,
+                                label: item.label,
+                            })
+                            .collect::<Vec<_>>();
+                        let found = !mapped.is_empty();
+                        passes.push((phrase, mapped));
+                        if found {
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        failed = true;
+                        break;
+                    }
                 }
-                Err(_) => {
-                    subject_method = "grounding-dino-error".to_owned();
-                }
+            }
+            if failed {
+                subject_method = "grounding-dino-error".to_owned();
+            } else if let Some((phrase, boxes)) = choose_subject_phrase(&passes) {
+                phrase_capacity = phrase.capacity;
+                subject_boxes = boxes.clone();
+                subject_method = "grounding-dino-local".to_owned();
+            } else if !passes.is_empty() {
+                subject_method = "grounding-dino-local".to_owned();
             }
         }
     } else {
@@ -436,25 +734,50 @@ fn update_assisted_result(
         }
     }
 
-    let mut subject_candidates = Vec::new();
-    for (index, face) in faces.iter().enumerate() {
-        let inside = subject_boxes.iter().any(|subject| {
-            point_in_subject(&face.bbox, subject) || subject_box_iou(&face.bbox, subject) >= 0.05
-        });
-        if inside {
-            subject_candidates.push(index);
+    let mut pose_method = "pose-not-requested".to_owned();
+    let roles = if !settings.detect_subject {
+        vec![AttributedRole::Primary; faces.len()]
+    } else if subject_boxes.is_empty() {
+        vec![AttributedRole::Secondary; faces.len()]
+    } else if let Some(local_worker) = worker.as_mut() {
+        if local_worker.pose_is_ready() {
+            match collect_association_poses(local_worker, image, &frame, &subject_boxes) {
+                Ok(poses) => {
+                    pose_method = "pose-lite".to_owned();
+                    attribute_faces(
+                        &faces
+                            .iter()
+                            .map(|face| AssociationFace {
+                                x: face.bbox.x,
+                                y: face.bbox.y,
+                                width: face.bbox.width,
+                                height: face.bbox.height,
+                            })
+                            .collect::<Vec<_>>(),
+                        &subject_boxes,
+                        &poses,
+                        phrase_capacity,
+                    )
+                }
+                Err(_) => {
+                    pose_method = "pose-error".to_owned();
+                    vec![AttributedRole::Unknown; faces.len()]
+                }
+            }
+        } else {
+            pose_method = "pose-unavailable".to_owned();
+            vec![AttributedRole::Unknown; faces.len()]
         }
-    }
-    let multiple_is_valid = profile_allows_multiple_subjects(&settings.subject_profile);
-    let attribution_is_ambiguous =
-        subject_candidates.len() > 1 && !multiple_is_valid && !subject_boxes.is_empty();
-    let primary_indices = if !settings.detect_subject {
-        (0..faces.len()).collect()
-    } else if !subject_boxes.is_empty() && !attribution_is_ambiguous {
-        subject_candidates.clone()
     } else {
-        Vec::new()
+        pose_method = "pose-unavailable".to_owned();
+        vec![AttributedRole::Unknown; faces.len()]
     };
+    let primary_indices: Vec<usize> = roles
+        .iter()
+        .enumerate()
+        .filter(|(_, role)| **role == AttributedRole::Primary)
+        .map(|(index, _)| index)
+        .collect();
 
     let mut attributed_faces = Vec::new();
     let mut focus_values = Vec::new();
@@ -469,13 +792,11 @@ fn update_assisted_result(
             .unwrap_or(false);
 
     for (index, face) in faces.iter().enumerate() {
-        let is_primary = primary_indices.contains(&index);
-        let role = if is_primary {
-            "primary"
-        } else if attribution_is_ambiguous && subject_candidates.contains(&index) {
-            "unknown"
-        } else {
-            "secondary"
+        let is_primary = roles.get(index) == Some(&AttributedRole::Primary);
+        let role = match roles.get(index).copied().unwrap_or(AttributedRole::Secondary) {
+            AttributedRole::Primary => "primary",
+            AttributedRole::Unknown => "unknown",
+            AttributedRole::Secondary => "secondary",
         };
         let mut focus_crop_dimensions = None;
         let mut focus_model_dimensions = None;
@@ -508,7 +829,7 @@ fn update_assisted_result(
                     match local_worker.focus(&crop) {
                         Ok(measurement) => {
                             focus_signal = Some(measurement.score);
-                            focus_status = "available".to_owned();
+                            focus_status = focus_calibration_status().to_owned();
                             if focus_dimensions.is_none() {
                                 focus_dimensions = Some((measurement.width, measurement.height));
                             }
@@ -516,9 +837,11 @@ fn update_assisted_result(
                             focus_model_dimensions =
                                 Some((measurement.input_width, measurement.input_height));
                             focus_values.push(measurement.score);
-                            if native_focus_needs_review(measurement.score) {
-                                review_alerts.push("focusReview".to_owned());
-                            }
+                            review_alerts.extend(
+                                focus_review_alerts(measurement.score)
+                                    .into_iter()
+                                    .map(str::to_owned),
+                            );
                         }
                         Err(_) => {
                             focus_status = "unknown".to_owned();
@@ -555,9 +878,7 @@ fn update_assisted_result(
     let subject_status = subject_status_label(
         settings.detect_subject,
         !subject_boxes.is_empty(),
-        attribution_is_ambiguous,
         primary_indices.len(),
-        multiple_is_valid,
     );
     let eye_state = if !settings.detect_closed_eyes {
         "disabled"
@@ -574,12 +895,16 @@ fn update_assisted_result(
     }
 
     data.result.subject_status = subject_status.to_owned();
-    data.result.subject_method = if subject_boxes.is_empty() && !faces.is_empty() {
+    data.result.subject_method = if subject_method == "grounding-dino-error" {
+        subject_method
+    } else if settings.detect_subject {
+        format!("{subject_method};{pose_method};{face_method}")
+    } else if subject_boxes.is_empty() && !faces.is_empty() {
         format!("{subject_method};{face_method}")
     } else {
         subject_method
     };
-    data.result.subject_boxes = subject_boxes;
+    data.result.subject_boxes = display_subject_boxes(subject_boxes, source_width, source_height);
     data.result.attributed_faces = attributed_faces;
     data.result.eye_state = eye_state.to_owned();
     data.result.eye_confidence = faces
@@ -601,9 +926,11 @@ fn update_assisted_result(
     data.result.focus_status = if !settings.review_focus {
         "disabled".to_owned()
     } else if data.result.focus_signal.is_some() {
-        "available".to_owned()
+        focus_calibration_status().to_owned()
     } else if !focus_available {
         "unavailable".to_owned()
+    } else if primary_indices.is_empty() {
+        "not-attributed".to_owned()
     } else {
         "unknown".to_owned()
     };
@@ -637,22 +964,51 @@ fn subject_analysis_status_for(
     if subject_requested {
         if !worker.subject_is_ready() {
             "subject-unavailable".to_owned()
+        } else if !worker.pose_is_ready() {
+            "subject-ready-pose-unavailable".to_owned()
         } else if focus_requested && !worker.focus_is_ready() {
             "subject-ready-focus-unavailable".to_owned()
+        } else if focus_requested {
+            "subject-ready-focus-calibration-unavailable".to_owned()
         } else {
             "ready".to_owned()
         }
+    } else if !focus_requested {
+        "disabled".to_owned()
     } else if worker.focus_is_ready() {
-        "focus-ready".to_owned()
+        "focus-calibration-unavailable".to_owned()
     } else {
         "focus-unavailable".to_owned()
     }
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct CullingBoundEvent<T> {
+    invocation_id: String,
+    body: T,
+}
+
+fn emit_culling<T: Serialize + Clone>(
+    app_handle: &AppHandle,
+    event: &str,
+    invocation_id: &str,
+    body: T,
+) {
+    let _ = app_handle.emit(
+        event,
+        CullingBoundEvent {
+            invocation_id: invocation_id.to_owned(),
+            body,
+        },
+    );
 }
 
 #[tauri::command]
 pub async fn cull_images(
     paths: Vec<String>,
     settings: CullingSettings,
+    invocation_id: String,
     app_handle: AppHandle,
 ) -> Result<CullingSuggestions, String> {
     if paths.is_empty() {
@@ -663,7 +1019,7 @@ pub async fn cull_images(
 
     let total_count = paths.len();
     let completed_count = Arc::new(AtomicUsize::new(0));
-    let _ = app_handle.emit("culling-start", total_count);
+    emit_culling(&app_handle, "culling-start", &invocation_id, total_count);
 
     let hasher = HasherConfig::new()
         .hash_alg(HashAlg::DoubleGradient)
@@ -674,8 +1030,10 @@ pub async fn cull_images(
         .par_iter()
         .map(|path| {
             let completed = completed_count.fetch_add(1, Ordering::Relaxed) + 1;
-            let _ = app_handle.emit(
+            emit_culling(
+                &app_handle,
                 "culling-progress",
+                &invocation_id,
                 CullingProgress {
                     current: completed,
                     total: total_count,
@@ -738,8 +1096,10 @@ pub async fn cull_images(
         };
 
     if settings.detect_subject || settings.detect_closed_eyes || settings.review_focus {
-        let _ = app_handle.emit(
+        emit_culling(
+            &app_handle,
             "culling-progress",
+            &invocation_id,
             CullingProgress {
                 current: total_count,
                 total: total_count,
@@ -777,8 +1137,10 @@ pub async fn cull_images(
         }
     }
 
-    let _ = app_handle.emit(
+    emit_culling(
+        &app_handle,
         "culling-progress",
+        &invocation_id,
         CullingProgress {
             current: total_count,
             total: total_count,
@@ -880,7 +1242,12 @@ pub async fn cull_images(
         .unknown_images
         .sort_by(|left, right| left.path.cmp(&right.path));
 
-    let _ = app_handle.emit("culling-complete", &suggestions);
+    emit_culling(
+        &app_handle,
+        "culling-complete",
+        &invocation_id,
+        &suggestions,
+    );
     Ok(suggestions)
 }
 
@@ -889,59 +1256,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn native_focus_review_uses_the_measured_in_focus_floor() {
-        assert!(native_focus_needs_review(0.02));
-        assert!(!native_focus_needs_review(0.40));
-        assert!(!native_focus_needs_review(NATIVE_IN_FOCUS_REVIEW_FLOOR));
-
-        let benchmark = [
-            ("img_015_0", "net", 0.2290, false),
-            ("img_021_0", "net", 0.4612, false),
-            ("img_040_0", "net", 0.1176, false),
-            ("img_053_0", "mou", 0.0232, true),
-            ("img_053_1", "mou", 0.0392, true),
-            ("img_055_0", "net", 0.1042, false),
-            ("img_056_0", "net", 0.0595, true),
-            ("img_061_0", "net", 0.9170, false),
-            ("img_065_1", "mou", 0.0283, true),
-            ("img_066_0", "mou", 0.0350, true),
-            ("img_067_0", "net", 0.0780, false),
-            ("img_073_0", "net", 0.2005, false),
-            ("img_085_0", "net", 0.3986, false),
-            ("img_106_0", "net", 0.2222, false),
-            ("img_111_0", "net", 0.4552, false),
-            ("img_117_0", "net", 0.3259, false),
-            ("img_123_0", "net", 0.3590, false),
-            ("img_123_1", "net", 0.1365, false),
-            ("img_125_0", "net", 0.3309, false),
-            ("img_126_0", "net", 0.4361, false),
-            ("img_130_0", "net", 0.3161, false),
-            ("img_134_0", "mou", 0.0410, true),
-            ("img_135_0", "net", 0.4679, false),
-            ("img_135_1", "mou", 0.1297, false),
-            ("img_136_0", "net", 0.4212, false),
-            ("img_136_1", "mou", 0.1674, false),
-            ("img_137_0", "net", 0.3301, false),
-            ("img_137_1", "mou", 0.1401, false),
-        ];
-        let mut true_positive = 0;
-        let mut false_negative = 0;
-        let mut false_positive = 0;
-        let mut true_negative = 0;
-        for (name, label, score, expected) in benchmark {
-            let alert = native_focus_needs_review(score);
-            assert_eq!(alert, expected, "{name}");
-            match (label, alert) {
-                ("mou", true) => true_positive += 1,
-                ("mou", false) => false_negative += 1,
-                (_, true) => false_positive += 1,
-                (_, false) => true_negative += 1,
-            }
+    fn native_focus_score_does_not_raise_review_without_calibration() {
+        for score in [0.02, 0.0249, 0.0595, 0.060, 0.2981, 0.40] {
+            assert!(
+                focus_review_alerts(score).is_empty(),
+                "score {score} must not raise focusReview"
+            );
         }
-        assert_eq!(
-            (true_positive, false_negative, false_positive, true_negative),
-            (5, 3, 1, 19)
-        );
+        assert_eq!(focus_calibration_status(), "calibration-unavailable");
     }
 
     #[test]
@@ -973,7 +1295,8 @@ mod tests {
             "open"
         );
         assert_eq!(primary_eye_review_alert(&[EyeState::Open]), None);
-        assert_eq!(reviewed_primary_eye_state(&[]), "unknown");
+        assert_eq!(reviewed_primary_eye_state(&[]), "not-evaluated");
+        assert_eq!(primary_eye_review_alert(&[]), None);
         assert_eq!(
             primary_eye_review_alert(&[EyeState::Closed]),
             Some("eyesClosed")
@@ -1005,23 +1328,146 @@ mod tests {
         assert_eq!(effective_blur_threshold(&moderate), 100.0);
     }
 
-    #[test]
-    fn subject_profiles_allow_groups_only_when_the_profile_supports_them() {
-        assert!(profile_allows_multiple_subjects("general"));
-        assert!(profile_allows_multiple_subjects("wedding"));
-        assert!(profile_allows_multiple_subjects("dance"));
-        assert!(!profile_allows_multiple_subjects("portrait"));
-        assert!(!profile_allows_multiple_subjects("sports"));
+    fn box_at(x: f32, y: f32, width: f32, height: f32) -> SubjectBox {
+        SubjectBox {
+            x,
+            y,
+            width,
+            height,
+            score: 0.5,
+            label: "subject".to_owned(),
+        }
+    }
+
+    fn face_at(x: f32, y: f32, width: f32, height: f32) -> AssociationFace {
+        AssociationFace {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    fn bust_at(nose_x: f32, nose_y: f32, subject: &SubjectBox) -> AssociationPose {
+        AssociationPose {
+            nose_x,
+            nose_y,
+            torso: vec![
+                (subject.x + 10.0, subject.y + subject.height * 0.4),
+                (subject.x + 40.0, subject.y + subject.height * 0.4),
+                (subject.x + 12.0, subject.y + subject.height * 0.7),
+                (subject.x + 42.0, subject.y + subject.height * 0.7),
+            ],
+        }
     }
 
     #[test]
-    fn subject_status_distinguishes_valid_groups_from_ambiguous_single_subjects() {
-        assert_eq!(subject_status_label(true, true, false, 2, true), "multiple");
-        assert_eq!(subject_status_label(true, true, true, 2, false), "unknown");
-        assert_eq!(subject_status_label(true, true, false, 1, true), "primary");
-        assert_eq!(
-            subject_status_label(false, false, false, 0, false),
-            "not-evaluated"
+    fn dance_detection_uses_separate_passes_and_keeps_the_first_hit() {
+        let phrases = subject_phrases("dance");
+        assert_eq!(phrases.len(), 2);
+        assert_eq!(phrases[0].phrase, "a couple dancing together.");
+        assert_eq!(phrases[1].phrase, "a person dancing.");
+        assert!(phrases.iter().all(|phrase| phrase.phrase != "a couple or group of people dancing together."));
+
+        let couple = box_at(0.0, 0.0, 10.0, 10.0);
+        let person = box_at(20.0, 20.0, 5.0, 5.0);
+        let passes = [
+            (phrases[0], vec![couple.clone()]),
+            (phrases[1], vec![person.clone()]),
+        ];
+        let selected = choose_subject_phrase(&passes).unwrap();
+        assert_eq!(selected.0.phrase, "a couple dancing together.");
+        assert_eq!(selected.1[0].x, couple.x);
+
+        let empty_first = [
+            (phrases[0], Vec::new()),
+            (phrases[1], vec![person.clone()]),
+        ];
+        let selected = choose_subject_phrase(&empty_first).unwrap();
+        assert_eq!(selected.0.phrase, "a person dancing.");
+        assert_eq!(selected.0.capacity, Some(1));
+        assert_eq!(selected.1[0].x, person.x);
+    }
+
+    #[test]
+    fn nose_bust_association_leaves_a_competing_dancer_unknown() {
+        let subject = box_at(0.0, 0.0, 1000.0, 1600.0);
+        let couple = face_at(100.0, 100.0, 80.0, 100.0);
+        let extra = face_at(200.0, 100.0, 100.0, 120.0);
+        let bust = bust_at(140.0, 150.0, &subject);
+        let roles = attribute_faces(&[couple, extra], &[subject], &[bust], Some(2));
+
+        assert_eq!(roles[0], AttributedRole::Primary);
+        assert_eq!(roles[1], AttributedRole::Unknown);
+    }
+
+    #[test]
+    fn center_or_small_overlap_does_not_make_a_face_primary() {
+        let subject = box_at(0.0, 0.0, 400.0, 400.0);
+        let mostly_outside = face_at(380.0, 180.0, 80.0, 80.0);
+        let bust = bust_at(200.0, 200.0, &subject);
+        let roles = attribute_faces(&[mostly_outside], &[subject.clone()], &[bust], Some(2));
+        assert_eq!(roles[0], AttributedRole::Secondary);
+
+        let half_short = face_at(360.0, 100.0, 100.0, 100.0);
+        let close_bust = bust_at(390.0, 150.0, &subject);
+        let roles = attribute_faces(&[half_short], &[subject], &[close_bust], Some(2));
+        assert_ne!(roles[0], AttributedRole::Primary);
+    }
+
+    #[test]
+    fn a_couple_with_distinct_busts_stays_primary_and_a_third_abstains() {
+        let subject = box_at(0.0, 0.0, 1000.0, 1600.0);
+        let left = face_at(80.0, 80.0, 90.0, 110.0);
+        let right = face_at(700.0, 90.0, 90.0, 110.0);
+        let left_bust = bust_at(125.0, 135.0, &subject);
+        let right_bust = bust_at(745.0, 145.0, &subject);
+        let roles = attribute_faces(
+            &[left.clone(), right.clone()],
+            &[subject.clone()],
+            &[left_bust.clone(), right_bust.clone()],
+            Some(2),
         );
+        assert_eq!(roles, vec![AttributedRole::Primary, AttributedRole::Primary]);
+
+        let extra = face_at(400.0, 80.0, 80.0, 100.0);
+        let extra_bust = bust_at(440.0, 130.0, &subject);
+        let roles = attribute_faces(
+            &[left, right, extra],
+            &[subject],
+            &[left_bust, right_bust, extra_bust],
+            Some(2),
+        );
+        assert!(roles.iter().all(|role| *role != AttributedRole::Primary));
+        assert!(roles.iter().any(|role| *role == AttributedRole::Unknown));
+    }
+
+    #[test]
+    fn half_overlap_and_bust_nose_links_without_a_center_shortcut() {
+        let subject = box_at(0.0, 0.0, 200.0, 200.0);
+        let face = face_at(150.0, 40.0, 100.0, 80.0);
+        assert!((face_overlap(&face, &[subject.clone()]) - 0.5).abs() < 0.001);
+        let bust = bust_at(180.0, 80.0, &subject);
+        let roles = attribute_faces(&[face], &[subject], &[bust], Some(1));
+        assert_eq!(roles[0], AttributedRole::Primary);
+    }
+
+    #[test]
+    fn subject_boxes_are_normalized_for_display_without_changing_pixels() {
+        let pixel = box_at(2205.0, 700.0, 800.0, 400.0);
+        let shown = display_subject_boxes(vec![pixel.clone()], 6048.0, 4024.0);
+        assert!((shown[0].x - 2205.0 / 6048.0).abs() < 1e-6);
+        assert!((shown[0].y - 700.0 / 4024.0).abs() < 1e-6);
+        assert!(shown[0].x < 1.0);
+        assert!(shown[0].width < 1.0);
+        assert_eq!(pixel.x, 2205.0);
+    }
+
+    #[test]
+    fn subject_status_reports_linked_groups_and_leaves_empty_sets_unknown() {
+        assert_eq!(subject_status_label(true, true, 2), "multiple");
+        assert_eq!(subject_status_label(true, true, 0), "unknown");
+        assert_eq!(subject_status_label(true, true, 1), "primary");
+        assert_eq!(subject_status_label(false, false, 0), "not-evaluated");
     }
 }

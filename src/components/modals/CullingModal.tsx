@@ -17,6 +17,8 @@ import Slider from '../ui/Slider';
 import Dropdown from '../ui/Dropdown';
 import Text from '../ui/Text';
 import { TextColors, TextVariants } from '../../types/typography';
+import { useUIStore } from '../../store/useUIStore';
+import { beginCullingInvocation, createCullingInvocationId } from '../../utils/cullingReviewSession';
 
 interface CullingModalProps {
   isOpen: boolean;
@@ -283,8 +285,12 @@ export default function CullingModal({
   }, [stage, suggestions, settings.selectionAmount]);
 
   const handleStartCulling = useCallback(async () => {
+    const invocationId = createCullingInvocationId();
+    useUIStore.getState().setUI((state) => ({
+      cullingModalState: beginCullingInvocation(state.cullingModalState, invocationId),
+    }));
     try {
-      await invoke(Invokes.CullImages, { paths: imagePaths, settings });
+      await invoke(Invokes.CullImages, { paths: imagePaths, settings, invocationId });
     } catch (err) {
       console.error('Culling failed to start:', err);
       onError(String(err));
@@ -501,13 +507,19 @@ export default function CullingModal({
                 ? t('modals.culling.subjectAnalysisFocusReady')
                 : suggestions.subjectAnalysisStatus === 'subject-ready-focus-unavailable'
                   ? t('modals.culling.subjectAnalysisSubjectReadyFocusUnavailable')
-                  : suggestions.subjectAnalysisStatus === 'focus-unavailable'
-                  ? t('modals.culling.subjectAnalysisFocusUnavailable')
-                  : suggestions.subjectAnalysisStatus === 'face-unavailable'
-                    ? t('modals.culling.subjectAnalysisFaceUnavailable')
-                    : suggestions.subjectAnalysisStatus === 'error'
-                    ? t('modals.culling.subjectAnalysisError')
-                    : t('modals.culling.subjectAnalysisUnavailable')}
+                  : suggestions.subjectAnalysisStatus === 'subject-ready-pose-unavailable'
+                    ? t('modals.culling.subjectAnalysisPoseUnavailable')
+                    : suggestions.subjectAnalysisStatus === 'subject-ready-focus-calibration-unavailable'
+                      ? t('modals.culling.subjectAnalysisFocusCalibrationUnavailable')
+                      : suggestions.subjectAnalysisStatus === 'focus-calibration-unavailable'
+                        ? t('modals.culling.focusCalibrationUnavailable')
+                        : suggestions.subjectAnalysisStatus === 'focus-unavailable'
+                          ? t('modals.culling.subjectAnalysisFocusUnavailable')
+                          : suggestions.subjectAnalysisStatus === 'face-unavailable'
+                            ? t('modals.culling.subjectAnalysisFaceUnavailable')
+                            : suggestions.subjectAnalysisStatus === 'error'
+                              ? t('modals.culling.subjectAnalysisError')
+                              : t('modals.culling.subjectAnalysisUnavailable')}
           </Text>
         )}
         <div className="border-b border-surface mb-4">

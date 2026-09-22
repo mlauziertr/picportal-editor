@@ -42,6 +42,20 @@ pub struct FocusMeasurement {
     pub device: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct PoseBody {
+    pub nose_x: f32,
+    pub nose_y: f32,
+    pub torso: Vec<(f32, f32)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PoseFrame {
+    pub width: f32,
+    pub height: f32,
+    pub bodies: Vec<PoseBody>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SubjectResponse {
@@ -64,10 +78,41 @@ struct FocusResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct PosePoint {
+    x: f32,
+    y: f32,
+}
+
+#[derive(Debug, Deserialize)]
+struct PoseBodyWire {
+    nose: PosePoint,
+    torso: Vec<PosePoint>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PoseResponse {
+    ok: bool,
+    width: Option<u32>,
+    height: Option<u32>,
+    poses: Option<Vec<PoseBodyWire>>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CullingManifest {
     subject_model: SubjectModel,
     focus_model: FocusModel,
+    pose_model: PoseModel,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PoseModel {
+    filename: String,
+    sha256: String,
+    bytes: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -103,6 +148,7 @@ pub struct LocalWorker {
     stdout: BufReader<ChildStdout>,
     subject_ready: bool,
     focus_ready: bool,
+    pose_ready: bool,
 }
 
 impl LocalWorker {
@@ -113,6 +159,7 @@ impl LocalWorker {
         let python =
             std::env::var_os("PICPORTAL_CULLING_PYTHON").unwrap_or_else(|| "python3".into());
         let focus_ready = focus_model_ready(&model_directory).unwrap_or(false);
+        let pose_ready = pose_model_ready(&model_directory);
         let mut child = Command::new(python)
             .arg(script)
             .arg("--local-worker")
@@ -136,20 +183,21 @@ impl LocalWorker {
             stdout: BufReader::new(stdout),
             subject_ready,
             focus_ready,
+            pose_ready,
         })
     }
 
     pub fn detect(
         &mut self,
         image: &DynamicImage,
-        profile: &str,
+        phrase: &str,
     ) -> Result<Vec<SubjectBox>, String> {
         if !self.subject_ready {
             return Err("LOCAL_CULLING_SUBJECT_MODEL_UNAVAILABLE".to_owned());
         }
         let payload = json!({
             "operation": "detect",
-            "profile": profile,
+            "phrase": phrase,
             "image": encode_image(image, 1920)?,
         });
         let response: SubjectResponse = self.request(payload)?;
@@ -217,12 +265,53 @@ impl LocalWorker {
             .map_err(|error| format!("LOCAL_CULLING_WORKER_RESPONSE_INVALID: {error}"))
     }
 
+    pub fn pose(&mut self, image: &DynamicImage) -> Result<PoseFrame, String> {
+        if !self.pose_ready {
+            return Err("LOCAL_CULLING_POSE_MODEL_UNAVAILABLE".to_owned());
+        }
+        let payload = json!({
+            "operation": "pose",
+            "image": encode_image(image, 1920)?,
+        });
+        let response: PoseResponse = self.request(payload)?;
+        if !response.ok {
+            return Err(response
+                .error
+                .unwrap_or_else(|| "LOCAL_CULLING_POSE_FAILED".to_owned()));
+        }
+        let width = response
+            .width
+            .ok_or_else(|| "LOCAL_CULLING_POSE_WIDTH_MISSING".to_owned())? as f32;
+        let height = response
+            .height
+            .ok_or_else(|| "LOCAL_CULLING_POSE_HEIGHT_MISSING".to_owned())? as f32;
+        let bodies = response
+            .poses
+            .unwrap_or_default()
+            .into_iter()
+            .map(|pose| PoseBody {
+                nose_x: pose.nose.x,
+                nose_y: pose.nose.y,
+                torso: pose.torso.into_iter().map(|point| (point.x, point.y)).collect(),
+            })
+            .collect();
+        Ok(PoseFrame {
+            width,
+            height,
+            bodies,
+        })
+    }
+
     pub fn subject_is_ready(&self) -> bool {
         self.subject_ready
     }
 
     pub fn focus_is_ready(&self) -> bool {
         self.focus_ready
+    }
+
+    pub fn pose_is_ready(&self) -> bool {
+        self.pose_ready
     }
 }
 
@@ -359,6 +448,25 @@ fn focus_model_ready(model_directory: &Path) -> Result<bool, String> {
     Ok(!expected.is_empty() && sha256_file(&checkpoint)? == expected)
 }
 
+fn pose_model_ready(model_directory: &Path) -> bool {
+    let Ok(manifest_bytes) = fs::read(model_directory.join("manifest.json")) else {
+        return false;
+    };
+    let Ok(manifest) = serde_json::from_slice::<CullingManifest>(&manifest_bytes) else {
+        return false;
+    };
+    let path = model_directory.join(&manifest.pose_model.filename);
+    let Ok(metadata) = fs::metadata(&path) else {
+        return false;
+    };
+    if metadata.len() != manifest.pose_model.bytes {
+        return false;
+    }
+    sha256_file(&path)
+        .ok()
+        .is_some_and(|digest| digest == manifest.pose_model.sha256)
+}
+
 fn sha256_file(path: &Path) -> Result<String, String> {
     let bytes =
         fs::read(path).map_err(|error| format!("LOCAL_CULLING_ARTIFACT_READ_FAILED: {error}"))?;
@@ -479,6 +587,12 @@ mod tests {
         assert_eq!(manifest.subject_model.license_bytes, 11355);
         assert_eq!(manifest.focus_model.source_license_filename, "VGG-LICENSE.txt");
         assert_eq!(manifest.focus_model.checkpoint, "vgg_best.pth");
+        assert_eq!(manifest.pose_model.filename, "pose_landmarker_lite.task");
+        assert_eq!(manifest.pose_model.bytes, 5_777_746);
+        assert_eq!(
+            manifest.pose_model.sha256,
+            "59929e1d1ee95287735ddd833b19cf4ac46d29bc7afddbbf6753c459690d574a"
+        );
         let config = manifest
             .subject_model
             .artifacts

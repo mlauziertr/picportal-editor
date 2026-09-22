@@ -39,6 +39,7 @@ models/face/*.onnx
 models/culling/dino/model.safetensors
 models/culling/vgg_best.pth
 models/culling/vgg_best.pth.sha256
+models/culling/pose_landmarker_lite.task
 scratch-b-eval/
 **/__pycache__/
 

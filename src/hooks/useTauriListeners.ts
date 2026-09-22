@@ -6,6 +6,7 @@ import { useProcessStore } from '../store/useProcessStore';
 import { useEditorStore } from '../store/useEditorStore';
 import { useUIStore } from '../store/useUIStore';
 import { useLibraryStore } from '../store/useLibraryStore';
+import { cullingEventMatches } from '../utils/cullingReviewSession';
 
 interface TauriListenerProps {
   refreshAllFolderTrees: () => void;
@@ -358,36 +359,62 @@ export function useTauriListeners({
       }),
       listen('culling-start', (event: any) => {
         if (isEffectActive) {
-          useUIStore.getState().setUI((state) => ({
-            cullingModalState: {
-              ...state.cullingModalState,
-              isOpen: true,
-              progress: { current: 0, total: event.payload, stage: 'Initializing...' },
-              suggestions: null,
-              error: null,
-            },
-          }));
+          useUIStore.getState().setUI((state) => {
+            if (!cullingEventMatches(state.cullingModalState, event.payload?.invocationId)) {
+              return {};
+            }
+            return {
+              cullingModalState: {
+                ...state.cullingModalState,
+                isOpen: state.cullingModalState.hiddenForEditor ? false : true,
+                progress: { current: 0, total: event.payload.body, stage: 'Initializing...' },
+                suggestions: null,
+                error: null,
+              },
+            };
+          });
         }
       }),
       listen('culling-progress', (event: any) => {
         if (isEffectActive) {
-          useUIStore
-            .getState()
-            .setUI((state) => ({ cullingModalState: { ...state.cullingModalState, progress: event.payload } }));
+          useUIStore.getState().setUI((state) => {
+            if (!cullingEventMatches(state.cullingModalState, event.payload?.invocationId)) {
+              return {};
+            }
+            return { cullingModalState: { ...state.cullingModalState, progress: event.payload.body } };
+          });
         }
       }),
       listen('culling-complete', (event: any) => {
         if (isEffectActive) {
-          useUIStore.getState().setUI((state) => ({
-            cullingModalState: { ...state.cullingModalState, progress: null, suggestions: event.payload },
-          }));
+          useUIStore.getState().setUI((state) => {
+            if (!cullingEventMatches(state.cullingModalState, event.payload?.invocationId)) {
+              return {};
+            }
+            return {
+              cullingModalState: {
+                ...state.cullingModalState,
+                progress: null,
+                suggestions: event.payload.body,
+              },
+            };
+          });
         }
       }),
       listen('culling-error', (event: any) => {
         if (isEffectActive) {
-          useUIStore.getState().setUI((state) => ({
-            cullingModalState: { ...state.cullingModalState, progress: null, error: String(event.payload) },
-          }));
+          useUIStore.getState().setUI((state) => {
+            if (!cullingEventMatches(state.cullingModalState, event.payload?.invocationId)) {
+              return {};
+            }
+            return {
+              cullingModalState: {
+                ...state.cullingModalState,
+                progress: null,
+                error: String(event.payload.body),
+              },
+            };
+          });
         }
       }),
     ];

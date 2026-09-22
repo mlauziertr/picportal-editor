@@ -88,6 +88,8 @@ interface CullingModalState {
   progress: { current: number; total: number; stage: string } | null;
   error: string | null;
   pathsToCull: Array<string>;
+  invocationId?: string | null;
+  hiddenForEditor?: boolean;
 }
 
 const ALL_PANELS: Panel[] = [
