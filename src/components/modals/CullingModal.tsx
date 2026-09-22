@@ -27,8 +27,10 @@ import {
   emptyCullingResultsHeadline,
   hasCullingResultItems,
   initialCullingRejectPaths,
+  claimCullingStart,
   populatedCullingResultsTab,
   recoverCullingInvocation,
+  releaseCullingStart,
   requestCullingCancellation,
 } from '../../utils/cullingReviewSession';
 
@@ -39,6 +41,7 @@ interface CullingModalProps {
   suggestions: CullingSuggestions | null;
   error: string | null;
   isCancelling: boolean;
+  isStarting: boolean;
   cancelled: boolean;
   imagePaths: string[];
   thumbnails: Record<string, string>;
@@ -197,6 +200,7 @@ export default function CullingModal({
   suggestions,
   error,
   isCancelling,
+  isStarting,
   cancelled,
   imagePaths,
   thumbnails,
@@ -255,6 +259,7 @@ export default function CullingModal({
           progress: null,
           pathsToCull: [],
           isCancelling: false,
+          isStarting: false,
         },
       };
     });
@@ -315,8 +320,15 @@ export default function CullingModal({
   }, [suggestions]);
 
   const handleStartCulling = useCallback(async () => {
-    const current = useUIStore.getState().cullingModalState;
-    if (current.progress || current.isCancelling) return;
+    let claimed = false;
+    useUIStore.getState().setUI((state) => {
+      const session = claimCullingStart(state.cullingModalState);
+      if (session === state.cullingModalState) return {};
+      claimed = true;
+      return { cullingModalState: session };
+    });
+    if (!claimed) return;
+
     let invocationId: string | null = null;
     try {
       if (await reconcileActiveCulling()) return;
@@ -331,6 +343,11 @@ export default function CullingModal({
       if (invocationId && useUIStore.getState().cullingModalState.invocationId === invocationId) {
         onError(String(err));
       }
+    } finally {
+      useUIStore.getState().setUI((state) => {
+        const session = releaseCullingStart(state.cullingModalState);
+        return session === state.cullingModalState ? {} : { cullingModalState: session };
+      });
     }
   }, [imagePaths, settings, onError, reconcileActiveCulling]);
 
@@ -362,7 +379,8 @@ export default function CullingModal({
 
   const handleClose = useCallback(() => {
     const current = useUIStore.getState().cullingModalState;
-    if (current.invocationId || current.isCancelling || cullingReviewStage(current) === 'progress') return;
+    if (current.invocationId || current.isCancelling || current.isStarting || cullingReviewStage(current) === 'progress')
+      return;
     onClose();
   }, [onClose]);
 
@@ -510,7 +528,9 @@ export default function CullingModal({
         >
           {t('modals.culling.cancel')}
         </button>
-        <Button onClick={handleStartCulling}>{t('modals.culling.startCulling')}</Button>
+        <Button onClick={handleStartCulling} disabled={isStarting}>
+          {t('modals.culling.startCulling')}
+        </Button>
       </div>
     </>
   );
@@ -552,7 +572,9 @@ export default function CullingModal({
         >
           {t('modals.culling.close')}
         </button>
-        <Button onClick={handleStartCulling}>{t('modals.culling.startAgain')}</Button>
+        <Button onClick={handleStartCulling} disabled={isStarting}>
+          {t('modals.culling.startAgain')}
+        </Button>
       </div>
     </div>
   );

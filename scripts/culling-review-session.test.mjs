@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   beginCullingInvocation,
+  claimCullingStart,
   completeCullingCancellation,
   createCullingInvocationId,
   cullingAnalysisMessageKey,
@@ -12,6 +13,7 @@ import {
   initialCullingRejectPaths,
   populatedCullingResultsTab,
   recoverCullingInvocation,
+  releaseCullingStart,
   requestCullingCancellation,
   restoreCullingReviewOnLibraryReturn,
 } from '../src/utils/cullingReviewSession.ts';
@@ -73,6 +75,7 @@ assert.equal(started.hiddenForEditor, false);
 assert.equal(started.suggestions, null);
 assert.deepEqual(started.progress, { current: 0, total: 0, stage: 'Starting...' });
 assert.equal(started.isCancelling, false);
+assert.equal(started.isStarting, false);
 assert.equal(started.cancelled, false);
 assert.equal(cullingReviewStage(started), 'progress');
 assert.notEqual(cullingReviewStage(started), 'settings');
@@ -80,6 +83,13 @@ assert.equal(cullingEventMatches(started, secondId), true);
 assert.equal(cullingEventMatches(started, firstId), false);
 assert.equal(cullingEventMatches({ invocationId: null }, secondId), false);
 assert.equal(cullingEventMatches(dismissedWithLateResults, firstId), false);
+
+const firstStartClaim = claimCullingStart(dismissed);
+assert.equal(firstStartClaim.isStarting, true);
+assert.equal(claimCullingStart(firstStartClaim), firstStartClaim);
+const releasedStartClaim = releaseCullingStart(firstStartClaim);
+assert.equal(releasedStartClaim.isStarting, false);
+assert.notEqual(claimCullingStart(releasedStartClaim), releasedStartClaim);
 
 const cancellationRequested = requestCullingCancellation(started);
 assert.equal(cancellationRequested.isCancelling, true);

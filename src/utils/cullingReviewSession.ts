@@ -7,6 +7,7 @@ export interface CullingReviewSession {
   invocationId?: string | null;
   hiddenForEditor?: boolean;
   isCancelling?: boolean;
+  isStarting?: boolean;
   cancelled?: boolean;
 }
 
@@ -21,6 +22,16 @@ export interface ActiveCullingInvocation {
   isCancelling: boolean;
 }
 
+export function claimCullingStart<T extends CullingReviewSession>(session: T): T {
+  if (session.invocationId || session.progress != null || session.isCancelling || session.isStarting) return session;
+  return { ...session, isStarting: true };
+}
+
+export function releaseCullingStart<T extends CullingReviewSession>(session: T): T {
+  if (!session.isStarting) return session;
+  return { ...session, isStarting: false };
+}
+
 export function beginCullingInvocation<T extends CullingReviewSession>(session: T, invocationId: string): T {
   return {
     ...session,
@@ -31,6 +42,7 @@ export function beginCullingInvocation<T extends CullingReviewSession>(session: 
     error: null,
     hiddenForEditor: false,
     isCancelling: false,
+    isStarting: false,
     cancelled: false,
   };
 }
@@ -49,6 +61,7 @@ export function recoverCullingInvocation<T extends CullingReviewSession>(
     pathsToCull: active.pathsToCull,
     hiddenForEditor: false,
     isCancelling: active.isCancelling,
+    isStarting: false,
     cancelled: false,
   };
 }
@@ -79,6 +92,7 @@ export function completeCullingCancellation<T extends CullingReviewSession>(sess
     suggestions: null,
     error: null,
     isCancelling: false,
+    isStarting: false,
     cancelled: true,
   };
 }

@@ -334,6 +334,7 @@ export default function AppModals(props: AppModalsProps) {
         suggestions={cullingModalState.suggestions}
         error={cullingModalState.error}
         isCancelling={Boolean(cullingModalState.isCancelling)}
+        isStarting={Boolean(cullingModalState.isStarting)}
         cancelled={Boolean(cullingModalState.cancelled)}
         imagePaths={cullingModalState.pathsToCull}
         thumbnails={thumbnails}
