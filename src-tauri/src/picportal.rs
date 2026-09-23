@@ -9,15 +9,19 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::atomic::{AtomicBool, Ordering},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
-use crate::{face_processing, local_derivatives};
+use crate::{AppState, face_processing, local_derivatives};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, StatusCode, Url, cookie::Jar, header::SET_COOKIE};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
+
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+use keyring::Entry;
 
 pub const PRODUCTION_API_BASE_URL: &str = "https://api.getpicportal.com";
 const APP_ORIGIN: &str = "https://getpicportal.com";
@@ -29,6 +33,8 @@ const DERIVATIVE_PIPELINE_VERSION: &str = "picportal-editor-local-derivatives-v1
 pub struct PicPortalState {
     pub session: Mutex<Option<PicPortalSession>>,
     pub face_runtime: Mutex<Option<face_processing::FaceRuntime>>,
+    publish_active: AtomicBool,
+    publish_cancelled: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -37,6 +43,8 @@ pub struct PicPortalSession {
     base_url: String,
     account_id: String,
     admin: AdminIdentity,
+    cookies: Arc<Mutex<Vec<String>>>,
+    persistent: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +71,18 @@ pub struct GallerySummary {
 pub struct PicPortalLoginResult {
     pub admin: AdminIdentity,
     pub galleries: Vec<GallerySummary>,
+    pub persistent: bool,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PicPortalSessionStatus {
+    pub connected: bool,
+    pub admin: Option<AdminIdentity>,
+    pub galleries: Vec<GallerySummary>,
+    pub persistent: bool,
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -70,7 +90,17 @@ pub struct PicPortalLoginResult {
 pub struct PublishResult {
     pub completed: usize,
     pub failed: usize,
+    pub cancelled: bool,
     pub items: Vec<PublishItemResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredSession {
+    base_url: String,
+    account_id: String,
+    admin: AdminIdentity,
+    cookies: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -337,13 +367,113 @@ fn endpoint(base_url: &str, path: &str) -> String {
     )
 }
 
-fn production_client() -> Result<Client, String> {
+const KEYRING_SERVICE: &str = "com.getpicportal.PicPortalEditor";
+const KEYRING_USER: &str = "picportal-session-v1";
+type CookieStore = Arc<Mutex<Vec<String>>>;
+const NATIVE_SESSION_REFRESH_PATH: &str = "auth/native/session/refresh";
+const SESSION_EXPIRED_MESSAGE: &str = "PicPortal session expired or was revoked; connect again";
+
+fn production_client(stored_cookies: &[String]) -> Result<(Client, CookieStore), String> {
+    let cookies = Arc::new(Mutex::new(stored_cookies.to_vec()));
+    let jar = Arc::new(Jar::default());
+    let url = Url::parse(PRODUCTION_API_BASE_URL)
+        .map_err(|error| format!("cannot initialize PicPortal session URL: {error}"))?;
+    for cookie in stored_cookies {
+        jar.add_cookie_str(cookie, &url);
+    }
+
     Client::builder()
-        .cookie_store(true)
+        .cookie_provider(jar)
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(5 * 60))
         .build()
+        .map(|client| (client, cookies))
         .map_err(|error| format!("cannot initialize PicPortal network client: {error}"))
+}
+
+fn capture_response_cookies(response: &reqwest::Response, cookies: &CookieStore) {
+    let Ok(mut current) = cookies.lock() else {
+        return;
+    };
+    for header in response.headers().get_all(SET_COOKIE).iter() {
+        let Ok(value) = header.to_str() else {
+            continue;
+        };
+        let Some((name, _)) = value.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        current.retain(|cookie| {
+            cookie
+                .split_once('=')
+                .is_none_or(|(existing_name, _)| existing_name.trim() != name)
+        });
+        current.push(value.to_owned());
+    }
+}
+
+fn secure_storage_error(error: impl std::fmt::Display) -> String {
+    format!(
+        "Secure PicPortal session storage is unavailable: {error}. The current connection can be used until shutdown; reconnect next launch or enable the operating system credential store."
+    )
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+fn load_stored_session() -> Result<Option<StoredSession>, String> {
+    let entry = Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(secure_storage_error)?;
+    match entry.get_password() {
+        Ok(secret) => serde_json::from_str(&secret).map(Some).map_err(|error| {
+            format!("Stored PicPortal session is invalid; connect again ({error})")
+        }),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(error) => Err(secure_storage_error(error)),
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn load_stored_session() -> Result<Option<StoredSession>, String> {
+    Err("Secure PicPortal session storage is not supported on this platform. Connect for the current session; use a desktop build with the operating system credential store for restart persistence.".to_owned())
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+fn store_stored_session(session: &PicPortalSession) -> Result<(), String> {
+    let cookies = session
+        .cookies
+        .lock()
+        .map_err(|_| "PicPortal cookie state is poisoned".to_owned())?
+        .clone();
+    let stored = StoredSession {
+        base_url: session.base_url.clone(),
+        account_id: session.account_id.clone(),
+        admin: session.admin.clone(),
+        cookies,
+    };
+    let secret = serde_json::to_string(&stored)
+        .map_err(|error| format!("cannot serialize secure PicPortal session: {error}"))?;
+    let entry = Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(secure_storage_error)?;
+    entry.set_password(&secret).map_err(secure_storage_error)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn store_stored_session(_session: &PicPortalSession) -> Result<(), String> {
+    Err("Secure PicPortal session storage is not supported on this platform".to_owned())
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+fn clear_stored_session() -> Result<(), String> {
+    let entry = Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(secure_storage_error)?;
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(secure_storage_error(error)),
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn clear_stored_session() -> Result<(), String> {
+    Ok(())
 }
 
 async fn response_error(response: reqwest::Response) -> String {
@@ -378,6 +508,83 @@ async fn require_success(response: reqwest::Response) -> Result<reqwest::Respons
     }
 }
 
+fn is_auth_failure(error: &str) -> bool {
+    error.contains("HTTP 401:") || error.contains("HTTP 403:")
+}
+
+fn invalidate_session(state: &PicPortalState, app: Option<&AppHandle>) {
+    if let Ok(mut current) = state.session.lock() {
+        current.take();
+    }
+    let _ = clear_stored_session();
+    if let Some(app) = app {
+        let _ = app.emit("picportal-session-invalidated", ());
+    }
+}
+
+fn session_error(error: String, state: &PicPortalState, app: Option<&AppHandle>) -> String {
+    if is_auth_failure(&error) {
+        invalidate_session(state, app);
+        SESSION_EXPIRED_MESSAGE.to_owned()
+    } else {
+        error
+    }
+}
+
+async fn session_identity(session: &PicPortalSession) -> Result<MeResponse, String> {
+    let response = session
+        .client
+        .get(endpoint(&session.base_url, "admin/me"))
+        .header("origin", APP_ORIGIN)
+        .send()
+        .await
+        .map_err(|error| format!("PicPortal identity request failed: {error}"))?;
+    capture_response_cookies(&response, &session.cookies);
+    require_success(response)
+        .await?
+        .json::<MeResponse>()
+        .await
+        .map_err(|error| format!("PicPortal identity response is invalid: {error}"))
+}
+
+async fn refresh_native_session(session: &PicPortalSession) -> bool {
+    let Ok(response) = session
+        .client
+        .post(endpoint(&session.base_url, NATIVE_SESSION_REFRESH_PATH))
+        .header("origin", APP_ORIGIN)
+        .send()
+        .await
+    else {
+        return false;
+    };
+    capture_response_cookies(&response, &session.cookies);
+    response.status().is_success()
+}
+
+fn admin_identity(
+    me: MeResponse,
+    fallback: &AdminIdentity,
+) -> Result<(String, AdminIdentity), String> {
+    let account_id = me
+        .admin
+        .admin_user_id
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "PicPortal identity did not include an account id".to_owned())?;
+    let email = me.admin.email.unwrap_or_else(|| fallback.email.clone());
+    let name = me.admin.name.unwrap_or_else(|| fallback.name.clone());
+    Ok((account_id, AdminIdentity { email, name }))
+}
+
+fn disconnected_status(message: Option<String>) -> PicPortalSessionStatus {
+    PicPortalSessionStatus {
+        connected: false,
+        admin: None,
+        galleries: Vec::new(),
+        persistent: false,
+        message,
+    }
+}
+
 #[tauri::command]
 pub async fn picportal_login(
     email: String,
@@ -387,7 +594,7 @@ pub async fn picportal_login(
     if email.trim().is_empty() || password.is_empty() {
         return Err("PicPortal email and password are required".to_owned());
     }
-    let client = production_client()?;
+    let (client, cookies) = production_client(&[])?;
     let login_response = client
         .post(endpoint(PRODUCTION_API_BASE_URL, "auth/login"))
         .header("origin", APP_ORIGIN)
@@ -395,54 +602,143 @@ pub async fn picportal_login(
         .send()
         .await
         .map_err(|error| format!("PicPortal login failed: {error}"))?;
+    capture_response_cookies(&login_response, &cookies);
     let login_response = require_success(login_response).await?;
     let login = login_response
         .json::<LoginResponse>()
         .await
         .map_err(|error| format!("PicPortal login response is invalid: {error}"))?;
 
-    let me_response = client
-        .get(endpoint(PRODUCTION_API_BASE_URL, "admin/me"))
-        .header("origin", APP_ORIGIN)
-        .send()
-        .await
-        .map_err(|error| format!("PicPortal identity request failed: {error}"))?;
-    let me = require_success(me_response)
-        .await?
-        .json::<MeResponse>()
-        .await
-        .map_err(|error| format!("PicPortal identity response is invalid: {error}"))?;
-    let account_id = me
-        .admin
-        .admin_user_id
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "PicPortal identity did not include an account id".to_owned())?;
-    let email = me
-        .admin
-        .email
-        .or(login.admin.email)
-        .unwrap_or_else(|| email.trim().to_owned());
-    let name = me
-        .admin
-        .name
-        .or(login.admin.name)
-        .unwrap_or_else(|| email.clone());
-    let session = PicPortalSession {
+    let provisional = PicPortalSession {
         client,
         base_url: PRODUCTION_API_BASE_URL.to_owned(),
+        account_id: String::new(),
+        admin: AdminIdentity {
+            email: email.trim().to_owned(),
+            name: email.trim().to_owned(),
+        },
+        cookies,
+        persistent: false,
+    };
+    let me = session_identity(&provisional).await?;
+    let (account_id, admin) = admin_identity(
+        me,
+        &AdminIdentity {
+            email: login.admin.email.unwrap_or_else(|| email.trim().to_owned()),
+            name: login.admin.name.unwrap_or_else(|| email.trim().to_owned()),
+        },
+    )?;
+    let mut session = PicPortalSession {
         account_id,
-        admin: AdminIdentity { email, name },
+        admin,
+        ..provisional
     };
     let galleries = session.galleries().await?;
-    let result = PicPortalLoginResult {
-        admin: session.admin.clone(),
-        galleries,
+    let (persistent, message) = match store_stored_session(&session) {
+        Ok(()) => (true, None),
+        Err(error) => (false, Some(error)),
     };
+    session.persistent = persistent;
     *state
         .session
         .lock()
-        .map_err(|_| "PicPortal session lock is poisoned".to_owned())? = Some(session);
-    Ok(result)
+        .map_err(|_| "PicPortal session lock is poisoned".to_owned())? = Some(session.clone());
+    Ok(PicPortalLoginResult {
+        admin: session.admin,
+        galleries,
+        persistent,
+        message,
+    })
+}
+
+#[tauri::command]
+pub async fn picportal_restore_session(
+    state: State<'_, PicPortalState>,
+) -> Result<PicPortalSessionStatus, String> {
+    let existing = state
+        .session
+        .lock()
+        .map_err(|_| "PicPortal session lock is poisoned".to_owned())?
+        .clone();
+    if let Some(session) = existing {
+        let galleries = match session.galleries().await {
+            Ok(galleries) => galleries,
+            Err(error) if is_auth_failure(&error) => {
+                invalidate_session(&state, None);
+                return Ok(disconnected_status(Some(
+                    SESSION_EXPIRED_MESSAGE.to_owned(),
+                )));
+            }
+            Err(error) => return Err(error),
+        };
+        let _ = store_stored_session(&session);
+        return Ok(PicPortalSessionStatus {
+            connected: true,
+            admin: Some(session.admin),
+            galleries,
+            persistent: session.persistent,
+            message: None,
+        });
+    }
+    let Some(stored) = load_stored_session()? else {
+        return Ok(disconnected_status(None));
+    };
+    let (client, cookies) = production_client(&stored.cookies)?;
+    let mut session = PicPortalSession {
+        client,
+        base_url: stored.base_url.clone(),
+        account_id: stored.account_id.clone(),
+        admin: stored.admin,
+        cookies,
+        persistent: true,
+    };
+
+    let me = match session_identity(&session).await {
+        Ok(me) => me,
+        Err(error) if is_auth_failure(&error) && refresh_native_session(&session).await => {
+            session_identity(&session)
+                .await
+                .map_err(|retry_error| session_error(retry_error, &state, None))?
+        }
+        Err(error) if is_auth_failure(&error) => {
+            invalidate_session(&state, None);
+            return Ok(disconnected_status(Some(
+                "PicPortal session expired or was revoked; connect again".to_owned(),
+            )));
+        }
+        Err(error) => return Err(error),
+    };
+    let (account_id, admin) = admin_identity(me, &session.admin)?;
+    if account_id != session.account_id {
+        invalidate_session(&state, None);
+        return Ok(disconnected_status(Some(
+            "PicPortal account changed; connect again".to_owned(),
+        )));
+    }
+    session.admin = admin;
+    let galleries = match session.galleries().await {
+        Ok(galleries) => galleries,
+        Err(error) => {
+            let message = session_error(error, &state, None);
+            if message == SESSION_EXPIRED_MESSAGE {
+                return Ok(disconnected_status(Some(message)));
+            }
+            return Err(message);
+        }
+    };
+    let message = store_stored_session(&session).err();
+    session.persistent = message.is_none();
+    *state
+        .session
+        .lock()
+        .map_err(|_| "PicPortal session lock is poisoned".to_owned())? = Some(session.clone());
+    Ok(PicPortalSessionStatus {
+        connected: true,
+        admin: Some(session.admin),
+        galleries,
+        persistent: session.persistent,
+        message,
+    })
 }
 
 #[tauri::command]
@@ -452,40 +748,52 @@ pub async fn picportal_logout(state: State<'_, PicPortalState>) -> Result<(), St
         .lock()
         .map_err(|_| "PicPortal session lock is poisoned".to_owned())?
         .clone();
+    let mut remote_error = None;
     if let Some(session) = session {
-        let response = session
+        match session
             .client
             .post(endpoint(&session.base_url, "auth/logout"))
             .header("origin", APP_ORIGIN)
             .send()
             .await
-            .map_err(|error| format!("PicPortal logout failed: {error}"))?;
-        require_success(response).await?;
-        let mut current = state
-            .session
-            .lock()
-            .map_err(|_| "PicPortal session lock is poisoned".to_owned())?;
-        if current.as_ref().is_some_and(|current| {
-            current.base_url == session.base_url && current.account_id == session.account_id
-        }) {
-            current.take();
+        {
+            Ok(response) => {
+                capture_response_cookies(&response, &session.cookies);
+                if let Err(error) = require_success(response).await
+                    && !is_auth_failure(&error)
+                {
+                    remote_error = Some(error);
+                }
+            }
+            Err(error) => remote_error = Some(format!("PicPortal logout failed: {error}")),
         }
     }
-    Ok(())
+    invalidate_session(&state, None);
+    if let Some(error) = clear_stored_session().err() {
+        remote_error.get_or_insert(error);
+    }
+    remote_error.map_or(Ok(()), Err)
 }
 
 #[tauri::command]
 pub async fn picportal_galleries(
     state: State<'_, PicPortalState>,
+    app: AppHandle,
 ) -> Result<Vec<GallerySummary>, String> {
     let session = current_session(&state)?;
-    session.galleries().await
+    let galleries = session
+        .galleries()
+        .await
+        .map_err(|error| session_error(error, &state, Some(&app)))?;
+    let _ = store_stored_session(&session);
+    Ok(galleries)
 }
 
 #[tauri::command]
 pub async fn picportal_create_gallery(
     input: CreateGalleryInput,
     state: State<'_, PicPortalState>,
+    app: AppHandle,
 ) -> Result<GallerySummary, String> {
     let session = current_session(&state)?;
     let (title, face_filter_enabled, payload) = create_gallery_payload(input)?;
@@ -496,13 +804,17 @@ pub async fn picportal_create_gallery(
         .json(&payload)
         .send()
         .await
-        .map_err(|error| format!("gallery creation failed: {error}"))?;
+        .map_err(|error| format!("gallery creation failed: {error}"))
+        .map_err(|error| session_error(error, &state, Some(&app)))?;
+    capture_response_cookies(&response, &session.cookies);
     let created = require_success(response)
-        .await?
+        .await
+        .map_err(|error| session_error(error, &state, Some(&app)))?
         .json::<CreatedGalleryResponse>()
         .await
         .map_err(|error| format!("gallery creation response is invalid: {error}"))?
         .gallery;
+    let _ = store_stored_session(&session);
     Ok(GallerySummary {
         id: created.id,
         title,
@@ -564,44 +876,75 @@ fn create_gallery_payload(
     Ok((title, face_filter_enabled, payload))
 }
 
-#[tauri::command]
-pub async fn picportal_publish(
+struct PicPortalActivityGuard<'a> {
+    state: &'a PicPortalState,
+}
+
+impl Drop for PicPortalActivityGuard<'_> {
+    fn drop(&mut self) {
+        self.state.publish_active.store(false, Ordering::SeqCst);
+        self.state.publish_cancelled.store(false, Ordering::SeqCst);
+    }
+}
+
+fn begin_picportal_activity(state: &PicPortalState) -> Result<PicPortalActivityGuard<'_>, String> {
+    if state.publish_active.swap(true, Ordering::SeqCst) {
+        return Err("another PicPortal publication is already running".to_owned());
+    }
+    state.publish_cancelled.store(false, Ordering::SeqCst);
+    Ok(PicPortalActivityGuard { state })
+}
+
+pub fn request_picportal_cancellation(app: &AppHandle) -> bool {
+    let state = app.state::<PicPortalState>();
+    if !state.publish_active.load(Ordering::SeqCst) {
+        return false;
+    }
+    state.publish_cancelled.store(true, Ordering::SeqCst);
+    true
+}
+
+fn emit_publish_progress(app: &AppHandle, current: usize, total: usize, stage: &str) {
+    let _ = app.emit(
+        "picportal-progress",
+        serde_json::json!({ "current": current, "total": total, "stage": stage }),
+    );
+}
+
+async fn publish_paths(
     paths: Vec<String>,
-    gallery_id: String,
-    app: AppHandle,
-    state: State<'_, PicPortalState>,
+    session: &PicPortalSession,
+    gallery: &GallerySummary,
+    capabilities: &ProcessingCapabilities,
+    publish_faces: bool,
+    app: &AppHandle,
+    state: &PicPortalState,
 ) -> Result<PublishResult, String> {
-    if paths.is_empty() {
-        return Err("select at least one exported image".to_owned());
-    }
-    let session = current_session(&state)?;
-    let galleries = session.galleries().await?;
-    let gallery = galleries
-        .into_iter()
-        .find(|gallery| gallery.id == gallery_id)
-        .ok_or_else(|| "selected PicPortal gallery no longer exists".to_owned())?;
-    let capabilities = session.processing_capabilities().await?;
-    if !capabilities.derivatives.tauri_enabled {
-        return Err("PicPortal local derivative processing is disabled by the server".to_owned());
-    }
-    let publish_faces = face_publication_enabled(&gallery, &capabilities)?;
-    let queue_path = queue_path(&app)?;
+    let queue_path = queue_path(app)?;
     let mut queue = load_queue(&queue_path)?;
+    let total = paths.len();
     let mut result = PublishResult {
         completed: 0,
         failed: 0,
+        cancelled: false,
         items: Vec::new(),
     };
+    let mut session_invalidated = false;
 
-    for path in paths {
+    for (index, path) in paths.into_iter().enumerate() {
+        if state.publish_cancelled.load(Ordering::SeqCst) {
+            result.cancelled = true;
+            break;
+        }
+        emit_publish_progress(app, index, total, "uploading");
         let item_result = publish_one(
-            &session,
-            &gallery,
-            &capabilities,
+            session,
+            gallery,
+            capabilities,
             publish_faces,
             &path,
-            &app,
-            &state,
+            app,
+            state,
             &queue_path,
             &mut queue,
         )
@@ -612,18 +955,300 @@ pub async fn picportal_publish(
                 result.items.push(item);
             }
             Err(error) => {
+                let authentication_failed = is_auth_failure(&error);
                 result.failed += 1;
-                mark_queue_error(&mut queue, &path, &session, &gallery.id, &error);
+                mark_queue_error(&mut queue, &path, session, &gallery.id, &error);
                 result.items.push(PublishItemResult {
                     path,
-                    state: "failed".to_owned(),
+                    state: if state.publish_cancelled.load(Ordering::SeqCst) {
+                        "cancelled".to_owned()
+                    } else {
+                        "failed".to_owned()
+                    },
                     photo_id: None,
-                    error: Some(error),
+                    error: Some(if authentication_failed {
+                        SESSION_EXPIRED_MESSAGE.to_owned()
+                    } else {
+                        error
+                    }),
                 });
+                if authentication_failed {
+                    invalidate_session(state, Some(app));
+                    session_invalidated = true;
+                }
+                if state.publish_cancelled.load(Ordering::SeqCst) {
+                    result.cancelled = true;
+                    break;
+                }
+                if session_invalidated {
+                    break;
+                }
             }
         }
+        emit_publish_progress(app, index + 1, total, "uploading");
+        if session_invalidated {
+            break;
+        }
+    }
+    if state.publish_cancelled.load(Ordering::SeqCst) {
+        result.cancelled = true;
     }
     save_queue(&queue_path, &queue)?;
+    if !session_invalidated {
+        let _ = store_stored_session(session);
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn picportal_publish(
+    paths: Vec<String>,
+    gallery_id: String,
+    include_face_analysis: Option<bool>,
+    app: AppHandle,
+    state: State<'_, PicPortalState>,
+) -> Result<PublishResult, String> {
+    if paths.is_empty() {
+        return Err("select at least one exported image".to_owned());
+    }
+    let session = current_session(&state)?;
+    let galleries = session
+        .galleries()
+        .await
+        .map_err(|error| session_error(error, &state, Some(&app)))?;
+    let gallery = galleries
+        .into_iter()
+        .find(|gallery| gallery.id == gallery_id)
+        .ok_or_else(|| "selected PicPortal gallery no longer exists".to_owned())?;
+    let capabilities = session
+        .processing_capabilities()
+        .await
+        .map_err(|error| session_error(error, &state, Some(&app)))?;
+    if !capabilities.derivatives.tauri_enabled {
+        return Err("PicPortal local derivative processing is disabled by the server".to_owned());
+    }
+    let publish_faces = face_publication_enabled(
+        &gallery,
+        &capabilities,
+        include_face_analysis.unwrap_or(false),
+    )?;
+    let _activity = begin_picportal_activity(&state)?;
+    publish_paths(
+        paths,
+        &session,
+        &gallery,
+        &capabilities,
+        publish_faces,
+        &app,
+        &state,
+    )
+    .await
+    .map_err(|error| session_error(error, &state, Some(&app)))
+}
+
+fn normalize_picportal_output_format(output_format: &str) -> Result<String, String> {
+    let extension = output_format.trim().to_ascii_lowercase();
+    let extension = if extension == "jpeg" {
+        "jpg".to_owned()
+    } else {
+        extension
+    };
+    if matches!(extension.as_str(), "jpg" | "png" | "webp") {
+        Ok(extension)
+    } else {
+        Err("PicPortal export supports JPEG, PNG or WebP output only".to_owned())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn direct_export_operation_id(
+    session: &PicPortalSession,
+    gallery_id: &str,
+    paths: &[String],
+    base_origin_folders: &[String],
+    export_settings: &crate::export_processing::ExportSettings,
+    output_format: &str,
+    current_edit_path: &Option<String>,
+    current_edit_adjustments: &Option<serde_json::Value>,
+    include_face_analysis: bool,
+) -> Result<uuid::Uuid, String> {
+    let operation = serde_json::to_vec(&(
+        &session.base_url,
+        &session.account_id,
+        gallery_id,
+        paths,
+        base_origin_folders,
+        export_settings,
+        output_format,
+        current_edit_path,
+        current_edit_adjustments,
+        include_face_analysis,
+    ))
+    .map_err(|error| format!("cannot identify PicPortal export: {error}"))?;
+    Ok(uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, &operation))
+}
+
+fn prepare_staging_directory(app: &AppHandle, operation_id: uuid::Uuid) -> Result<PathBuf, String> {
+    let root = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("cannot resolve PicPortal staging directory: {error}"))?
+        .join("picportal-staging")
+        .join(operation_id.to_string());
+    if root.exists() {
+        fs::remove_dir_all(&root)
+            .map_err(|error| format!("cannot reset PicPortal staging directory: {error}"))?;
+    }
+    fs::create_dir_all(&root)
+        .map_err(|error| format!("cannot create PicPortal staging directory: {error}"))?;
+    Ok(root)
+}
+
+fn staged_exports(root: &Path, extension: &str, expected: usize) -> Result<Vec<String>, String> {
+    let mut paths = Vec::new();
+    for entry in walkdir::WalkDir::new(root) {
+        let entry =
+            entry.map_err(|error| format!("cannot inspect PicPortal staging output: {error}"))?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let matches_extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case(extension));
+        if matches_extension {
+            paths.push(path.to_string_lossy().to_string());
+        }
+    }
+    paths.sort();
+    if paths.len() != expected {
+        return Err(format!(
+            "PicPortal rendering produced {} outputs for {} selected images; no upload was started",
+            paths.len(),
+            expected
+        ));
+    }
+    Ok(paths)
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn picportal_export(
+    paths: Vec<String>,
+    base_origin_folders: Vec<String>,
+    export_settings: crate::export_processing::ExportSettings,
+    output_format: String,
+    current_edit_path: Option<String>,
+    current_edit_adjustments: Option<serde_json::Value>,
+    gallery_id: String,
+    include_face_analysis: bool,
+    app: AppHandle,
+    state: State<'_, PicPortalState>,
+    export_state: State<'_, AppState>,
+) -> Result<PublishResult, String> {
+    if paths.is_empty() {
+        return Err("select at least one image for PicPortal export".to_owned());
+    }
+    let output_format = normalize_picportal_output_format(&output_format)?;
+    if export_settings.export_masks {
+        return Err(
+            "PicPortal export does not upload separate mask files; turn off Export masks"
+                .to_owned(),
+        );
+    }
+    let session = current_session(&state)?;
+    let galleries = session
+        .galleries()
+        .await
+        .map_err(|error| session_error(error, &state, Some(&app)))?;
+    let gallery = galleries
+        .into_iter()
+        .find(|gallery| gallery.id == gallery_id)
+        .ok_or_else(|| "selected PicPortal gallery no longer exists".to_owned())?;
+    let capabilities = session
+        .processing_capabilities()
+        .await
+        .map_err(|error| session_error(error, &state, Some(&app)))?;
+    if !capabilities.derivatives.tauri_enabled {
+        return Err("PicPortal local derivative processing is disabled by the server".to_owned());
+    }
+    let publish_faces = face_publication_enabled(&gallery, &capabilities, include_face_analysis)?;
+    let operation_id = direct_export_operation_id(
+        &session,
+        &gallery.id,
+        &paths,
+        &base_origin_folders,
+        &export_settings,
+        &output_format,
+        &current_edit_path,
+        &current_edit_adjustments,
+        include_face_analysis,
+    )?;
+    let _activity = begin_picportal_activity(&state)?;
+    let staging_root = prepare_staging_directory(&app, operation_id)?;
+
+    let mut staging_settings = export_settings;
+    staging_settings.destination_type = Some("customFolder".to_owned());
+    staging_settings.subfolder = None;
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    crate::export_processing::export_images_impl(
+        paths.clone(),
+        staging_root.to_string_lossy().to_string(),
+        false,
+        base_origin_folders,
+        staging_settings,
+        output_format.clone(),
+        crate::export_processing::ExportAdjustmentsMode::UseSidecars {
+            active_path: current_edit_path,
+            active_adjustments: current_edit_adjustments,
+        },
+        export_state,
+        app.clone(),
+        Some(completion_tx),
+        false,
+    )
+    .await?;
+    match completion_rx.await {
+        Ok(Ok(())) => {}
+        Ok(Err(errors)) => {
+            if state.publish_cancelled.load(Ordering::SeqCst) {
+                return Err(
+                    "PicPortal export cancelled; generated files were kept for a safe retry"
+                        .to_owned(),
+                );
+            }
+            return Err(format!(
+                "PicPortal rendering completed with {errors} error(s); no upload was started"
+            ));
+        }
+        Err(_) if state.publish_cancelled.load(Ordering::SeqCst) => {
+            return Err(
+                "PicPortal export cancelled; generated files were kept for a safe retry".to_owned(),
+            );
+        }
+        Err(_) => {
+            return Err(
+                "PicPortal rendering task ended unexpectedly; no upload was started".to_owned(),
+            );
+        }
+    }
+    ensure_publish_not_cancelled(&state)?;
+    let staged_paths = staged_exports(&staging_root, &output_format, paths.len())?;
+    let result = publish_paths(
+        staged_paths,
+        &session,
+        &gallery,
+        &capabilities,
+        publish_faces,
+        &app,
+        &state,
+    )
+    .await
+    .map_err(|error| session_error(error, &state, Some(&app)))?;
+    if result.failed == 0 && !result.cancelled {
+        let _ = fs::remove_dir_all(&staging_root);
+    }
     Ok(result)
 }
 
@@ -645,6 +1270,7 @@ impl PicPortalSession {
             .send()
             .await
             .map_err(|error| format!("gallery request failed: {error}"))?;
+        capture_response_cookies(&response, &self.cookies);
         let response = require_success(response).await?;
         let value = response
             .json::<serde_json::Value>()
@@ -665,6 +1291,7 @@ impl PicPortalSession {
             .send()
             .await
             .map_err(|error| format!("processing capabilities request failed: {error}"))?;
+        capture_response_cookies(&response, &self.cookies);
         require_success(response)
             .await?
             .json()
@@ -673,6 +1300,15 @@ impl PicPortalSession {
     }
 }
 
+fn ensure_publish_not_cancelled(state: &PicPortalState) -> Result<(), String> {
+    if state.publish_cancelled.load(Ordering::SeqCst) {
+        Err("PicPortal export cancelled; generated files were kept for a safe retry".to_owned())
+    } else {
+        Ok(())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn publish_one(
     session: &PicPortalSession,
     gallery: &GallerySummary,
@@ -684,6 +1320,7 @@ async fn publish_one(
     queue_path: &Path,
     queue: &mut QueueFile,
 ) -> Result<PublishItemResult, String> {
+    ensure_publish_not_cancelled(state)?;
     let source_path = PathBuf::from(path);
     validate_export_path(&source_path)?;
     let source = fs::read(&source_path)
@@ -694,35 +1331,36 @@ async fn publish_one(
         .iter()
         .find(|item| queue_identity_matches(item, path, session, &gallery.id, &source_sha256))
         .cloned();
-    if let Some(existing) = existing.as_ref() {
-        if existing.state == "uploaded" {
-            if let Some(photo_id) = completed_face_analysis_photo(existing, publish_faces)? {
-                let analysis = analyze_faces(&source, capabilities, app, state)?;
-                upload_faces_for_photo(
-                    session,
-                    &gallery.id,
-                    &photo_id,
-                    &source_sha256,
-                    source.len() as u64,
-                    &analysis,
-                )
-                .await?;
-                if let Some(item) = queue.items.iter_mut().find(|item| {
-                    queue_identity_matches(item, path, session, &gallery.id, &source_sha256)
-                }) {
-                    item.face_analysis_uploaded = true;
-                    item.last_error = None;
-                }
-                save_queue(queue_path, queue)?;
+    if let Some(existing) = existing.as_ref()
+        && existing.state == "uploaded"
+    {
+        if let Some(photo_id) = completed_face_analysis_photo(existing, publish_faces)? {
+            let analysis = analyze_faces(&source, capabilities, app, state)?;
+            upload_faces_for_photo(
+                session,
+                &gallery.id,
+                &photo_id,
+                &source_sha256,
+                source.len() as u64,
+                &analysis,
+            )
+            .await?;
+            if let Some(item) = queue.items.iter_mut().find(|item| {
+                queue_identity_matches(item, path, session, &gallery.id, &source_sha256)
+            }) {
+                item.face_analysis_uploaded = true;
+                item.last_error = None;
             }
-            return Ok(PublishItemResult {
-                path: path.to_owned(),
-                state: existing.state.clone(),
-                photo_id: existing.photo_id.clone(),
-                error: None,
-            });
+            save_queue(queue_path, queue)?;
         }
+        return Ok(PublishItemResult {
+            path: path.to_owned(),
+            state: existing.state.clone(),
+            photo_id: existing.photo_id.clone(),
+            error: None,
+        });
     }
+    ensure_publish_not_cancelled(state)?;
     let derivatives = local_derivatives::generate_local_derivatives(&source)?;
     if existing.is_none() {
         upsert_queue(
@@ -750,6 +1388,7 @@ async fn publish_one(
     save_queue(queue_path, queue)?;
 
     let face_analysis = if publish_faces {
+        ensure_publish_not_cancelled(state)?;
         Some(analyze_faces(&source, capabilities, app, state)?)
     } else {
         None
@@ -759,6 +1398,7 @@ async fn publish_one(
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("export.jpg");
+    ensure_publish_not_cancelled(state)?;
     let photo_id = upload_original(
         session,
         &gallery.id,
@@ -769,6 +1409,7 @@ async fn publish_one(
         path,
         queue_path,
         queue,
+        state,
     )
     .await?;
     let idempotency_key = idempotency_key(
@@ -795,6 +1436,7 @@ async fn publish_one(
         preview: derivative_dimensions(&derivatives.preview),
         thumbnail: derivative_dimensions(&derivatives.thumbnail),
     };
+    ensure_publish_not_cancelled(state)?;
     upload_derivatives(
         session,
         &gallery.id,
@@ -805,6 +1447,7 @@ async fn publish_one(
     )
     .await?;
     if let Some(analysis) = face_analysis {
+        ensure_publish_not_cancelled(state)?;
         upload_faces_for_photo(
             session,
             &gallery.id,
@@ -837,9 +1480,13 @@ async fn publish_one(
 fn face_publication_enabled(
     gallery: &GallerySummary,
     capabilities: &ProcessingCapabilities,
+    requested: bool,
 ) -> Result<bool, String> {
-    if !gallery.face_filter_enabled {
+    if !requested {
         return Ok(false);
+    }
+    if !gallery.face_filter_enabled {
+        return Err("selected PicPortal gallery does not allow face analysis".to_owned());
     }
     if !capabilities.faces.tauri_enabled {
         return Err(
@@ -1066,6 +1713,7 @@ fn mark_original_uploaded(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn upload_original(
     session: &PicPortalSession,
     gallery_id: &str,
@@ -1076,16 +1724,17 @@ async fn upload_original(
     path: &str,
     queue_path: &Path,
     queue: &mut QueueFile,
+    state: &PicPortalState,
 ) -> Result<String, String> {
+    ensure_publish_not_cancelled(state)?;
     let total_bytes = source.len() as u64;
     if let Some(existing) = queue
         .items
         .iter()
         .find(|item| queue_identity_matches(item, path, session, gallery_id, source_sha256))
+        && let Some(photo_id) = existing.photo_id.as_deref()
     {
-        if let Some(photo_id) = existing.photo_id.as_deref() {
-            return Ok(photo_id.to_owned());
-        }
+        return Ok(photo_id.to_owned());
     }
 
     let start_url = endpoint(
@@ -1116,6 +1765,7 @@ async fn upload_original(
         .send()
         .await
         .map_err(|error| format!("upload session failed: {error}"))?;
+    capture_response_cookies(&start, &session.cookies);
     if requested_upload_id.is_some()
         && matches!(start.status(), StatusCode::NOT_FOUND | StatusCode::CONFLICT)
     {
@@ -1127,6 +1777,28 @@ async fn upload_original(
             .send()
             .await
             .map_err(|error| format!("new upload session failed: {error}"))?;
+        capture_response_cookies(&start, &session.cookies);
+    }
+    if start.status() == StatusCode::NOT_FOUND {
+        let body = start.text().await.unwrap_or_default();
+        if body.contains("Route POST:") && body.contains("/photos/uploads not found") {
+            let photo_id =
+                upload_multipart(session, gallery_id, filename, content_type, source).await?;
+            mark_original_uploaded(
+                queue,
+                path,
+                session,
+                gallery_id,
+                source_sha256,
+                &photo_id,
+                total_bytes,
+            );
+            save_queue(queue_path, queue)?;
+            return Ok(photo_id);
+        }
+        return Err(format!(
+            "resumable upload route rejected the request: {body}"
+        ));
     }
     let session_payload = require_success(start)
         .await?
@@ -1157,7 +1829,10 @@ async fn upload_original(
         return Ok(photo_id);
     }
 
-    let upload_id = session_payload.upload_id.clone();
+    let upload_id = session_payload.upload_id.trim().to_owned();
+    if upload_id.is_empty() {
+        return Err("PicPortal upload session has no upload id".to_owned());
+    }
     let mut offset = session_payload.offset;
     update_queue_upload_session(
         queue,
@@ -1175,6 +1850,7 @@ async fn upload_original(
         let end_offset = (start_offset + CHUNK_SIZE).min(source.len());
         let chunk = source[start_offset..end_offset].to_vec();
         let end = end_offset as u64 - 1;
+        ensure_publish_not_cancelled(state)?;
         let response = session
             .client
             .patch(endpoint(
@@ -1191,6 +1867,7 @@ async fn upload_original(
             .send()
             .await
             .map_err(|error| format!("upload chunk failed: {error}"))?;
+        capture_response_cookies(&response, &session.cookies);
         let payload = require_success(response)
             .await?
             .json::<UploadSession>()
@@ -1211,6 +1888,7 @@ async fn upload_original(
         );
         save_queue(queue_path, queue)?;
     }
+    ensure_publish_not_cancelled(state)?;
     let complete = session
         .client
         .post(endpoint(
@@ -1222,6 +1900,7 @@ async fn upload_original(
         .send()
         .await
         .map_err(|error| format!("upload completion failed: {error}"))?;
+    capture_response_cookies(&complete, &session.cookies);
     let photo = require_success(complete)
         .await?
         .json::<PhotoResponse>()
@@ -1241,6 +1920,42 @@ async fn upload_original(
         total_bytes,
     );
     save_queue(queue_path, queue)?;
+    Ok(photo.id)
+}
+
+async fn upload_multipart(
+    session: &PicPortalSession,
+    gallery_id: &str,
+    filename: &str,
+    content_type: &str,
+    source: &[u8],
+) -> Result<String, String> {
+    let part = reqwest::multipart::Part::bytes(source.to_vec())
+        .file_name(filename.to_owned())
+        .mime_str(content_type)
+        .map_err(|error| error.to_string())?;
+    let form = reqwest::multipart::Form::new().part("file", part);
+    let response = session
+        .client
+        .post(endpoint(
+            &session.base_url,
+            &format!("galleries/{gallery_id}/photos?deferProcessing=true"),
+        ))
+        .header("origin", APP_ORIGIN)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|error| format!("multipart upload failed: {error}"))?;
+    capture_response_cookies(&response, &session.cookies);
+    let photo = require_success(response)
+        .await?
+        .json::<PhotoResponse>()
+        .await
+        .map_err(|error| format!("multipart upload response is invalid: {error}"))?
+        .photo;
+    if photo.id.trim().is_empty() {
+        return Err("PicPortal returned an empty photo id".to_owned());
+    }
     Ok(photo.id)
 }
 
@@ -1276,6 +1991,7 @@ async fn upload_derivatives(
         .send()
         .await
         .map_err(|error| format!("derivative upload failed: {error}"))?;
+    capture_response_cookies(&response, &session.cookies);
     let accepted = require_success(response)
         .await?
         .json::<DerivativeResponse>()
@@ -1314,6 +2030,7 @@ async fn upload_face_analysis(
         .send()
         .await
         .map_err(|error| format!("face analysis upload failed: {error}"))?;
+    capture_response_cookies(&response, &session.cookies);
     let accepted = require_success(response)
         .await?
         .json::<FaceAnalysisResponse>()
@@ -1515,6 +2232,116 @@ mod tests {
     }
 
     #[test]
+    fn direct_export_accepts_only_delivery_formats() {
+        assert_eq!(
+            normalize_picportal_output_format("jpeg").expect("jpeg"),
+            "jpg"
+        );
+        assert_eq!(
+            normalize_picportal_output_format("PNG").expect("png"),
+            "png"
+        );
+        assert_eq!(
+            normalize_picportal_output_format("webp").expect("webp"),
+            "webp"
+        );
+        assert!(normalize_picportal_output_format("tiff").is_err());
+        assert!(normalize_picportal_output_format("cube").is_err());
+    }
+
+    #[test]
+    fn staged_exports_require_exactly_one_output_per_selection() {
+        let directory = tempfile::tempdir().expect("staging directory");
+        let first = directory.path().join("first.jpg");
+        fs::write(&first, b"synthetic output").expect("first output");
+        let staged = staged_exports(directory.path(), "jpg", 1).expect("one staged output");
+        assert_eq!(staged, vec![first.to_string_lossy().to_string()]);
+
+        fs::write(directory.path().join("second.jpg"), b"synthetic output").expect("second output");
+        let error = staged_exports(directory.path(), "jpg", 1).expect_err("extra output");
+        assert!(error.contains("produced 2 outputs"));
+    }
+
+    #[test]
+    fn direct_export_identity_is_destination_and_consent_scoped() {
+        let session = PicPortalSession {
+            client: Client::new(),
+            base_url: PRODUCTION_API_BASE_URL.to_owned(),
+            account_id: "account".to_owned(),
+            admin: AdminIdentity {
+                email: "admin@example.test".to_owned(),
+                name: "Admin".to_owned(),
+            },
+            cookies: Arc::new(Mutex::new(Vec::new())),
+            persistent: false,
+        };
+        let settings = crate::export_processing::ExportSettings {
+            jpeg_quality: 90,
+            tiff_bit_depth: crate::export_processing::TiffBitDepth::Sixteen,
+            resize: None,
+            keep_metadata: true,
+            preserve_timestamps: false,
+            strip_gps: false,
+            filename_template: Some("{original_filename}_edited".to_owned()),
+            watermark: None,
+            export_masks: false,
+            preserve_folders: false,
+            destination_type: Some("picportal".to_owned()),
+            subfolder: None,
+        };
+        let paths = vec!["/synthetic/one.jpg".to_owned()];
+        let no_faces = direct_export_operation_id(
+            &session,
+            "gallery",
+            &paths,
+            &["/synthetic".to_owned()],
+            &settings,
+            "jpg",
+            &None,
+            &None,
+            false,
+        )
+        .expect("operation id");
+        let with_faces = direct_export_operation_id(
+            &session,
+            "gallery",
+            &paths,
+            &["/synthetic".to_owned()],
+            &settings,
+            "jpg",
+            &None,
+            &None,
+            true,
+        )
+        .expect("operation id");
+        assert_ne!(no_faces, with_faces);
+        assert_eq!(
+            no_faces,
+            direct_export_operation_id(
+                &session,
+                "gallery",
+                &paths,
+                &["/synthetic".to_owned()],
+                &settings,
+                "jpg",
+                &None,
+                &None,
+                false,
+            )
+            .expect("stable operation id")
+        );
+    }
+
+    #[test]
+    fn only_one_picportal_publication_can_run_at_a_time() {
+        let state = PicPortalState::default();
+        let activity = begin_picportal_activity(&state).expect("first publication");
+        assert!(begin_picportal_activity(&state).is_err());
+        drop(activity);
+        assert!(begin_picportal_activity(&state).is_ok());
+    }
+
+    #[test]
     fn gallery_creation_payload_uses_only_explicit_policy() {
         let (_, face_filter_enabled, event_payload) = create_gallery_payload(CreateGalleryInput {
             title: " Event ".into(),
@@ -1631,9 +2458,17 @@ mod tests {
     #[test]
     fn face_publication_requires_the_selected_gallery_to_enable_faces() {
         let capabilities = processing_capabilities(true);
-        assert!(!face_publication_enabled(&gallery(false), &capabilities).expect("policy"));
-        assert!(face_publication_enabled(&gallery(true), &capabilities).expect("policy"));
-        assert!(face_publication_enabled(&gallery(true), &processing_capabilities(false)).is_err());
+        assert!(!face_publication_enabled(&gallery(false), &capabilities, false).expect("policy"));
+        assert!(face_publication_enabled(&gallery(true), &capabilities, true).expect("policy"));
+        assert!(
+            face_publication_enabled(&gallery(true), &processing_capabilities(false), true)
+                .is_err()
+        );
+        assert!(
+            !face_publication_enabled(&gallery(true), &capabilities, false)
+                .expect("explicit opt-out")
+        );
+        assert!(face_publication_enabled(&gallery(false), &capabilities, true).is_err());
     }
 
     #[test]

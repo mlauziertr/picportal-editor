@@ -1,12 +1,17 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { open } from '@tauri-apps/plugin-dialog';
-import { LogIn, LogOut, UploadCloud, RefreshCw, FolderPlus } from 'lucide-react';
+import { listen } from '@tauri-apps/api/event';
+import { LogIn, LogOut, RefreshCw, FolderPlus } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import Button from '../../ui/Button';
 import Text from '../../ui/Text';
-import { TextVariants } from '../../../types/typography';
+import { TextColors, TextVariants } from '../../../types/typography';
 import { Invokes } from '../../ui/AppProperties';
+
+export interface PicPortalExportOptions {
+  galleryId: string;
+  includeFaceAnalysis: boolean;
+}
 
 interface GallerySummary {
   id: string;
@@ -16,15 +21,24 @@ interface GallerySummary {
   faceFilterEnabled: boolean;
 }
 
-interface LoginResult {
-  admin: { name: string; email: string };
-  galleries: GallerySummary[];
+interface AdminIdentity {
+  name: string;
+  email: string;
 }
 
-interface PublishResult {
-  completed: number;
-  failed: number;
-  items: Array<{ path: string; state: string; error?: string | null }>;
+interface SessionStatus {
+  connected: boolean;
+  admin: AdminIdentity | null;
+  galleries: GallerySummary[];
+  persistent: boolean;
+  message?: string | null;
+}
+
+interface LoginResult {
+  admin: AdminIdentity;
+  galleries: GallerySummary[];
+  persistent: boolean;
+  message?: string | null;
 }
 
 type GalleryType = '' | 'event' | 'client';
@@ -32,14 +46,28 @@ type GalleryAccessMode = '' | 'link' | 'password';
 type GalleryStatus = '' | 'active' | 'draft';
 type FaceFilterPolicy = '' | 'enabled' | 'disabled';
 
-export default function PicPortalPanel() {
+interface PicPortalPanelProps {
+  pathsCount: number;
+  unsupportedReason?: string;
+  disabled?: boolean;
+  onOptionsChange?: (options: PicPortalExportOptions) => void;
+  onReadyChange?: (ready: boolean) => void;
+}
+
+export default function PicPortalPanel({
+  pathsCount,
+  unsupportedReason,
+  disabled = false,
+  onOptionsChange,
+  onReadyChange,
+}: PicPortalPanelProps) {
   const { t } = useTranslation();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [admin, setAdmin] = useState<LoginResult['admin'] | null>(null);
+  const [admin, setAdmin] = useState<AdminIdentity | null>(null);
   const [galleries, setGalleries] = useState<GallerySummary[]>([]);
   const [galleryId, setGalleryId] = useState('');
-  const [paths, setPaths] = useState<string[]>([]);
+  const [includeFaceAnalysis, setIncludeFaceAnalysis] = useState(false);
   const [newGalleryTitle, setNewGalleryTitle] = useState('');
   const [newGalleryType, setNewGalleryType] = useState<GalleryType>('');
   const [newGalleryAccessMode, setNewGalleryAccessMode] = useState<GalleryAccessMode>('');
@@ -50,12 +78,84 @@ export default function PicPortalPanel() {
   const [newGalleryPassword, setNewGalleryPassword] = useState('');
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
+  const [restoring, setRestoring] = useState(true);
+
+  const selectedGallery = galleries.find((gallery) => gallery.id === galleryId) ?? null;
+
+  const clearSession = useCallback(() => {
+    setAdmin(null);
+    setGalleries([]);
+    setGalleryId('');
+    setIncludeFaceAnalysis(false);
+  }, []);
+
+  const applySession = useCallback(
+    (session: SessionStatus) => {
+      if (!session.connected || !session.admin) {
+        clearSession();
+        if (session.message) setStatus(session.message);
+        return;
+      }
+      setAdmin(session.admin);
+      setGalleries(session.galleries);
+      setGalleryId((current) =>
+        session.galleries.some((gallery) => gallery.id === current) ? current : session.galleries[0]?.id || '',
+      );
+      if (session.message) setStatus(session.message);
+    },
+    [clearSession],
+  );
+
+  useEffect(() => {
+    let active = true;
+    const restore = async () => {
+      try {
+        const session = await invoke<SessionStatus>(Invokes.PicPortalRestoreSession);
+        if (active) applySession(session);
+      } catch (error) {
+        if (active) setStatus(String(error));
+      } finally {
+        if (active) setRestoring(false);
+      }
+    };
+    restore();
+
+    const invalidated = listen('picportal-session-invalidated', () => {
+      if (!active) return;
+      clearSession();
+      setStatus(t('picportal.sessionExpired', { defaultValue: 'PicPortal session expired; connect again' }));
+    });
+    return () => {
+      active = false;
+      invalidated.then((unlisten) => unlisten());
+    };
+  }, [applySession, clearSession, t]);
+
+  useEffect(() => {
+    onOptionsChange?.({ galleryId, includeFaceAnalysis });
+    onReadyChange?.(Boolean(admin && galleryId));
+  }, [admin, galleryId, includeFaceAnalysis, onOptionsChange, onReadyChange]);
+
+  useEffect(() => {
+    if (selectedGallery && !selectedGallery.faceFilterEnabled) setIncludeFaceAnalysis(false);
+  }, [selectedGallery]);
+
+  const isExpiredError = (error: unknown) => String(error).includes('session expired or was revoked');
 
   const refreshGalleries = useCallback(async () => {
-    const next = await invoke<GallerySummary[]>(Invokes.PicPortalGalleries);
-    setGalleries(next);
-    setGalleryId((current) => (next.some((gallery) => gallery.id === current) ? current : next[0]?.id || ''));
-  }, []);
+    setBusy(true);
+    try {
+      const next = await invoke<GallerySummary[]>(Invokes.PicPortalGalleries);
+      setGalleries(next);
+      setGalleryId((current) => (next.some((gallery) => gallery.id === current) ? current : next[0]?.id || ''));
+      setStatus('');
+    } catch (error) {
+      if (isExpiredError(error)) clearSession();
+      setStatus(String(error));
+    } finally {
+      setBusy(false);
+    }
+  }, [clearSession]);
 
   const login = useCallback(async () => {
     setBusy(true);
@@ -66,7 +166,8 @@ export default function PicPortalPanel() {
       setGalleries(result.galleries);
       setGalleryId(result.galleries[0]?.id || '');
       setPassword('');
-      setStatus(t('picportal.loggedIn', { defaultValue: 'Connected to PicPortal' }));
+      const connected = t('picportal.loggedIn', { defaultValue: 'Connected to PicPortal' });
+      setStatus(result.message ? `${connected}\n${result.message}` : connected);
     } catch (error) {
       setStatus(String(error));
     } finally {
@@ -78,27 +179,15 @@ export default function PicPortalPanel() {
     setBusy(true);
     try {
       await invoke(Invokes.PicPortalLogout);
-      setAdmin(null);
-      setGalleries([]);
-      setGalleryId('');
+      clearSession();
       setStatus(t('picportal.loggedOut', { defaultValue: 'Disconnected' }));
     } catch (error) {
+      clearSession();
       setStatus(String(error));
     } finally {
       setBusy(false);
     }
-  }, [t]);
-
-  const chooseExports = useCallback(async () => {
-    const selected = await open({
-      multiple: true,
-      directory: false,
-      title: t('picportal.chooseExports', { defaultValue: 'Choose exported images' }),
-      filters: [{ name: 'JPEG, PNG, WebP', extensions: ['jpg', 'jpeg', 'png', 'webp'] }],
-    });
-    if (!selected) return;
-    setPaths(Array.isArray(selected) ? selected : [selected]);
-  }, [t]);
+  }, [clearSession, t]);
 
   const createGallery = useCallback(async () => {
     if (
@@ -126,10 +215,10 @@ export default function PicPortalPanel() {
           password: newGalleryAccessMode === 'password' ? newGalleryPassword : null,
         },
       });
-      const createdStatus = t('picportal.galleryCreated', { defaultValue: 'Gallery created' });
       setGalleries((current) => [...current.filter((item) => item.id !== gallery.id), gallery]);
       setGalleryId(gallery.id);
-      setStatus(createdStatus);
+      setIncludeFaceAnalysis(false);
+      setStatus(t('picportal.galleryCreated', { defaultValue: 'Gallery created' }));
       setNewGalleryTitle('');
       setNewGalleryType('');
       setNewGalleryAccessMode('');
@@ -138,21 +227,14 @@ export default function PicPortalPanel() {
       setNewGalleryClientName('');
       setNewGalleryClientEmail('');
       setNewGalleryPassword('');
-      try {
-        const refreshed = await invoke<GallerySummary[]>(Invokes.PicPortalGalleries);
-        setGalleries(refreshed.some((item) => item.id === gallery.id) ? refreshed : [...refreshed, gallery]);
-        setGalleryId(gallery.id);
-      } catch (refreshError) {
-        setStatus(
-          `${createdStatus}\n${t('picportal.refresh', { defaultValue: 'Refresh galleries' })}: ${String(refreshError)}`,
-        );
-      }
     } catch (error) {
+      if (isExpiredError(error)) clearSession();
       setStatus(String(error));
     } finally {
       setBusy(false);
     }
   }, [
+    clearSession,
     newGalleryAccessMode,
     newGalleryClientEmail,
     newGalleryClientName,
@@ -173,50 +255,44 @@ export default function PicPortalPanel() {
     (newGalleryType !== 'client' || Boolean(newGalleryClientName.trim() && newGalleryClientEmail.trim())) &&
     (newGalleryAccessMode !== 'password' || Boolean(newGalleryPassword.trim()));
 
-  const publish = useCallback(async () => {
-    if (!galleryId || paths.length === 0) return;
-    setBusy(true);
-    try {
-      const result = await invoke<PublishResult>(Invokes.PicPortalPublish, { paths, galleryId });
-      const summary = [
-        t('picportal.publishCompleted', {
-          count: result.completed,
-          defaultValue: '{{count}} images uploaded',
-        }),
-        t('picportal.publishFailed', {
-          count: result.failed,
-          defaultValue: '{{count}} images failed',
-        }),
-      ].join(', ');
-      const failures = result.items.flatMap((item) => (item.error ? [`${item.path}: ${item.error}`] : []));
-      setStatus([summary, ...failures].join('\n'));
-    } catch (error) {
-      setStatus(String(error));
-    } finally {
-      setBusy(false);
-    }
-  }, [galleryId, paths, t]);
-
   return (
     <div className="mt-5 border-t border-border-color pt-4 space-y-3">
       <div className="flex items-center justify-between">
-        <Text variant={TextVariants.heading}>{t('picportal.title', { defaultValue: 'PicPortal publication' })}</Text>
+        <Text variant={TextVariants.heading}>
+          {t('picportal.destinationTitle', { defaultValue: 'Export to PicPortal' })}
+        </Text>
         {admin && (
           <button
             onClick={logout}
-            disabled={busy}
+            disabled={busy || disabled}
             className="text-text-secondary hover:text-text-primary"
-            data-tooltip={t('picportal.logout', { defaultValue: 'Disconnect' })}
+            data-tooltip={t('picportal.logout', { defaultValue: 'Log out' })}
           >
             <LogOut size={16} />
           </button>
         )}
       </div>
-      {!admin ? (
+      <Text variant={TextVariants.small} color={TextColors.secondary}>
+        {t('picportal.selectedImages', {
+          count: pathsCount,
+          defaultValue: '{{count}} images will be rendered and uploaded',
+        })}
+      </Text>
+      {unsupportedReason && (
+        <Text variant={TextVariants.small} color={TextColors.secondary}>
+          {unsupportedReason}
+        </Text>
+      )}
+      {restoring ? (
+        <Text variant={TextVariants.small} color={TextColors.secondary}>
+          {t('picportal.restoring', { defaultValue: 'Restoring secure PicPortal session…' })}
+        </Text>
+      ) : !admin ? (
         <div className="space-y-2">
           <input
             className="w-full rounded-md bg-bg-primary border border-border-color px-2 py-1 text-sm"
             type="email"
+            autoComplete="username"
             value={email}
             onChange={(event) => setEmail(event.target.value)}
             placeholder={t('picportal.email', { defaultValue: 'PicPortal email' })}
@@ -224,40 +300,64 @@ export default function PicPortalPanel() {
           <input
             className="w-full rounded-md bg-bg-primary border border-border-color px-2 py-1 text-sm"
             type="password"
+            autoComplete="current-password"
             value={password}
             onChange={(event) => setPassword(event.target.value)}
             placeholder={t('picportal.password', { defaultValue: 'Password' })}
           />
-          <Button onClick={login} disabled={busy || !email || !password}>
+          <Button onClick={login} disabled={busy || disabled || !email || !password}>
             <LogIn size={16} className="mr-2" /> {t('picportal.login', { defaultValue: 'Connect' })}
           </Button>
         </div>
       ) : (
         <div className="space-y-3">
-          <Text variant={TextVariants.small} className="text-text-secondary">
-            {admin.name} · {admin.email}
-          </Text>
-          <div className="flex gap-2">
-            <select
-              className="min-w-0 flex-1 rounded-md bg-bg-primary border border-border-color px-2 py-1 text-sm"
-              value={galleryId}
-              onChange={(event) => setGalleryId(event.target.value)}
-            >
-              {galleries.map((gallery) => (
-                <option key={gallery.id} value={gallery.id}>
-                  {gallery.title || gallery.slug}
-                </option>
-              ))}
-            </select>
+          <div className="flex items-center justify-between gap-2">
+            <Text variant={TextVariants.small} className="text-text-secondary truncate">
+              {admin.name} · {admin.email}
+            </Text>
             <button
               onClick={refreshGalleries}
-              disabled={busy}
-              className="p-2 rounded-md hover:bg-surface"
+              disabled={busy || disabled}
+              className="p-2 rounded-md hover:bg-surface shrink-0"
               data-tooltip={t('picportal.refresh', { defaultValue: 'Refresh galleries' })}
             >
               <RefreshCw size={16} />
             </button>
           </div>
+          <select
+            className="w-full rounded-md bg-bg-primary border border-border-color px-2 py-1 text-sm"
+            value={galleryId}
+            onChange={(event) => setGalleryId(event.target.value)}
+            disabled={busy || disabled}
+          >
+            {galleries.map((gallery) => (
+              <option key={gallery.id} value={gallery.id}>
+                {gallery.title || gallery.slug}
+              </option>
+            ))}
+          </select>
+          {selectedGallery?.faceFilterEnabled ? (
+            <label className="flex items-start gap-2 text-sm text-text-secondary">
+              <input
+                type="checkbox"
+                checked={includeFaceAnalysis}
+                onChange={(event) => setIncludeFaceAnalysis(event.target.checked)}
+                disabled={busy || disabled}
+                className="mt-0.5 accent-accent"
+              />
+              <span>
+                {t('picportal.includeFaceAnalysis', {
+                  defaultValue: 'Include face-selection data for this export (explicit consent)',
+                })}
+              </span>
+            </label>
+          ) : (
+            <Text variant={TextVariants.small} color={TextColors.secondary}>
+              {t('picportal.faceAnalysisUnavailable', {
+                defaultValue: 'Face-selection data is disabled for this gallery.',
+              })}
+            </Text>
+          )}
           <div className="space-y-2 rounded-md border border-border-color p-2">
             <input
               className="w-full rounded-md bg-bg-primary border border-border-color px-2 py-1 text-sm"
@@ -353,21 +453,13 @@ export default function PicPortalPanel() {
             )}
             <button
               onClick={createGallery}
-              disabled={busy || !canCreateGallery}
+              disabled={busy || disabled || !canCreateGallery}
               className="flex w-full items-center justify-center gap-2 rounded-md p-2 hover:bg-surface disabled:opacity-50"
-              data-tooltip={t('picportal.createGallery', { defaultValue: 'Create gallery' })}
             >
               <FolderPlus size={16} />
               {t('picportal.createGallery', { defaultValue: 'Create gallery' })}
             </button>
           </div>
-          <Button onClick={chooseExports} disabled={busy}>
-            {t('picportal.chooseExports', { defaultValue: 'Choose exported images' })} ({paths.length})
-          </Button>
-          <Button onClick={publish} disabled={busy || !galleryId || paths.length === 0}>
-            <UploadCloud size={16} className="mr-2" />{' '}
-            {t('picportal.publish', { defaultValue: 'Process and publish locally' })}
-          </Button>
         </div>
       )}
       {status && (

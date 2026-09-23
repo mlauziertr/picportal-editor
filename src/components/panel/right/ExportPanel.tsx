@@ -1,9 +1,11 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback, type ReactNode } from 'react';
 import { save, open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
-import { FileInput, CheckCircle, XCircle, Loader, Ban, ChevronDown, ChevronRight, Settings, X } from 'lucide-react';
+import { listen } from '@tauri-apps/api/event';
+import { FileInput, CheckCircle, XCircle, Loader, Ban, ChevronDown, ChevronRight, Settings } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import debounce from 'lodash.debounce';
 import Switch from '../../ui/Switch';
 import Button from '../../ui/Button';
@@ -30,13 +32,13 @@ import Text from '../../ui/Text';
 import { TextColors, TextVariants, TextWeights } from '../../../types/typography';
 import { useEditorStore } from '../../../store/useEditorStore';
 import { useUIStore } from '../../../store/useUIStore';
-import PicPortalPanel from './PicPortalPanel';
+import PicPortalPanel, { PicPortalExportOptions } from './PicPortalPanel';
 
 interface ExportPanelProps {
   exportState: ExportState;
   multiSelectedPaths: Array<string>;
   selectedImage: SelectedImage | null;
-  setExportState(state: any): void;
+  setExportState(state: Partial<ExportState> | ((current: ExportState) => Partial<ExportState>)): void;
   appSettings: AppSettings | null;
   onSettingsChange: (settings: AppSettings) => void;
   rootPaths: string[];
@@ -45,7 +47,7 @@ interface ExportPanelProps {
 }
 
 interface SectionProps {
-  children: any;
+  children: ReactNode;
   title: string;
 }
 
@@ -160,7 +162,7 @@ function WatermarkPreview({
   );
 }
 
-const formatBytes = (bytes: number, t: any, decimals = 2) => {
+const formatBytes = (bytes: number, t: TFunction, decimals = 2) => {
   if (!+bytes) return `0 ${t('export.bytes.bytes')}`;
   const k = 1024;
   const dm = decimals < 0 ? 0 : decimals;
@@ -256,7 +258,19 @@ export default function ExportPanel({
   const adjustmentsRef = useRef(useEditorStore.getState().adjustments);
 
   const [isAdvancedExpanded, setIsAdvancedExpanded] = useState(false);
+  const [picPortalOptions, setPicPortalOptions] = useState<PicPortalExportOptions>({
+    galleryId: '',
+    includeFaceAnalysis: false,
+  });
+  const [picPortalReady, setPicPortalReady] = useState(false);
   const initDone = useRef(false);
+
+  const handlePicPortalOptionsChange = useCallback((options: PicPortalExportOptions) => {
+    setPicPortalOptions(options);
+  }, []);
+  const handlePicPortalReadyChange = useCallback((ready: boolean) => {
+    setPicPortalReady(ready);
+  }, []);
 
   useEffect(() => {
     if (initDone.current || appSettings === null || !isVisible) return;
@@ -297,6 +311,21 @@ export default function ExportPanel({
 
   const { status, progress, errorMessage } = exportState;
   const isExporting = [Status.Exporting, Status.Cancelling].includes(status);
+
+  useEffect(() => {
+    if (!isVisible) return;
+    let active = true;
+    const progressListener = listen<{ current: number; total: number; stage?: string }>(
+      'picportal-progress',
+      (event) => {
+        if (active) setExportState({ progress: event.payload });
+      },
+    );
+    return () => {
+      active = false;
+      progressListener.then((unlisten) => unlisten());
+    };
+  }, [isVisible, setExportState]);
   const isCancelling = status === Status.Cancelling;
   const isLibraryContext = !!onClose;
 
@@ -311,6 +340,17 @@ export default function ExportPanel({
   }, [isLibraryContext, multiSelectedPaths, selectedImage?.path]);
 
   const numImages = pathsToExport.length;
+  const isPicPortalDestination = destinationType === 'picportal';
+  const picPortalFormatSupported = [FileFormats.Jpeg, FileFormats.Png, FileFormats.Webp].includes(
+    fileFormat as FileFormats,
+  );
+  const picPortalUnsupportedReason = !picPortalFormatSupported
+    ? t('picportal.unsupportedFormat', { defaultValue: 'PicPortal accepts JPEG, PNG or WebP exports.' })
+    : exportMasks
+      ? t('picportal.unsupportedMasks', {
+          defaultValue: 'Turn off Export masks for PicPortal; separate mask files are not uploaded.',
+        })
+      : undefined;
 
   useEffect(() => {
     const fetchDims = async () => {
@@ -320,7 +360,9 @@ export default function ExportPanel({
         return;
       }
       try {
-        const dims: any = await invoke('get_image_dimensions', { path: pathsToExport[0] });
+        const dims: { width: number; height: number } = await invoke('get_image_dimensions', {
+          path: pathsToExport[0],
+        });
         if (dims.width > 0 && dims.height > 0) setImageAspectRatio(dims.width / dims.height);
       } catch {
         setImageAspectRatio(3 / 2);
@@ -340,7 +382,7 @@ export default function ExportPanel({
           path: watermarkPath,
         });
         setWatermarkImageAspectRatio(dimensions.height > 0 ? dimensions.width / dimensions.height : 1);
-      } catch (error) {
+      } catch {
         setWatermarkImageAspectRatio(1);
       }
     };
@@ -379,7 +421,7 @@ export default function ExportPanel({
             currentEditAdjustments: currentAdj || null,
           });
           setEstimatedSize(size);
-        } catch (err) {
+        } catch {
           setEstimatedSize(null);
         } finally {
           setIsEstimating(false);
@@ -474,7 +516,101 @@ export default function ExportPanel({
     }, 0);
   };
 
+  const handlePicPortalExport = async () => {
+    if (
+      numImages === 0 ||
+      isExporting ||
+      !picPortalReady ||
+      !picPortalOptions.galleryId ||
+      !picPortalFormatSupported ||
+      exportMasks
+    ) {
+      return;
+    }
+
+    const exportSettings: ExportSettings = {
+      filenameTemplate,
+      jpegQuality,
+      tiffBitDepth,
+      keepMetadata,
+      preserveTimestamps,
+      preserveFolders,
+      destinationType,
+      subfolder,
+      resize: enableResize ? { mode: resizeMode, value: resizeValue, dontEnlarge } : null,
+      stripGps,
+      exportMasks,
+      watermark:
+        enableWatermark && watermarkPath
+          ? {
+              path: watermarkPath,
+              anchor: watermarkAnchor,
+              scale: watermarkScale,
+              spacing: watermarkSpacing,
+              opacity: watermarkOpacity,
+            }
+          : null,
+    };
+    const selectedFormat = FILE_FORMATS.find((format: FileFormat) => format.id === fileFormat);
+    if (!selectedFormat) return;
+
+    setExportState({
+      status: Status.Exporting,
+      progress: { current: 0, total: numImages, stage: 'rendering' },
+      errorMessage: '',
+    });
+    try {
+      const result = await invoke<{
+        completed: number;
+        failed: number;
+        cancelled: boolean;
+        items: Array<{ path: string; state: string; error?: string | null }>;
+      }>(Invokes.PicPortalExport, {
+        paths: pathsToExport,
+        baseOriginFolders: rootPaths,
+        exportSettings,
+        outputFormat: selectedFormat.extensions[0],
+        currentEditPath: selectedImage?.path || null,
+        currentEditAdjustments: adjustmentsRef.current || null,
+        galleryId: picPortalOptions.galleryId,
+        includeFaceAnalysis: picPortalOptions.includeFaceAnalysis,
+      });
+
+      if (result.cancelled) {
+        setExportState({
+          status: Status.Cancelled,
+          errorMessage: '',
+          progress: { current: result.completed, total: numImages },
+        });
+      } else if (result.failed > 0) {
+        setExportState({
+          status: Status.Error,
+          errorMessage: t('picportal.partialFailure', {
+            completed: result.completed,
+            failed: result.failed,
+            defaultValue:
+              'PicPortal export partially uploaded ({{completed}} complete, {{failed}} failed); retry to resume.',
+          }),
+          progress: { current: result.completed, total: numImages },
+        });
+      } else {
+        setExportState({ status: Status.Success, progress: { current: result.completed, total: numImages } });
+      }
+    } catch (error) {
+      const message = String(error);
+      setExportState({
+        status: message.includes('cancelled') ? Status.Cancelled : Status.Error,
+        errorMessage: message.includes('cancelled') ? '' : message,
+        progress,
+      });
+    }
+  };
+
   const handleExport = async () => {
+    if (isPicPortalDestination) {
+      await handlePicPortalExport();
+      return;
+    }
     if (numImages === 0 || isExporting) return;
 
     const exportSettings: ExportSettings = {
@@ -504,7 +640,8 @@ export default function ExportPanel({
     const lastExportPath = appSettings?.exportPresets?.find((p) => p.id === '__last_used__')?.lastExportPath;
 
     try {
-      const selectedFormat: any = FILE_FORMATS.find((f) => f.id === fileFormat);
+      const selectedFormat = FILE_FORMATS.find((f) => f.id === fileFormat);
+      if (!selectedFormat) return;
 
       let outputFolderOrFile = '';
       const isOriginalFolder = destinationType === 'originalFolder';
@@ -592,6 +729,9 @@ export default function ExportPanel({
   };
 
   const canExport = numImages > 0;
+  const picPortalCanExport =
+    !isPicPortalDestination ||
+    Boolean(picPortalReady && picPortalOptions.galleryId && picPortalFormatSupported && !exportMasks);
   const isLut = fileFormat === FileFormats.Cube;
   const itemLabel = isLut ? t('export.labels.lut') : t('export.labels.image');
   const itemLabelPlural = isLut ? t('export.labels.lut_plural') : t('export.labels.image_plural');
@@ -668,6 +808,10 @@ export default function ExportPanel({
                   options={[
                     { label: t('export.destination.customFolder'), value: 'customFolder' },
                     { label: t('export.destination.originalFolder'), value: 'originalFolder' },
+                    {
+                      label: t('export.destination.picportal', { defaultValue: 'Export to PicPortal' }),
+                      value: 'picportal',
+                    },
                   ]}
                   value={destinationType || 'customFolder'}
                   onChange={(val) => setDestinationType(val as string)}
@@ -966,7 +1110,10 @@ export default function ExportPanel({
                         ? 'bg-yellow-500/20 text-yellow-400 shadow-none'
                         : ''
             }`}
-            disabled={isCancelling || (status !== Status.Exporting && !canExport)}
+            disabled={
+              isCancelling ||
+              (status !== Status.Exporting && (!canExport || (isPicPortalDestination && !picPortalCanExport)))
+            }
             onClick={status === Status.Exporting ? handleCancel : handleExport}
             size="lg"
           >
@@ -1002,14 +1149,27 @@ export default function ExportPanel({
             ) : (
               <>
                 <FileInput size={18} className="mr-2" />{' '}
-                {numImages > 1
-                  ? t('export.status.exportMultiple', { count: numImages, label: itemLabelPlural })
-                  : t('export.status.exportSingle', { label: itemLabel })}
+                {isPicPortalDestination
+                  ? t('picportal.exportAction', {
+                      count: numImages,
+                      defaultValue: 'Export {{count}} images to PicPortal',
+                    })
+                  : numImages > 1
+                    ? t('export.status.exportMultiple', { count: numImages, label: itemLabelPlural })
+                    : t('export.status.exportSingle', { label: itemLabel })}
               </>
             )}
           </Button>
         </motion.div>
-        <PicPortalPanel />
+        {isPicPortalDestination && (
+          <PicPortalPanel
+            pathsCount={numImages}
+            unsupportedReason={picPortalUnsupportedReason}
+            disabled={isExporting}
+            onOptionsChange={handlePicPortalOptionsChange}
+            onReadyChange={handlePicPortalReadyChange}
+          />
+        )}
       </div>
     </div>
   );
