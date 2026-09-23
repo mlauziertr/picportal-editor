@@ -1753,6 +1753,62 @@ export default function SettingsPanel({
                         {t('settings.thanks.list.you')}
                       </li>
                     </Text>
+
+                    <div className="mt-8 pt-6 border-t border-border-color">
+                      <Text variant={TextVariants.heading} className="mb-3">
+                        {t('settings.thanks.attribution.title')}
+                      </Text>
+                      <Text className="mb-4">
+                        {t('settings.thanks.attribution.basedOn')}{' '}
+                        <a
+                          href="https://github.com/CyberTimon/RapidRAW"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="font-semibold text-accent hover:underline"
+                        >
+                          {t('settings.thanks.attribution.originalProject')}
+                        </a>{' '}
+                        {t('settings.thanks.attribution.by')} {t('settings.thanks.attribution.originalAuthor')}.
+                      </Text>
+                      <Text className="mb-4">
+                        {t('settings.thanks.attribution.splashImages')}{' '}
+                        <a
+                          href="https://instagram.com/timonkaech.photography"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="font-semibold text-accent hover:underline"
+                        >
+                          {t('settings.thanks.attribution.originalAuthor')}
+                        </a>
+                        .
+                      </Text>
+                      <div className="flex flex-wrap gap-x-4 gap-y-2">
+                        <a
+                          href="https://github.com/CyberTimon/RapidRAW"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-accent hover:underline"
+                        >
+                          {t('settings.thanks.attribution.source')}
+                        </a>
+                        <a
+                          href="https://github.com/CyberTimon/RapidRAW/blob/main/LICENSE"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-accent hover:underline"
+                        >
+                          {t('settings.thanks.attribution.license')}
+                        </a>
+                        <a
+                          href="https://ko-fi.com/cybertimon"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-accent hover:underline"
+                        >
+                          {t('settings.thanks.attribution.support')}
+                        </a>
+                      </div>
+                    </div>
                   </div>
                 </motion.div>
               )}

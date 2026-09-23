@@ -1063,7 +1063,7 @@
     },
     "splash": {
       "addFolder": "新增資料夾",
-      "brand": "RapidRAW",
+      "brand": "PicPortal Editor",
       "continueSession": "繼續會話",
       "contribute": "在 GitHub 上貢獻",
       "descriptionAndroid": "一款極速、GPU 加速的 RAW 影像編輯器。開啟相簿以開始。",
@@ -1963,6 +1963,17 @@
       "title": "標籤"
     },
     "thanks": {
+      "attribution": {
+        "basedOn": "基於",
+        "by": "作者",
+        "license": "AGPL-3.0 授權條款",
+        "originalAuthor": "Timon Käch",
+        "originalProject": "RapidRAW",
+        "source": "原始原始碼",
+        "splashImages": "啟動畫面圖片作者",
+        "support": "在 Ko-fi 上支持原始專案",
+        "title": "署名資訊"
+      },
       "description": "衷心感謝以下專案，它們在 RapidRAW 的開發過程中非常重要：",
       "list": {
         "darktable": "為部分參考實現提供了指導。",

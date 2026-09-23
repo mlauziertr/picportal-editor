@@ -1063,7 +1063,7 @@
     },
     "splash": {
       "addFolder": "添加文件夹",
-      "brand": "RapidRAW",
+      "brand": "PicPortal Editor",
       "continueSession": "继续会话",
       "contribute": "在 GitHub 上贡献",
       "descriptionAndroid": "一款极速、GPU 加速的 RAW 图像编辑器。打开图库以开始。",
@@ -1963,6 +1963,17 @@
       "title": "标签"
     },
     "thanks": {
+      "attribution": {
+        "basedOn": "基于",
+        "by": "作者",
+        "license": "AGPL-3.0 许可证",
+        "originalAuthor": "Timon Käch",
+        "originalProject": "RapidRAW",
+        "source": "原始源代码",
+        "splashImages": "启动画面图片作者",
+        "support": "在 Ko-fi 上支持原项目",
+        "title": "署名信息"
+      },
       "description": "衷心感谢以下项目，它们在 RapidRAW 的开发过程中非常重要：",
       "list": {
         "darktable": "为部分参考实现提供了指导。",
