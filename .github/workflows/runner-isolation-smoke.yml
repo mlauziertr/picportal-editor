@@ -1,0 +1,57 @@
+name: Local VM isolation smoke
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  isolation-smoke:
+    # Label routing only: this personal repo has no organization runner-group restriction.
+    runs-on: [self-hosted, Linux, X64, picportal-editor-isolated-smoke]
+    timeout-minutes: 5
+    steps:
+      - name: Verify the isolated guest boundary (no checkout, no secrets)
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'guest_arch='; uname -m
+          if findmnt -rn -t 9p,virtiofs,nfs,cifs | grep -q .; then
+            echo 'shared_filesystem=unexpected'
+            exit 1
+          fi
+          echo 'shared_filesystems=none'
+          python3 - <<'PY'
+          import http.client, socket, urllib.request
+
+          try:
+              s = socket.create_connection(('1.1.1.1', 443), timeout=4)
+              s.close()
+              raise SystemExit('direct IPv4 egress unexpectedly open')
+          except OSError:
+              pass
+          try:
+              s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+              s.settimeout(3)
+              s.connect(('2606:4700:4700::1111', 443, 0, 0))
+              s.close()
+              raise SystemExit('direct IPv6 egress unexpectedly open')
+          except OSError:
+              pass
+
+          proxy = 'http://10.0.2.100:3128'
+          opener = urllib.request.build_opener(
+              urllib.request.ProxyHandler({'https': proxy})
+          )
+          with opener.open('https://api.github.com/rate_limit', timeout=20) as response:
+              assert response.status == 200, f'allowlisted API status={response.status}'
+          conn = http.client.HTTPConnection('10.0.2.100', 3128, timeout=5)
+          conn.set_tunnel('example.com', 443)
+          try:
+              conn.connect()
+              conn.close()
+              raise SystemExit('nonallowlisted CONNECT unexpectedly open')
+          except OSError as exc:
+              assert '403' in str(exc), f'nonallowlisted tunnel failed unexpectedly: {exc}'
+          print('ipv4_and_ipv6_direct=blocked;allowlisted_api=200;other_host=403')
+          PY
