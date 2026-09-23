@@ -7,6 +7,8 @@ on:
 
 jobs:
   build:
+    # Hosted builds disabled by explicit user choice; re-enable only by a separate decision.
+    if: ${{ false }}
     strategy:
       fail-fast: false
       matrix:
