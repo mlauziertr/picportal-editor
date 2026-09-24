@@ -43,6 +43,7 @@ interface CurveGraphProps {
 }
 
 const DEFAULT_POINT_CURVES = getDefaultCurves();
+const CURVE_CHANNELS = [ActiveChannel.Luma, ActiveChannel.Red, ActiveChannel.Green, ActiveChannel.Blue] as const;
 
 function buildParametricPoints(settings: ParametricCurveSettings): Array<Coord> {
   const vH = settings.highlights / 100;
@@ -457,9 +458,9 @@ export default function CurveGraph({
     [histogram],
   );
 
-  const activePoints = isParametricMode
+  const activePoints: Coord[] = isParametricMode
     ? buildParametricPoints(activeParametricSettings)
-    : (localPoints ?? adjustments?.curves?.[activeChannel]);
+    : (localPoints ?? adjustments?.curves?.[activeChannel] ?? DEFAULT_POINT_CURVES[activeChannel]);
 
   const { color, data: histogramData } = channelConfig[activeChannel];
 
@@ -480,7 +481,7 @@ export default function CurveGraph({
     if (index > 0 && index < activePoints.length - 1) {
       e.preventDefault();
       e.stopPropagation();
-      const newPoints = activePoints.filter((_, i) => i !== index);
+      const newPoints = activePoints.filter((_point: Coord, i: number) => i !== index);
       setLocalPoints(newPoints);
       localPointsRef.current = newPoints;
       setAdjustments((prev: any) => ({
@@ -638,7 +639,7 @@ export default function CurveGraph({
     }
 
     const handleCopy = () => {
-      curveClipboard = activePoints.map((p) => ({ ...p }));
+      curveClipboard = activePoints.map((point: Coord) => ({ ...point }));
     };
 
     const handlePaste = () => {
@@ -777,7 +778,7 @@ export default function CurveGraph({
         </div>
 
         <div className="flex items-center gap-1 shrink-0">
-          {Object.keys(channelConfig).map((channel: any) => {
+          {CURVE_CHANNELS.map((channel) => {
             const selected = activeChannel === channel;
             const channelLabel = t(`adjustments.curves.channels.${channel}`);
             return (

@@ -990,6 +990,8 @@ const Row = React.memo(
   },
 );
 
+const CullingListRow = (props: React.ComponentProps<typeof Row>): React.ReactElement | null => <Row {...props} />;
+
 export default function CullingView(props: any) {
   const { t } = useTranslation();
   const {
@@ -1246,7 +1248,7 @@ export default function CullingView(props: any) {
             listRef={setListHandle}
             rowCount={imageList.length}
             rowHeight={sidebarWidth - 16}
-            rowComponent={Row}
+            rowComponent={CullingListRow}
             rowProps={rowProps}
             className="custom-scrollbar"
           />

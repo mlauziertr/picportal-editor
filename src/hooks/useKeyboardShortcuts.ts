@@ -642,7 +642,7 @@ export const useKeyboardShortcuts = ({
 
       if (state.ui.cullingResultsState.isOpen && event.code === 'Escape') {
         event.preventDefault();
-        state.ui.setUI((currentState: any) => ({
+        state.ui.setUI((currentState) => ({
           cullingResultsState: { ...currentState.cullingResultsState, isOpen: false },
         }));
         return;

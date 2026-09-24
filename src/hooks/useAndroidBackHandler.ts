@@ -94,7 +94,7 @@ export function useAndroidBackHandler() {
         return;
       }
       if (ui.cullingResultsState.isOpen) {
-        ui.setUI((state: any) => ({
+        ui.setUI((state) => ({
           cullingResultsState: { ...state.cullingResultsState, isOpen: false },
         }));
         return;

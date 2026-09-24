@@ -280,6 +280,8 @@ export interface AiPatch {
   visible: boolean;
 }
 
+export type ColorName = 'red' | 'yellow' | 'green' | 'blue' | 'purple';
+
 export interface Color {
   color: string;
   name: string;
@@ -370,31 +372,19 @@ export interface MaskContainer {
   visible: boolean;
 }
 
-export interface Sections {
-  [index: string]: Array<string>;
-  basic: Array<string>;
-  curves: Array<string>;
-  color: Array<string>;
-  details: Array<string>;
-  effects: Array<string>;
-}
+export type AdjustmentSection = 'basic' | 'curves' | 'color' | 'details' | 'effects';
 
-export interface SectionVisibility {
-  [index: string]: boolean;
-  basic: boolean;
-  curves: boolean;
-  color: boolean;
-  details: boolean;
-  effects: boolean;
-}
+export type Sections = Record<AdjustmentSection, Array<string>>;
 
-export const COLOR_LABELS: Array<Color> = [
+export type SectionVisibility = Record<AdjustmentSection, boolean>;
+
+export const COLOR_LABELS = [
   { name: 'red', color: '#ef4444' },
   { name: 'yellow', color: '#facc15' },
   { name: 'green', color: '#4ade80' },
   { name: 'blue', color: '#60a5fa' },
   { name: 'purple', color: '#a78bfa' },
-];
+] as const satisfies readonly Color[];
 
 const INITIAL_COLOR_GRADING: ColorGradingProps = {
   balance: 0,
@@ -764,8 +754,32 @@ export const normalizeLoadedAdjustments = (loadedAdjustments: Adjustments): any 
   };
 };
 
+export type AdjustmentGroupLabel =
+  | 'modals.copyPaste.groups.exposureToneMapper'
+  | 'modals.copyPaste.groups.tone'
+  | 'modals.copyPaste.groups.curves'
+  | 'modals.copyPaste.groups.whiteBalance'
+  | 'modals.copyPaste.groups.presence'
+  | 'modals.copyPaste.groups.hueShift'
+  | 'modals.copyPaste.groups.colorGrading'
+  | 'modals.copyPaste.groups.colorMixer'
+  | 'modals.copyPaste.groups.colorCalibration'
+  | 'modals.copyPaste.groups.clarityDehaze'
+  | 'modals.copyPaste.groups.sharpness'
+  | 'modals.copyPaste.groups.noiseReduction'
+  | 'modals.copyPaste.groups.chromaticAberration'
+  | 'modals.copyPaste.groups.vignette'
+  | 'modals.copyPaste.groups.grain'
+  | 'modals.copyPaste.groups.halationGlow'
+  | 'modals.copyPaste.groups.lut'
+  | 'modals.copyPaste.groups.cropAspectRatio'
+  | 'modals.copyPaste.groups.transformRotation'
+  | 'modals.copyPaste.groups.lensCorrection'
+  | 'modals.copyPaste.groups.guidedPerspective'
+  | 'modals.copyPaste.groups.masks';
+
 export interface AdjustmentGroup {
-  label: string;
+  label: AdjustmentGroupLabel;
   keys: string[];
 }
 

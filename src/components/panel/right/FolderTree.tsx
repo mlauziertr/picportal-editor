@@ -26,6 +26,7 @@ import {
   FolderPlus,
   RefreshCw,
   Menu,
+  type LucideIcon,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { motion, AnimatePresence, LayoutGroup } from 'framer-motion';
@@ -88,7 +89,7 @@ interface VisibleProps {
   total: number;
 }
 
-const ALBUM_ICONS: Record<string, React.ElementType> = {
+const ALBUM_ICONS: Record<string, LucideIcon> = {
   plane: Plane,
   mountain: Mountain,
   sun: Sun,
@@ -776,7 +777,7 @@ export default function FolderTree({
   const filteredTrees = useMemo(() => {
     let base = folderTrees;
     if (isSearching) {
-      base = base.map((tree: any) => filterTree(tree, trimmedQuery)).filter((t: any) => t !== null);
+      base = base.map((tree) => filterTree(tree, trimmedQuery)).filter((tree): tree is FolderTree => tree !== null);
     }
     return sortFolderTree(base, folderTreeSort);
   }, [folderTrees, trimmedQuery, isSearching, folderTreeSort]);
@@ -804,7 +805,7 @@ export default function FolderTree({
   const filteredAlbumTree = useMemo(() => {
     let base = albumTree;
     if (isSearching) {
-      base = base.map((item: any) => filterAlbumTree(item, trimmedQuery)).filter((t: any) => t !== null);
+      base = base.map((item) => filterAlbumTree(item, trimmedQuery)).filter((item): item is AlbumItem => item !== null);
     }
     return base;
   }, [albumTree, trimmedQuery, isSearching]);
