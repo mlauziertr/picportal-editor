@@ -8,6 +8,11 @@ import Text from '../../ui/Text';
 import { TextColors, TextVariants } from '../../../types/typography';
 import { Invokes } from '../../ui/AppProperties';
 import { picPortalDestinationChanged, retainExplicitGallerySelection } from '../../../utils/picPortalSelection';
+import {
+  canLogoutPicPortalUiSession,
+  isPicPortalUiSessionReady,
+  transitionPicPortalUiSession,
+} from '../../../utils/picPortalSessionUi';
 
 export interface PicPortalExportOptions {
   galleryId: string;
@@ -80,6 +85,7 @@ export default function PicPortalPanel({
   const [newGalleryClientEmail, setNewGalleryClientEmail] = useState('');
   const [newGalleryPassword, setNewGalleryPassword] = useState('');
   const [status, setStatus] = useState('');
+  const [authenticationRejected, setAuthenticationRejected] = useState(false);
   const [busy, setBusy] = useState(false);
   const [restoring, setRestoring] = useState(true);
 
@@ -92,6 +98,7 @@ export default function PicPortalPanel({
     setGalleries([]);
     setGalleryId('');
     setIncludeFaceAnalysis(false);
+    setAuthenticationRejected(false);
   }, []);
 
   const applySession = useCallback(
@@ -114,12 +121,28 @@ export default function PicPortalPanel({
       }
       accountIdentityRef.current = nextAccount;
       galleryIdRef.current = nextGalleryId;
+      setAuthenticationRejected(false);
       setAdmin(session.admin);
       setGalleries(session.galleries);
       setGalleryId(nextGalleryId);
       if (session.message) setStatus(session.message);
     },
     [clearSession],
+  );
+
+  const handleSessionError = useCallback(
+    (error: unknown) => {
+      const transition = transitionPicPortalUiSession(
+        { admin, galleryId, authenticationRejected },
+        error,
+      );
+      if (transition.outcome === 'invalidated') clearSession();
+      if (transition.outcome === 'credentials-retained') {
+        setAuthenticationRejected(transition.state.authenticationRejected);
+      }
+      setStatus(String(error));
+    },
+    [admin, authenticationRejected, clearSession, galleryId],
   );
 
   useEffect(() => {
@@ -129,7 +152,14 @@ export default function PicPortalPanel({
         const session = await invoke<SessionStatus>(Invokes.PicPortalRestoreSession);
         if (active) applySession(session);
       } catch (error) {
-        if (active) setStatus(String(error));
+        if (active) {
+          const transition = transitionPicPortalUiSession(
+            { admin: null, galleryId: '', authenticationRejected: false },
+            error,
+          );
+          if (transition.outcome === 'credentials-retained') setAuthenticationRejected(true);
+          setStatus(String(error));
+        }
       } finally {
         if (active) setRestoring(false);
       }
@@ -141,22 +171,32 @@ export default function PicPortalPanel({
       clearSession();
       setStatus(t('picportal.sessionExpired', { defaultValue: 'PicPortal session expired; connect again' }));
     });
+    const invalidationFailed = listen('picportal-session-invalidation-failed', () => {
+      if (!active) return;
+      setAuthenticationRejected(true);
+      setStatus(
+        t('picportal.sessionInvalidationFailed', {
+          defaultValue: 'PicPortal rejected this session, but saved credentials could not be cleared. Log out to retry.',
+        }),
+      );
+    });
     return () => {
       active = false;
       invalidated.then((unlisten) => unlisten());
+      invalidationFailed.then((unlisten) => unlisten());
     };
   }, [applySession, clearSession, t]);
 
   useEffect(() => {
     onOptionsChange?.({ galleryId, includeFaceAnalysis });
-    onReadyChange?.(Boolean(admin && galleryId));
-  }, [admin, galleryId, includeFaceAnalysis, onOptionsChange, onReadyChange]);
+    onReadyChange?.(
+      isPicPortalUiSessionReady({ admin, galleryId, authenticationRejected }),
+    );
+  }, [admin, authenticationRejected, galleryId, includeFaceAnalysis, onOptionsChange, onReadyChange]);
 
   useEffect(() => {
     if (selectedGallery && !selectedGallery.faceFilterEnabled) setIncludeFaceAnalysis(false);
   }, [selectedGallery]);
-
-  const isExpiredError = (error: unknown) => String(error).includes('session expired or was revoked');
 
   const refreshGalleries = useCallback(async () => {
     setBusy(true);
@@ -181,12 +221,11 @@ export default function PicPortalPanel({
       setGalleryId(nextGalleryId);
       setStatus('');
     } catch (error) {
-      if (isExpiredError(error)) clearSession();
-      setStatus(String(error));
+      handleSessionError(error);
     } finally {
       setBusy(false);
     }
-  }, [clearSession]);
+  }, [handleSessionError]);
 
   const login = useCallback(async () => {
     setBusy(true);
@@ -199,6 +238,7 @@ export default function PicPortalPanel({
       }
       accountIdentityRef.current = nextAccount;
       galleryIdRef.current = '';
+      setAuthenticationRejected(false);
       setAdmin(result.admin);
       setGalleries(result.galleries);
       setGalleryId('');
@@ -276,13 +316,12 @@ export default function PicPortalPanel({
       setNewGalleryClientEmail('');
       setNewGalleryPassword('');
     } catch (error) {
-      if (isExpiredError(error)) clearSession();
-      setStatus(String(error));
+      handleSessionError(error);
     } finally {
       setBusy(false);
     }
   }, [
-    clearSession,
+    handleSessionError,
     newGalleryAccessMode,
     newGalleryClientEmail,
     newGalleryClientName,
@@ -309,7 +348,7 @@ export default function PicPortalPanel({
         <Text variant={TextVariants.heading}>
           {t('picportal.destinationTitle', { defaultValue: 'Export to PicPortal' })}
         </Text>
-        {admin && (
+        {canLogoutPicPortalUiSession({ admin, galleryId, authenticationRejected }) && (
           <button
             onClick={logout}
             disabled={busy || disabled}

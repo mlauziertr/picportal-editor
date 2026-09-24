@@ -566,7 +566,11 @@ fn complete_picportal_invalidation(
 }
 
 fn invalidate_session(state: &PicPortalState, app: Option<&AppHandle>) -> Result<(), String> {
-    complete_picportal_invalidation(state, clear_stored_session(), app)
+    let result = complete_picportal_invalidation(state, clear_stored_session(), app);
+    if let (Err(error), Some(app)) = (&result, app) {
+        let _ = app.emit("picportal-session-invalidation-failed", error);
+    }
+    result
 }
 
 fn auth_failure_message(error: &str, invalidation: Result<(), String>) -> String {
