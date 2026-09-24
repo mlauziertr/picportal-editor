@@ -669,8 +669,11 @@ fn compare_group_candidates(
     right: &ImageAnalysisResult,
     settings: &CullingSettings,
 ) -> std::cmp::Ordering {
-    has_evaluated_open_eyes(right, settings)
-        .cmp(&has_evaluated_open_eyes(left, settings))
+    is_selection_candidate(right, settings, false)
+        .cmp(&is_selection_candidate(left, settings, false))
+        .then_with(|| {
+            has_evaluated_open_eyes(right, settings).cmp(&has_evaluated_open_eyes(left, settings))
+        })
         .then_with(|| right.quality_score.total_cmp(&left.quality_score))
         .then_with(|| left.path.cmp(&right.path))
 }
@@ -1318,6 +1321,34 @@ mod tests {
             detector_reasons(&result, &settings, false),
             vec!["eyesUnknown"]
         );
+    }
+
+    #[test]
+    fn open_eyes_do_not_displace_an_eligible_unknown_eye_representative() {
+        let settings = CullingSettings {
+            detect_blurry: true,
+            blur_severity: "moderate".to_owned(),
+            ..eye_settings(true)
+        };
+        let open_but_blurry = ImageAnalysisResult {
+            eye_state: "open".to_owned(),
+            eye_method: "local-heuristic".to_owned(),
+            sharpness_metric: 40.0,
+            ..analysis_result("open.jpg", 0.99)
+        };
+        let unknown_but_sharp = ImageAnalysisResult {
+            eye_state: "unknown".to_owned(),
+            eye_method: "unavailable".to_owned(),
+            sharpness_metric: 150.0,
+            ..analysis_result("unknown.jpg", 0.3)
+        };
+        let mut group = [&open_but_blurry, &unknown_but_sharp];
+
+        group.sort_by(|left, right| compare_group_candidates(left, right, &settings));
+
+        assert_eq!(group[0].path, "unknown.jpg");
+        assert!(is_selection_candidate(group[0], &settings, false));
+        assert!(!is_selection_candidate(group[1], &settings, false));
     }
 
     #[test]

@@ -1412,8 +1412,6 @@ pub struct AutoAdjustmentResults {
     pub shadows: f64,
     pub vibrancy: f64,
     pub vignette_amount: f64,
-    pub temperature: f64,
-    pub tint: f64,
     pub dehaze: f64,
     pub clarity: f64,
     pub centre: f64,
@@ -3447,8 +3445,6 @@ pub fn perform_auto_analysis(image: &DynamicImage) -> AutoAdjustmentResults {
         shadows: shadows.clamp(-100.0, 100.0),
         vibrancy: vibrancy.clamp(-100.0, 100.0),
         vignette_amount: vignette_amount.clamp(-100.0, 100.0),
-        temperature: 0.0,
-        tint: 0.0,
         dehaze: dehaze.clamp(-100.0, 100.0),
         clarity: clarity.clamp(-100.0, 100.0),
         centre: centre.clamp(-100.0, 100.0),
@@ -3466,8 +3462,6 @@ pub fn auto_results_to_json(results: &AutoAdjustmentResults) -> serde_json::Valu
         "shadows": results.shadows,
         "vibrance": results.vibrancy,
         "vignetteAmount": results.vignette_amount,
-        "temperature": results.temperature,
-        "tint": results.tint,
         "clarity": results.clarity,
         "centré": results.centre,
 
@@ -3511,10 +3505,8 @@ mod tests {
         let result = perform_auto_analysis(&blue_cast);
         let json = auto_results_to_json(&result);
 
-        assert_eq!(result.temperature, 0.0);
-        assert_eq!(result.tint, 0.0);
-        assert_eq!(json["temperature"], serde_json::json!(0.0));
-        assert_eq!(json["tint"], serde_json::json!(0.0));
-        assert_ne!(result.exposure, 0.0);
+        assert!(json.get("temperature").is_none());
+        assert!(json.get("tint").is_none());
+        assert_ne!(json["exposure"], serde_json::json!(0.0));
     }
 }

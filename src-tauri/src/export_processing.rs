@@ -120,6 +120,10 @@ pub(crate) enum ExportAdjustmentsMode {
     GlobalOverride(Value),
 }
 
+fn is_active_export_path(image_path: &str, active_path: Option<&str>) -> bool {
+    active_path == Some(image_path)
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub enum WatermarkAnchor {
@@ -1082,7 +1086,7 @@ pub(crate) async fn export_images_impl(
 
                 let is_current_edit = match &adjustments_mode {
                     ExportAdjustmentsMode::UseSidecars { active_path, .. } => {
-                        Some(&source_path_str) == active_path.as_ref()
+                        is_active_export_path(&image_path_str, active_path.as_deref())
                     }
                     ExportAdjustmentsMode::GlobalOverride(_) => false,
                 };
@@ -1866,4 +1870,24 @@ pub async fn estimate_export_sizes(
     };
 
     Ok(single_image_extrapolated_size * paths.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_export_adjustments_match_the_full_virtual_copy_identity() {
+        let first_copy = "/synthetic/image.jpg?vc=abcdef";
+
+        assert!(is_active_export_path(first_copy, Some(first_copy)));
+        assert!(!is_active_export_path(
+            first_copy,
+            Some("/synthetic/image.jpg")
+        ));
+        assert!(!is_active_export_path(
+            first_copy,
+            Some("/synthetic/image.jpg?vc=123abc")
+        ));
+    }
 }

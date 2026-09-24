@@ -99,6 +99,7 @@ export default function CullingModal({
   const [isCustomizeOpen, setIsCustomizeOpen] = useState(false);
   const [isCompleting, setIsCompleting] = useState(false);
   const completionRef = useRef<CullingSuggestions | null>(null);
+  const startInProgressRef = useRef(false);
 
   useEffect(() => {
     if (!isOpen) {
@@ -119,11 +120,14 @@ export default function CullingModal({
   }, [isOpen, suggestions, settings, onComplete, onError]);
 
   const handleStartCulling = useCallback(async () => {
-    if (imagePaths.length === 0) return;
+    if (imagePaths.length === 0 || startInProgressRef.current) return;
+    startInProgressRef.current = true;
     try {
       await invoke(Invokes.CullImages, { paths: imagePaths, settings });
     } catch (startError) {
       onError(String(startError));
+    } finally {
+      startInProgressRef.current = false;
     }
   }, [imagePaths, settings, onError]);
 

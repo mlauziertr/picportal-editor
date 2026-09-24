@@ -4224,7 +4224,8 @@ pub fn sync_metadata_from_xmp(source_path: &Path, metadata: &mut ImageMetadata) 
     if let Some(xmp_file) = actual_xmp
         && let Ok(content) = fs::read_to_string(&xmp_file)
     {
-        if metadata.rating == 0
+        if metadata.rating_is_manual != Some(true)
+            && metadata.rating == 0
             && let Some(rating) = extract_xmp_rating(&content)
             && rating != 0
         {
@@ -4425,6 +4426,27 @@ mod file_management_regression_tests {
         assert!(!apply_rating_update(&mut reloaded, 5, false, true));
         assert_eq!(reloaded.rating, 0);
         assert_eq!(reloaded.rating_is_manual, Some(true));
+    }
+
+    #[test]
+    fn xmp_import_preserves_known_manual_zero_rating() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let image_path = directory.path().join("image.jpg");
+        fs::write(image_path.with_extension("xmp"), "<xmp:Rating>4</xmp:Rating>")
+            .expect("write synthetic XMP");
+        let mut manual_zero = ImageMetadata {
+            rating: 0,
+            rating_is_manual: Some(true),
+            ..ImageMetadata::default()
+        };
+
+        assert!(!sync_metadata_from_xmp(&image_path, &mut manual_zero));
+        assert_eq!(manual_zero.rating, 0);
+        assert_eq!(manual_zero.rating_is_manual, Some(true));
+
+        let mut unknown_rating = ImageMetadata::default_with_unknown_rating();
+        assert!(sync_metadata_from_xmp(&image_path, &mut unknown_rating));
+        assert_eq!(unknown_rating.rating, 4);
     }
 
     #[test]
