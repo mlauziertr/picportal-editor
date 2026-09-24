@@ -18,13 +18,7 @@ import ConfirmModal from './ConfirmModal';
 import ImportSettingsModal from './ImportSettingsModal';
 import CullingModal from './CullingModal';
 import CollageModal from './CollageModal';
-import {
-  AppSettings,
-  AlbumItem,
-  AlbumGroup,
-  CullingPersistenceSummary,
-  CullingSuggestions,
-} from '../ui/AppProperties';
+import { AppSettings, AlbumItem, AlbumGroup, CullingPersistenceSummary, CullingSuggestions } from '../ui/AppProperties';
 import { CopyPasteSettings } from '../../utils/adjustments';
 
 export interface AppModalsProps {
