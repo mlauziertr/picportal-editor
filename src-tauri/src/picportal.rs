@@ -1000,52 +1000,6 @@ async fn publish_paths(
     Ok(result)
 }
 
-#[tauri::command]
-pub async fn picportal_publish(
-    paths: Vec<String>,
-    gallery_id: String,
-    include_face_analysis: Option<bool>,
-    app: AppHandle,
-    state: State<'_, PicPortalState>,
-) -> Result<PublishResult, String> {
-    if paths.is_empty() {
-        return Err("select at least one exported image".to_owned());
-    }
-    let session = current_session(&state)?;
-    let galleries = session
-        .galleries()
-        .await
-        .map_err(|error| session_error(error, &state, Some(&app)))?;
-    let gallery = galleries
-        .into_iter()
-        .find(|gallery| gallery.id == gallery_id)
-        .ok_or_else(|| "selected PicPortal gallery no longer exists".to_owned())?;
-    let capabilities = session
-        .processing_capabilities()
-        .await
-        .map_err(|error| session_error(error, &state, Some(&app)))?;
-    if !capabilities.derivatives.tauri_enabled {
-        return Err("PicPortal local derivative processing is disabled by the server".to_owned());
-    }
-    let publish_faces = face_publication_enabled(
-        &gallery,
-        &capabilities,
-        include_face_analysis.unwrap_or(false),
-    )?;
-    let _activity = begin_picportal_activity(&state)?;
-    publish_paths(
-        paths,
-        &session,
-        &gallery,
-        &capabilities,
-        publish_faces,
-        &app,
-        &state,
-    )
-    .await
-    .map_err(|error| session_error(error, &state, Some(&app)))
-}
-
 fn normalize_picportal_output_format(output_format: &str) -> Result<String, String> {
     let extension = output_format.trim().to_ascii_lowercase();
     let extension = if extension == "jpeg" {

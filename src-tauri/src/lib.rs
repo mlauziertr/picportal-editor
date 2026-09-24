@@ -2266,7 +2266,6 @@ pub fn run() {
             picportal::picportal_logout,
             picportal::picportal_galleries,
             picportal::picportal_create_gallery,
-            picportal::picportal_publish,
             picportal::picportal_export,
             lens_correction::get_lensfun_makers,
             lens_correction::get_lensfun_lenses_for_maker,

@@ -51,7 +51,6 @@ export enum Invokes {
   PicPortalLogout = 'picportal_logout',
   PicPortalGalleries = 'picportal_galleries',
   PicPortalCreateGallery = 'picportal_create_gallery',
-  PicPortalPublish = 'picportal_publish',
   PicPortalExport = 'picportal_export',
   DeleteFolder = 'delete_folder',
   DuplicateFile = 'duplicate_file',
