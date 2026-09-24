@@ -34,14 +34,14 @@ use crate::image_processing::{
 use crate::lut_processing::{
     convert_image_to_cube_lut, generate_identity_lut_image, get_or_load_lut,
 };
-use crate::mask_generation::{MaskDefinition, generate_mask_bitmap};
+use crate::mask_generation::MaskDefinition;
 
 use crate::cache_utils::{
     calculate_full_job_hash, calculate_image_cache_hash, calculate_transform_hash,
 };
 use crate::{
-    apply_all_transformations, generate_transformed_preview, get_cached_or_generate_mask,
-    hydrate_adjustments, load_settings, resolve_warped_image_for_masks,
+    apply_all_transformations, generate_transformed_preview,
+    get_cached_or_generate_mask_for_image, hydrate_adjustments, load_settings,
 };
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -508,17 +508,21 @@ fn process_image_for_export_pipeline(
         .and_then(|m| serde_json::from_value(m.clone()).ok())
         .unwrap_or_default();
 
-    let warped_image = resolve_warped_image_for_masks(state, js_adjustments, &mask_definitions);
     let mask_bitmaps: Vec<ImageBuffer<Luma<u8>, Vec<u8>>> = mask_definitions
         .iter()
         .filter_map(|def| {
-            generate_mask_bitmap(
+            get_cached_or_generate_mask_for_image(
+                &state.mask_cache,
+                &state.full_warped_cache,
+                Some(path),
+                Some(base_image),
+                is_raw,
                 def,
                 img_w,
                 img_h,
                 1.0,
                 unscaled_crop_offset,
-                warped_image.as_deref(),
+                js_adjustments,
             )
         })
         .collect();
@@ -789,6 +793,7 @@ fn export_masks_for_image(
     export_settings: &ExportSettings,
     output_path_obj: &std::path::Path,
     source_path_str: &str,
+    image_identity_path: &str,
     context: &Arc<GpuContext>,
     state: &tauri::State<AppState>,
     is_raw: bool,
@@ -805,17 +810,21 @@ fn export_masks_for_image(
         .and_then(|m| serde_json::from_value(m.clone()).ok())
         .unwrap_or_default();
 
-    let warped_image = resolve_warped_image_for_masks(state, js_adjustments, &mask_definitions);
     let mut mask_bitmaps = Vec::with_capacity(mask_definitions.len());
     for definition in &mask_definitions {
         ensure_export_not_cancelled(cancellation_token)?;
-        if let Some(bitmap) = generate_mask_bitmap(
+        if let Some(bitmap) = get_cached_or_generate_mask_for_image(
+            &state.mask_cache,
+            &state.full_warped_cache,
+            Some(image_identity_path),
+            Some(base_image),
+            is_raw,
             definition,
             img_w,
             img_h,
             1.0,
             unscaled_crop_offset,
-            warped_image.as_deref(),
+            js_adjustments,
         ) {
             mask_bitmaps.push(bitmap);
         }
@@ -827,7 +836,7 @@ fn export_masks_for_image(
         let all_adjustments = get_all_adjustments_from_json(js_adjustments, is_raw, tm_override);
         let lut_path = js_adjustments["lutPath"].as_str();
         let lut = lut_path.and_then(|p| get_or_load_lut(state, p).ok());
-        let unique_hash = calculate_full_job_hash(source_path_str, js_adjustments);
+        let unique_hash = calculate_full_job_hash(image_identity_path, js_adjustments);
         let output_dir = output_path_obj.parent().unwrap_or(output_path_obj);
         let stem = output_path_obj
             .file_stem()
@@ -1313,7 +1322,7 @@ pub(crate) async fn export_images_impl(
                         .unwrap_or(output_format.as_str());
 
                     let final_image = process_image_for_export(
-                        &source_path_str,
+                        &image_path_str,
                         &base_image,
                         &main_export_adjustments,
                         &export_settings,
@@ -1344,6 +1353,7 @@ pub(crate) async fn export_images_impl(
                             &export_settings,
                             &output_path,
                             &source_path_str,
+                            &image_path_str,
                             &context_clone,
                             &state,
                             is_raw,
@@ -1714,8 +1724,12 @@ pub async fn estimate_export_sizes(
         let mask_bitmaps: Vec<ImageBuffer<Luma<u8>, Vec<u8>>> = mask_definitions
             .iter()
             .filter_map(|def| {
-                get_cached_or_generate_mask(
-                    &state,
+                get_cached_or_generate_mask_for_image(
+                    &state.mask_cache,
+                    &state.full_warped_cache,
+                    Some(&loaded_image.path),
+                    Some(&loaded_image.image),
+                    loaded_image.is_raw,
                     def,
                     img_w,
                     img_h,
@@ -1854,8 +1868,12 @@ pub async fn estimate_export_sizes(
         let mask_bitmaps: Vec<ImageBuffer<Luma<u8>, Vec<u8>>> = mask_definitions
             .iter()
             .filter_map(|def| {
-                get_cached_or_generate_mask(
-                    &state,
+                get_cached_or_generate_mask_for_image(
+                    &state.mask_cache,
+                    &state.full_warped_cache,
+                    Some(first_path),
+                    Some(&original_image),
+                    is_raw,
                     def,
                     preview_w,
                     preview_h,
@@ -1874,8 +1892,7 @@ pub async fn estimate_export_sizes(
         let lut = js_adjustments["lutPath"]
             .as_str()
             .and_then(|p| get_or_load_lut(&state, p).ok());
-        let unique_hash =
-            calculate_full_job_hash(&source_path_str, &js_adjustments).wrapping_add(1);
+        let unique_hash = calculate_full_job_hash(first_path, &js_adjustments).wrapping_add(1);
 
         let processed_preview = process_and_get_dynamic_image_with_precision(
             &context,

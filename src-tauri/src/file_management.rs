@@ -4259,8 +4259,8 @@ pub fn sync_metadata_from_xmp(source_path: &Path, metadata: &mut ImageMetadata) 
         let xmp_tags = extract_xmp_tags(&content);
 
         let mut current_tags = metadata.tags.clone().unwrap_or_default();
-        let original_len = current_tags.len();
-        let had_no_tags = metadata.tags.is_none();
+        let original_tags = current_tags.clone();
+        let original_color_label_is_manual = metadata.color_label_is_manual;
 
         for tag in xmp_tags {
             if metadata.color_label_is_manual == Some(true)
@@ -4287,8 +4287,14 @@ pub fn sync_metadata_from_xmp(source_path: &Path, metadata: &mut ImageMetadata) 
             }
         }
 
-        if current_tags.len() != original_len || (had_no_tags && !current_tags.is_empty()) {
-            metadata.tags = Some(current_tags);
+        if current_tags != original_tags
+            || metadata.color_label_is_manual != original_color_label_is_manual
+        {
+            metadata.tags = if current_tags.is_empty() {
+                None
+            } else {
+                Some(current_tags)
+            };
             changed = true;
         }
     }
@@ -4525,6 +4531,38 @@ mod file_management_regression_tests {
         assert_eq!(loaded.tags, Some(vec!["color:green".to_owned()]));
         assert_eq!(loaded.color_label_is_manual, None);
         assert_eq!(reloaded.tags, Some(vec!["color:green".to_owned()]));
+        assert_eq!(reloaded.color_label_is_manual, None);
+    }
+
+    #[test]
+    fn xmp_color_replacement_persists_when_tag_count_is_unchanged() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let image_path = directory.path().join("image.jpg");
+        let sidecar_path = directory.path().join("image.jpg.rrdata");
+        let metadata = ImageMetadata {
+            tags: Some(vec!["color:green".to_owned()]),
+            color_label_is_manual: Some(false),
+            ..ImageMetadata::default()
+        };
+        fs::write(
+            &sidecar_path,
+            serde_json::to_vec(&metadata).expect("serialize automatic label"),
+        )
+        .expect("write sidecar");
+        fs::write(image_path.with_extension("xmp"), "<xmp:Label>Red</xmp:Label>")
+            .expect("write synthetic XMP");
+
+        let loaded = resolve_image_metadata(
+            &image_path,
+            &sidecar_path,
+            true,
+            &AppSettings::default(),
+        );
+        let reloaded = crate::exif_processing::load_sidecar(&sidecar_path);
+
+        assert_eq!(loaded.tags, Some(vec!["color:red".to_owned()]));
+        assert_eq!(loaded.color_label_is_manual, None);
+        assert_eq!(reloaded.tags, Some(vec!["color:red".to_owned()]));
         assert_eq!(reloaded.color_label_is_manual, None);
     }
 

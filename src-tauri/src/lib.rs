@@ -75,8 +75,8 @@ use tempfile::NamedTempFile;
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::cache_utils::{
-    DecodedImageCache, calculate_full_job_hash, calculate_geometry_hash,
-    calculate_image_cache_hash, calculate_transform_hash, calculate_visual_hash,
+    DecodedImageCache, calculate_full_job_hash, calculate_image_cache_hash,
+    calculate_transform_hash, calculate_visual_hash,
 };
 use crate::file_management::{parse_virtual_path, read_file_mapped};
 use crate::formats::is_raw_file;
@@ -89,7 +89,8 @@ use crate::image_processing::{
     resolve_tonemapper_override_from_handle, warp_image_geometry,
 };
 use crate::mask_generation::{
-    MaskDefinition, generate_mask_bitmap, get_cached_or_generate_mask,
+    MaskDefinition, generate_mask_bitmap, get_cached_full_warped_image_for_image,
+    get_cached_or_generate_mask, get_cached_or_generate_mask_for_image,
     resolve_warped_image_for_masks,
 };
 use crate::window_customizer::PinchZoomDisablePlugin;
@@ -294,47 +295,22 @@ fn cancel_thumbnail_generation(
 
 pub fn get_cached_full_warped_image(
     state: &tauri::State<AppState>,
-    js_adjustments: &serde_json::Value,
+    adjustments: &serde_json::Value,
 ) -> Result<Arc<DynamicImage>, String> {
     let loaded_image = state
         .original_image
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(|error| error.into_inner())
         .clone()
         .ok_or("No original image loaded")?;
-    let geo_hash =
-        calculate_image_cache_hash(&loaded_image.path, calculate_geometry_hash(js_adjustments));
 
-    {
-        let cache_lock = state
-            .full_warped_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some((hash, img)) = cache_lock.as_ref()
-            && *hash == geo_hash
-        {
-            return Ok(Arc::clone(img));
-        }
-    }
-
-    let mut cow_image = Cow::Borrowed(loaded_image.image.as_ref());
-
-    if loaded_image.is_raw {
-        apply_cpu_default_raw_processing(cow_image.to_mut());
-    }
-
-    let warped_image = apply_geometry_warp(cow_image, js_adjustments).into_owned();
-    let warped_arc = Arc::new(warped_image);
-
-    {
-        let mut cache_lock = state
-            .full_warped_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        *cache_lock = Some((geo_hash, Arc::clone(&warped_arc)));
-    }
-
-    Ok(warped_arc)
+    Ok(get_cached_full_warped_image_for_image(
+        &state.full_warped_cache,
+        &loaded_image.path,
+        &loaded_image.image,
+        loaded_image.is_raw,
+        adjustments,
+    ))
 }
 
 #[tauri::command]
