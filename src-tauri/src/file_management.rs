@@ -4252,6 +4252,7 @@ pub fn sync_metadata_from_xmp(source_path: &Path, metadata: &mut ImageMetadata) 
             } else {
                 metadata.adjustments = serde_json::json!({"rating": rating});
             }
+            metadata.rating_is_manual = None;
             changed = true;
         }
 
@@ -4481,6 +4482,85 @@ mod file_management_regression_tests {
         let mut unknown_rating = ImageMetadata::default_with_unknown_rating();
         assert!(sync_metadata_from_xmp(&image_path, &mut unknown_rating));
         assert_eq!(unknown_rating.rating, 4);
+        assert_eq!(unknown_rating.rating_is_manual, None);
+    }
+
+    #[test]
+    fn xmp_rating_import_marks_effective_changes_unknown() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let image_path = directory.path().join("image.jpg");
+        let sidecar_path = directory.path().join("image.jpg.rrdata");
+        fs::write(image_path.with_extension("xmp"), "<xmp:Rating>4</xmp:Rating>")
+            .expect("write synthetic XMP");
+        let automatic_zero = ImageMetadata {
+            rating: 0,
+            rating_is_manual: Some(false),
+            ..ImageMetadata::default()
+        };
+        fs::write(
+            &sidecar_path,
+            serde_json::to_vec(&automatic_zero).expect("serialize automatic zero"),
+        )
+        .expect("write automatic zero sidecar");
+
+        let loaded = resolve_image_metadata(
+            &image_path,
+            &sidecar_path,
+            true,
+            &AppSettings::default(),
+        );
+        let reloaded = crate::exif_processing::load_sidecar(&sidecar_path);
+
+        assert_eq!(loaded.rating, 4);
+        assert_eq!(loaded.rating_is_manual, None);
+        assert_eq!(reloaded.rating, 4);
+        assert_eq!(reloaded.rating_is_manual, None);
+
+        let no_sidecar_image = directory.path().join("no-sidecar.jpg");
+        fs::write(
+            no_sidecar_image.with_extension("xmp"),
+            "<xmp:Rating>3</xmp:Rating>",
+        )
+        .expect("write synthetic XMP without sidecar");
+        let no_sidecar_path = directory.path().join("no-sidecar.jpg.rrdata");
+        let no_sidecar = resolve_image_metadata(
+            &no_sidecar_image,
+            &no_sidecar_path,
+            true,
+            &AppSettings::default(),
+        );
+        assert_eq!(no_sidecar.rating, 3);
+        assert_eq!(no_sidecar.rating_is_manual, None);
+        assert_eq!(
+            crate::exif_processing::load_sidecar(&no_sidecar_path).rating_is_manual,
+            None
+        );
+
+        let unchanged_sidecar_path = directory.path().join("unchanged.jpg.rrdata");
+        let unchanged = ImageMetadata {
+            rating: 2,
+            rating_is_manual: Some(false),
+            ..ImageMetadata::default()
+        };
+        fs::write(
+            &unchanged_sidecar_path,
+            serde_json::to_vec(&unchanged).expect("serialize automatic rating"),
+        )
+        .expect("write automatic rating sidecar");
+        let unchanged_image = directory.path().join("unchanged.jpg");
+        fs::write(
+            unchanged_image.with_extension("xmp"),
+            "<xmp:Rating>4</xmp:Rating>",
+        )
+        .expect("write XMP without an effective import");
+        let unchanged_loaded = resolve_image_metadata(
+            &unchanged_image,
+            &unchanged_sidecar_path,
+            true,
+            &AppSettings::default(),
+        );
+        assert_eq!(unchanged_loaded.rating, 2);
+        assert_eq!(unchanged_loaded.rating_is_manual, Some(false));
     }
 
     #[test]

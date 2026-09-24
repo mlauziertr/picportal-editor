@@ -34,14 +34,13 @@ use crate::image_processing::{
 use crate::lut_processing::{
     convert_image_to_cube_lut, generate_identity_lut_image, get_or_load_lut,
 };
-use crate::mask_generation::MaskDefinition;
+use crate::mask_generation::{MaskDefinition, generate_mask_bitmap};
 
 use crate::cache_utils::{
     calculate_full_job_hash, calculate_image_cache_hash, calculate_transform_hash,
 };
 use crate::{
-    apply_all_transformations, generate_transformed_preview,
-    get_cached_or_generate_mask_for_image, hydrate_adjustments, load_settings,
+    apply_all_transformations, generate_transformed_preview, hydrate_adjustments, load_settings,
 };
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -508,21 +507,18 @@ fn process_image_for_export_pipeline(
         .and_then(|m| serde_json::from_value(m.clone()).ok())
         .unwrap_or_default();
 
+    let warped_mask_source =
+        export_mask_source(base_image, js_adjustments, is_raw, &mask_definitions);
     let mask_bitmaps: Vec<ImageBuffer<Luma<u8>, Vec<u8>>> = mask_definitions
         .iter()
         .filter_map(|def| {
-            get_cached_or_generate_mask_for_image(
-                &state.mask_cache,
-                &state.full_warped_cache,
-                Some(path),
-                Some(base_image),
-                is_raw,
+            generate_mask_bitmap(
                 def,
                 img_w,
                 img_h,
                 1.0,
                 unscaled_crop_offset,
-                js_adjustments,
+                warped_mask_source.as_ref(),
             )
         })
         .collect();
@@ -550,6 +546,26 @@ fn process_image_for_export_pipeline(
         debug_tag,
         output_precision,
     )
+}
+
+fn export_mask_source(
+    base_image: &DynamicImage,
+    js_adjustments: &Value,
+    is_raw: bool,
+    mask_definitions: &[MaskDefinition],
+) -> Option<DynamicImage> {
+    if !mask_definitions
+        .iter()
+        .any(MaskDefinition::requires_warped_image)
+    {
+        return None;
+    }
+
+    let mut source_image = Cow::Borrowed(base_image);
+    if is_raw {
+        crate::apply_cpu_default_raw_processing(source_image.to_mut());
+    }
+    Some(crate::apply_geometry_warp(source_image, js_adjustments).into_owned())
 }
 
 fn render_output_precision(
@@ -810,21 +826,18 @@ fn export_masks_for_image(
         .and_then(|m| serde_json::from_value(m.clone()).ok())
         .unwrap_or_default();
 
+    let warped_mask_source =
+        export_mask_source(base_image, js_adjustments, is_raw, &mask_definitions);
     let mut mask_bitmaps = Vec::with_capacity(mask_definitions.len());
     for definition in &mask_definitions {
         ensure_export_not_cancelled(cancellation_token)?;
-        if let Some(bitmap) = get_cached_or_generate_mask_for_image(
-            &state.mask_cache,
-            &state.full_warped_cache,
-            Some(image_identity_path),
-            Some(base_image),
-            is_raw,
+        if let Some(bitmap) = generate_mask_bitmap(
             definition,
             img_w,
             img_h,
             1.0,
             unscaled_crop_offset,
-            js_adjustments,
+            warped_mask_source.as_ref(),
         ) {
             mask_bitmaps.push(bitmap);
         }
@@ -1721,21 +1734,24 @@ pub async fn estimate_export_sizes(
             unscaled_crop_offset.1 * scale,
         );
 
+        let mask_source_image = composite_patches_on_image(&loaded_image.image, &adjustments_clone)
+            .map_err(|error| format!("Failed to composite estimate mask patches: {error}"))?;
+        let warped_mask_source = export_mask_source(
+            &mask_source_image,
+            &adjustments_clone,
+            loaded_image.is_raw,
+            &mask_definitions,
+        );
         let mask_bitmaps: Vec<ImageBuffer<Luma<u8>, Vec<u8>>> = mask_definitions
             .iter()
             .filter_map(|def| {
-                get_cached_or_generate_mask_for_image(
-                    &state.mask_cache,
-                    &state.full_warped_cache,
-                    Some(&loaded_image.path),
-                    Some(&loaded_image.image),
-                    loaded_image.is_raw,
+                generate_mask_bitmap(
                     def,
                     img_w,
                     img_h,
                     scale,
                     scaled_crop_offset,
-                    &adjustments_clone,
+                    warped_mask_source.as_ref(),
                 )
             })
             .collect();
@@ -1865,21 +1881,20 @@ pub async fn estimate_export_sizes(
             unscaled_crop_offset.1 * gpu_scale,
         );
 
+        let mask_source_image = composite_patches_on_image(&original_image, &js_adjustments)
+            .map_err(|error| format!("Failed to composite estimate mask patches: {error}"))?;
+        let warped_mask_source =
+            export_mask_source(&mask_source_image, &js_adjustments, is_raw, &mask_definitions);
         let mask_bitmaps: Vec<ImageBuffer<Luma<u8>, Vec<u8>>> = mask_definitions
             .iter()
             .filter_map(|def| {
-                get_cached_or_generate_mask_for_image(
-                    &state.mask_cache,
-                    &state.full_warped_cache,
-                    Some(first_path),
-                    Some(&original_image),
-                    is_raw,
+                generate_mask_bitmap(
                     def,
                     preview_w,
                     preview_h,
                     total_scale,
                     scaled_crop_offset,
-                    &js_adjustments,
+                    warped_mask_source.as_ref(),
                 )
             })
             .collect();
@@ -2011,5 +2026,95 @@ mod tests {
             &adjustments,
             1280
         ));
+    }
+
+    #[test]
+    fn exported_masks_use_effective_pixels_after_ai_patches() {
+        let image_path = "/synthetic/image.jpg";
+        let pristine = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            2,
+            1,
+            image::Rgb([0, 0, 255]),
+        ));
+        let patched_once = DynamicImage::ImageRgb8(image::RgbImage::from_fn(2, 1, |x, _| {
+            if x == 0 {
+                image::Rgb([255, 0, 0])
+            } else {
+                image::Rgb([0, 0, 255])
+            }
+        }));
+        let patched_again = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            2,
+            1,
+            image::Rgb([255, 0, 0]),
+        ));
+        let definition = MaskDefinition {
+            id: "color-mask".to_owned(),
+            name: "Color mask".to_owned(),
+            visible: true,
+            invert: false,
+            opacity: 100.0,
+            adjustments: Value::Null,
+            sub_masks: vec![crate::mask_generation::SubMask {
+                id: "color-sub-mask".to_owned(),
+                mask_type: "color".to_owned(),
+                visible: true,
+                invert: false,
+                opacity: 100.0,
+                mode: crate::mask_generation::SubMaskMode::Additive,
+                parameters: serde_json::json!({
+                    "targetX": 0.0,
+                    "targetY": 0.0,
+                    "tolerance": 0.0
+                }),
+            }],
+        };
+        let adjustments = serde_json::json!({ "aiPatches": [{ "id": "patch" }] });
+        let mask_cache = Mutex::new(HashMap::new());
+        let warped_cache = Mutex::new(None);
+        let pristine_mask = crate::get_cached_or_generate_mask_for_image(
+            &mask_cache,
+            &warped_cache,
+            Some(image_path),
+            Some(&pristine),
+            false,
+            &definition,
+            2,
+            1,
+            1.0,
+            (0.0, 0.0),
+            &adjustments,
+        )
+        .expect("generate pristine source mask");
+        assert_eq!(pristine_mask.get_pixel(1, 0)[0], 255);
+
+        let masks = [definition];
+        let first_warped = export_mask_source(&patched_once, &adjustments, false, &masks)
+            .expect("warp first patched source");
+        let first_export_mask = generate_mask_bitmap(
+            &masks[0],
+            2,
+            1,
+            1.0,
+            (0.0, 0.0),
+            Some(&first_warped),
+        )
+        .expect("generate first export mask");
+        let second_warped = export_mask_source(&patched_again, &adjustments, false, &masks)
+            .expect("warp changed patched source");
+        let second_export_mask = generate_mask_bitmap(
+            &masks[0],
+            2,
+            1,
+            1.0,
+            (0.0, 0.0),
+            Some(&second_warped),
+        )
+        .expect("generate changed export mask");
+
+        assert_eq!(first_export_mask.get_pixel(0, 0)[0], 255);
+        assert_eq!(first_export_mask.get_pixel(1, 0)[0], 0);
+        assert_eq!(second_export_mask.get_pixel(0, 0)[0], 255);
+        assert_eq!(second_export_mask.get_pixel(1, 0)[0], 255);
     }
 }
