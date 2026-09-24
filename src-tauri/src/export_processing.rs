@@ -326,7 +326,7 @@ fn strip_prefix_preserving_source_case(source_path: &Path, base_path: &Path) -> 
     Some(source_components[base_components.len()..].iter().collect())
 }
 
-fn relative_export_dir_for_preserved_folders(
+pub(crate) fn relative_export_dir_for_preserved_folders(
     source_path: &Path,
     base_origin_folders: &[String],
 ) -> Option<PathBuf> {

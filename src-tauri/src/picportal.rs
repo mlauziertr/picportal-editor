@@ -8,7 +8,7 @@
 use std::{
     fs,
     io::Write,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
     sync::{Arc, Mutex},
     time::Duration,
@@ -1119,20 +1119,84 @@ fn direct_export_operation_id(
     Ok(uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, &operation))
 }
 
-fn prepare_staging_directory(app: &AppHandle, operation_id: uuid::Uuid) -> Result<PathBuf, String> {
-    let root = app
+fn staging_directory_path(app: &AppHandle, operation_id: uuid::Uuid) -> Result<PathBuf, String> {
+    Ok(app
         .path()
         .app_data_dir()
         .map_err(|error| format!("cannot resolve PicPortal staging directory: {error}"))?
         .join("picportal-staging")
-        .join(operation_id.to_string());
+        .join(operation_id.to_string()))
+}
+
+fn prepare_staging_directory(root: &Path) -> Result<(), String> {
     if root.exists() {
-        fs::remove_dir_all(&root)
+        fs::remove_dir_all(root)
             .map_err(|error| format!("cannot reset PicPortal staging directory: {error}"))?;
     }
-    fs::create_dir_all(&root)
+    fs::create_dir_all(root)
         .map_err(|error| format!("cannot create PicPortal staging directory: {error}"))?;
-    Ok(root)
+    Ok(())
+}
+
+fn normalize_staging_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() && !path.is_absolute() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn ensure_staging_output_is_contained(root: &Path, output: &Path) -> Result<(), String> {
+    let normalized_root = normalize_staging_path(root);
+    let normalized_output = normalize_staging_path(output);
+    if normalized_output != normalized_root && normalized_output.starts_with(&normalized_root) {
+        Ok(())
+    } else {
+        Err("PicPortal filename template resolves outside its staging directory".to_owned())
+    }
+}
+
+fn validate_picportal_staging_outputs(
+    staging_root: &Path,
+    paths: &[String],
+    base_origin_folders: &[String],
+    filename_template: Option<&str>,
+    preserve_folders: bool,
+    output_format: &str,
+) -> Result<(), String> {
+    let template = filename_template.unwrap_or("{original_filename}_edited");
+    for (index, virtual_path) in paths.iter().enumerate() {
+        let (source_path, _) = crate::file_management::parse_virtual_path(virtual_path);
+        let file_date = crate::exif_processing::get_creation_date_from_path(&source_path);
+        let stem = crate::file_management::generate_filename_from_template(
+            template,
+            &source_path,
+            index + 1,
+            paths.len(),
+            &file_date,
+        );
+        let mut output = staging_root.to_path_buf();
+        if preserve_folders
+            && let Some(relative_dir) =
+                crate::export_processing::relative_export_dir_for_preserved_folders(
+                    &source_path,
+                    base_origin_folders,
+                )
+        {
+            output.push(relative_dir);
+        }
+        output.push(format!("{stem}.{output_format}"));
+        ensure_staging_output_is_contained(staging_root, &output)?;
+    }
+    Ok(())
 }
 
 fn staged_exports(root: &Path, extension: &str, expected: usize) -> Result<Vec<String>, String> {
@@ -1217,7 +1281,16 @@ pub async fn picportal_export(
         include_face_analysis,
     )?;
     let _activity = begin_picportal_activity(&state)?;
-    let staging_root = prepare_staging_directory(&app, operation_id)?;
+    let staging_root = staging_directory_path(&app, operation_id)?;
+    validate_picportal_staging_outputs(
+        &staging_root,
+        &paths,
+        &base_origin_folders,
+        export_settings.filename_template.as_deref(),
+        export_settings.preserve_folders,
+        &output_format,
+    )?;
+    prepare_staging_directory(&staging_root)?;
 
     let mut staging_settings = export_settings;
     staging_settings.destination_type = Some("customFolder".to_owned());
@@ -2365,6 +2438,57 @@ mod tests {
     }
 
     #[test]
+    fn picportal_filename_templates_must_resolve_inside_staging_before_render() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let staging_root = directory.path().join("staging");
+        fs::create_dir_all(&staging_root).expect("staging root");
+        let paths = vec![
+            directory
+                .path()
+                .join("synthetic-source.jpg")
+                .to_string_lossy()
+                .to_string(),
+        ];
+
+        validate_picportal_staging_outputs(
+            &staging_root,
+            &paths,
+            &[],
+            Some("{original_filename}_edited"),
+            false,
+            "jpg",
+        )
+        .expect("safe filename template");
+
+        let relative_escape = directory.path().join("escaped-photo.jpg");
+        let error = validate_picportal_staging_outputs(
+            &staging_root,
+            &paths,
+            &[],
+            Some("../escaped-photo"),
+            false,
+            "jpg",
+        )
+        .expect_err("relative traversal must be rejected");
+        assert!(error.contains("outside its staging directory"));
+        assert!(!relative_escape.exists());
+
+        let absolute_stem = directory.path().join("absolute-photo");
+        let absolute_template = absolute_stem.to_string_lossy().to_string();
+        let error = validate_picportal_staging_outputs(
+            &staging_root,
+            &paths,
+            &[],
+            Some(&absolute_template),
+            false,
+            "jpg",
+        )
+        .expect_err("absolute filename must be rejected");
+        assert!(error.contains("outside its staging directory"));
+        assert!(!absolute_stem.with_extension("jpg").exists());
+    }
+
+    #[test]
     fn direct_export_identity_is_destination_and_consent_scoped() {
         let session = PicPortalSession {
             client: Client::new(),
@@ -2475,16 +2599,14 @@ mod tests {
         *state.session.lock().expect("session lock") =
             Some(synthetic_session_for("account-a"));
 
-        let message = session_error_with_invalidation(
-            "HTTP 401: synthetic unauthorized".to_owned(),
-            || {
+        let message =
+            session_error_with_invalidation("HTTP 401: synthetic unauthorized".to_owned(), || {
                 complete_picportal_invalidation(
                     &state,
                     Err("synthetic secure storage failure".to_owned()),
                     None,
                 )
-            },
-        );
+            });
 
         assert!(message.contains("authentication was rejected"));
         assert!(message.contains("HTTP 401"));

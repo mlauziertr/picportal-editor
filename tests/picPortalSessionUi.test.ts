@@ -29,6 +29,20 @@ test('failed secure removal retains logout identity and blocks PicPortal export'
   assert.equal(canLogoutPicPortalUiSession(transition.state), true);
 });
 
+test('failed secure logout retains retry state and blocks PicPortal export', () => {
+  const transition = transitionPicPortalUiSession(
+    session,
+    'PicPortal logout not completed because secure session storage could not be cleared: synthetic failure',
+  );
+
+  assert.equal(transition.outcome, 'credentials-retained');
+  assert.deepEqual(transition.state.admin, session.admin);
+  assert.equal(transition.state.galleryId, 'gallery-a');
+  assert.equal(transition.state.authenticationRejected, true);
+  assert.equal(isPicPortalUiSessionReady(transition.state), false);
+  assert.equal(canLogoutPicPortalUiSession(transition.state), true);
+});
+
 test('successful invalidation clears the UI session', () => {
   const transition = transitionPicPortalUiSession(
     session,

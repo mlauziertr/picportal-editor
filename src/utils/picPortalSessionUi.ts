@@ -14,7 +14,8 @@ export function transitionPicPortalUiSession<TAdmin>(
   if (
     message.includes(
       'PicPortal session invalidation not completed because secure session storage could not be cleared',
-    )
+    ) ||
+    message.includes('PicPortal logout not completed because secure session storage could not be cleared')
   ) {
     return {
       outcome: 'credentials-retained',

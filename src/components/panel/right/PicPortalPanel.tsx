@@ -260,12 +260,19 @@ export default function PicPortalPanel({
       setStatus(t('picportal.loggedOut', { defaultValue: 'Disconnected' }));
     } catch (error) {
       const message = String(error);
+      const transition = transitionPicPortalUiSession(
+        { admin, galleryId, authenticationRejected },
+        error,
+      );
       if (message.includes('PicPortal session was removed locally')) clearSession();
+      if (transition.outcome === 'credentials-retained') {
+        setAuthenticationRejected(transition.state.authenticationRejected);
+      }
       setStatus(message);
     } finally {
       setBusy(false);
     }
-  }, [clearSession, t]);
+  }, [admin, authenticationRejected, clearSession, galleryId, t]);
 
   const createGallery = useCallback(async () => {
     if (
