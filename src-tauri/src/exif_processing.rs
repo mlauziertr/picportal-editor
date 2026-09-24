@@ -1682,6 +1682,30 @@ pub fn read_exif_data_from_bytes(path: &str, file_bytes: &[u8]) -> HashMap<Strin
     exif_data
 }
 
+pub(crate) fn persist_exif_to_primary_if_valid(
+    source_path: &Path,
+    exif_map: &HashMap<String, String>,
+    only_if_missing: bool,
+) -> bool {
+    let primary = get_primary_sidecar_path(source_path);
+    crate::file_management::with_sidecar_write_lock(&primary, || {
+        if !primary.exists() {
+            return Ok(false);
+        }
+        let (mut metadata, sidecar_valid) = load_sidecar_unlocked_with_status(&primary);
+        if !sidecar_valid {
+            return Ok(false);
+        }
+        if only_if_missing && metadata.exif.is_some() {
+            return Ok(true);
+        }
+        metadata.exif = Some(exif_map.clone());
+        save_primary_metadata(source_path, &metadata).map_err(|error| error.to_string())?;
+        Ok(true)
+    })
+    .unwrap_or(false)
+}
+
 pub fn read_exif_data(path: &str, file_bytes: &[u8]) -> HashMap<String, String> {
     let source_path = Path::new(path);
 
@@ -1690,18 +1714,8 @@ pub fn read_exif_data(path: &str, file_bytes: &[u8]) -> HashMap<String, String> 
     }
 
     let exif_map = read_exif_data_from_bytes(path, file_bytes);
-    if !exif_map.is_empty() {
-        let primary = get_primary_sidecar_path(source_path);
-        if primary.exists() {
-            let _ = crate::file_management::with_sidecar_write_lock(&primary, || {
-                let mut metadata = load_sidecar_unlocked(&primary);
-                metadata.exif = Some(exif_map.clone());
-                save_primary_metadata(source_path, &metadata).map_err(|error| error.to_string())?;
-                Ok(())
-            });
-        } else {
-            save_exif_to_rrcache(source_path, exif_map.clone());
-        }
+    if !exif_map.is_empty() && !persist_exif_to_primary_if_valid(source_path, &exif_map, false) {
+        save_exif_to_rrcache(source_path, exif_map.clone());
     }
 
     exif_map
@@ -1717,19 +1731,7 @@ pub fn persist_exif_if_missing(source_path: &Path, source_path_str: &str, file_b
         return;
     }
 
-    let primary = get_primary_sidecar_path(source_path);
-    let persisted_to_primary = crate::file_management::with_sidecar_write_lock(&primary, || {
-        if !primary.exists() {
-            return Ok(false);
-        }
-        let mut metadata = load_sidecar_unlocked(&primary);
-        if metadata.exif.is_none() {
-            metadata.exif = Some(exif_map.clone());
-            save_primary_metadata(source_path, &metadata).map_err(|error| error.to_string())?;
-        }
-        Ok(true)
-    })
-    .unwrap_or(false);
+    let persisted_to_primary = persist_exif_to_primary_if_valid(source_path, &exif_map, true);
     if !persisted_to_primary {
         save_exif_to_rrcache(source_path, exif_map);
     }

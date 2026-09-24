@@ -142,10 +142,21 @@ fn resolve_image_metadata(
     enable_xmp_sync: bool,
     settings: &AppSettings,
 ) -> ImageFileMetadata {
+    resolve_image_metadata_with_hook(image_path, sidecar_path, enable_xmp_sync, settings, || {})
+}
+
+fn resolve_image_metadata_with_hook(
+    image_path: &Path,
+    sidecar_path: &Path,
+    enable_xmp_sync: bool,
+    settings: &AppSettings,
+    after_read: impl FnOnce(),
+) -> ImageFileMetadata {
     let mut metadata = with_sidecar_write_lock(sidecar_path, || {
         let sidecar_exists = sidecar_path.exists();
         let (mut metadata, sidecar_valid) =
             crate::exif_processing::load_sidecar_unlocked_with_status(sidecar_path);
+        after_read();
         let xmp_changed = enable_xmp_sync && sync_metadata_from_xmp(image_path, &mut metadata);
 
         if !sidecar_exists && metadata.rating > 0 && metadata.rating_is_manual == Some(false) {
@@ -2625,9 +2636,28 @@ fn persist_adjustments_to_sidecar(
     lens_db: Option<&crate::lens_correction::LensDatabase>,
     xmp_sync: Option<(bool, bool)>,
 ) -> Result<(), String> {
+    persist_adjustments_to_sidecar_with_hook(
+        sidecar_path,
+        source_path,
+        adjustments,
+        lens_db,
+        xmp_sync,
+        || {},
+    )
+}
+
+fn persist_adjustments_to_sidecar_with_hook(
+    sidecar_path: &Path,
+    source_path: &Path,
+    adjustments: Value,
+    lens_db: Option<&crate::lens_correction::LensDatabase>,
+    xmp_sync: Option<(bool, bool)>,
+    after_read: impl FnOnce(),
+) -> Result<(), String> {
     with_sidecar_write_lock(sidecar_path, || {
         let mut metadata =
             crate::exif_processing::load_sidecar_with_exif_unlocked(sidecar_path, source_path);
+        after_read();
         let mut final_adjustments = adjustments;
         resolve_lens_params_in_adjustments(&mut final_adjustments, &metadata.exif, lens_db);
         metadata.adjustments = final_adjustments;
@@ -4752,26 +4782,36 @@ mod file_management_regression_tests {
         )
         .expect("write initial sidecar");
 
-        let start = Arc::new(std::sync::Barrier::new(3));
-        let autosave_start = Arc::clone(&start);
+        let autosave_read = Arc::new(std::sync::Barrier::new(2));
+        let allow_autosave_write = Arc::new(std::sync::Barrier::new(2));
+        let autosave_read_thread = Arc::clone(&autosave_read);
+        let allow_autosave_write_thread = Arc::clone(&allow_autosave_write);
         let autosave_sidecar = sidecar_path.clone();
         let autosave_source = source_path.clone();
         let autosave = thread::spawn(move || {
-            autosave_start.wait();
-            persist_adjustments_to_sidecar(
+            persist_adjustments_to_sidecar_with_hook(
                 &autosave_sidecar,
                 &autosave_source,
                 serde_json::json!({ "exposure": 0.5 }),
                 None,
                 None,
+                || {
+                    autosave_read_thread.wait();
+                    allow_autosave_write_thread.wait();
+                },
             )
             .expect("persist editor adjustments");
         });
 
-        let manual_start = Arc::clone(&start);
+        autosave_read.wait();
         let manual_sidecar = sidecar_path.clone();
+        let (manual_probe_tx, manual_probe_rx) = std::sync::mpsc::channel();
         let manual = thread::spawn(move || {
-            manual_start.wait();
+            let manual_lock = sidecar_write_lock(&manual_sidecar);
+            let acquired_before_autosave_write = manual_lock.try_lock().is_ok();
+            manual_probe_tx
+                .send(acquired_before_autosave_write)
+                .expect("report manual writer lock probe");
             with_sidecar_write_lock(&manual_sidecar, || {
                 let mut metadata = crate::exif_processing::load_sidecar_unlocked(&manual_sidecar);
                 assert!(apply_rating_update(&mut metadata, 0, true, true));
@@ -4782,10 +4822,14 @@ mod file_management_regression_tests {
             .expect("write manual zero rating");
         });
 
-        start.wait();
+        let manual_acquired_first = manual_probe_rx
+            .recv()
+            .expect("receive manual writer lock probe");
+        allow_autosave_write.wait();
         autosave.join().expect("autosave thread");
         manual.join().expect("manual rating thread");
 
+        assert!(!manual_acquired_first);
         let reloaded = crate::exif_processing::load_sidecar(&sidecar_path);
         assert_eq!(reloaded.rating, 0);
         assert_eq!(reloaded.rating_is_manual, Some(true));
@@ -4813,19 +4857,34 @@ mod file_management_regression_tests {
         )
         .expect("write initial sidecar");
 
-        let start = Arc::new(std::sync::Barrier::new(3));
-        let xmp_start = Arc::clone(&start);
+        let xmp_read = Arc::new(std::sync::Barrier::new(2));
+        let allow_xmp_write = Arc::new(std::sync::Barrier::new(2));
+        let xmp_read_thread = Arc::clone(&xmp_read);
+        let allow_xmp_write_thread = Arc::clone(&allow_xmp_write);
         let xmp_image = image_path.clone();
         let xmp_sidecar = sidecar_path.clone();
         let xmp_loader = thread::spawn(move || {
-            xmp_start.wait();
-            resolve_image_metadata(&xmp_image, &xmp_sidecar, true, &AppSettings::default());
+            resolve_image_metadata_with_hook(
+                &xmp_image,
+                &xmp_sidecar,
+                true,
+                &AppSettings::default(),
+                || {
+                    xmp_read_thread.wait();
+                    allow_xmp_write_thread.wait();
+                },
+            );
         });
 
-        let manual_start = Arc::clone(&start);
+        xmp_read.wait();
         let manual_sidecar = sidecar_path.clone();
+        let (manual_probe_tx, manual_probe_rx) = std::sync::mpsc::channel();
         let manual_writer = thread::spawn(move || {
-            manual_start.wait();
+            let manual_lock = sidecar_write_lock(&manual_sidecar);
+            let acquired_before_xmp_write = manual_lock.try_lock().is_ok();
+            manual_probe_tx
+                .send(acquired_before_xmp_write)
+                .expect("report manual writer lock probe");
             with_sidecar_write_lock(&manual_sidecar, || {
                 let mut metadata = crate::exif_processing::load_sidecar_unlocked(&manual_sidecar);
                 assert!(apply_rating_update(&mut metadata, 0, true, true));
@@ -4836,10 +4895,14 @@ mod file_management_regression_tests {
             .expect("write manual zero rating");
         });
 
-        start.wait();
+        let manual_acquired_first = manual_probe_rx
+            .recv()
+            .expect("receive manual writer lock probe");
+        allow_xmp_write.wait();
         xmp_loader.join().expect("XMP loader thread");
         manual_writer.join().expect("manual rating thread");
 
+        assert!(!manual_acquired_first);
         let reloaded = crate::exif_processing::load_sidecar(&sidecar_path);
         assert_eq!(reloaded.rating, 0);
         assert_eq!(reloaded.rating_is_manual, Some(true));
@@ -4868,6 +4931,24 @@ mod file_management_regression_tests {
         })
         .expect("check automatic culling updates");
 
+        let persisted = fs::read(&sidecar_path).expect("read malformed sidecar");
+        assert_eq!(persisted.as_slice(), original.as_slice());
+    }
+
+    #[test]
+    fn exif_persistence_leaves_a_malformed_sidecar_untouched() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let image_path = directory.path().join("image.jpg");
+        let sidecar_path = crate::exif_processing::get_primary_sidecar_path(&image_path);
+        let original = b"{ malformed sidecar";
+        fs::write(&sidecar_path, original).expect("write malformed sidecar");
+        let exif_map = HashMap::from([("Make".to_owned(), "Synthetic".to_owned())]);
+
+        assert!(!crate::exif_processing::persist_exif_to_primary_if_valid(
+            &image_path,
+            &exif_map,
+            false,
+        ));
         let persisted = fs::read(&sidecar_path).expect("read malformed sidecar");
         assert_eq!(persisted.as_slice(), original.as_slice());
     }
