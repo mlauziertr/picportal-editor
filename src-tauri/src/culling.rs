@@ -658,14 +658,31 @@ fn connected_components(
     components
 }
 
+fn has_evaluated_open_eyes(result: &ImageAnalysisResult, settings: &CullingSettings) -> bool {
+    settings.detect_closed_eyes
+        && result.eye_state == "open"
+        && !matches!(result.eye_method.as_str(), "unavailable" | "disabled")
+}
+
 fn compare_group_candidates(
     left: &ImageAnalysisResult,
     right: &ImageAnalysisResult,
+    settings: &CullingSettings,
 ) -> std::cmp::Ordering {
-    right
-        .quality_score
-        .total_cmp(&left.quality_score)
+    has_evaluated_open_eyes(right, settings)
+        .cmp(&has_evaluated_open_eyes(left, settings))
+        .then_with(|| right.quality_score.total_cmp(&left.quality_score))
         .then_with(|| left.path.cmp(&right.path))
+}
+
+fn is_selection_candidate(
+    result: &ImageAnalysisResult,
+    settings: &CullingSettings,
+    is_duplicate: bool,
+) -> bool {
+    !is_duplicate
+        && !is_blurry(result, settings)
+        && !(settings.detect_closed_eyes && result.eye_state == "closed")
 }
 
 fn category_rating(category: &str) -> u8 {
@@ -742,12 +759,12 @@ fn culling_category(
         "blurred"
     } else if settings.detect_duplicates && is_duplicate {
         "duplicate"
-    } else if has_unknown_eye_signal(result, settings) {
-        "unrated"
     } else if is_selected {
         "selected"
     } else if is_highlight {
         "highlights"
+    } else if has_unknown_eye_signal(result, settings) {
+        "unrated"
     } else {
         "unrated"
     }
@@ -948,7 +965,11 @@ pub async fn cull_images(
         }) {
             if group_indices.len() > 1 {
                 group_indices.sort_by(|left, right| {
-                    compare_group_candidates(&successful[*left].result, &successful[*right].result)
+                    compare_group_candidates(
+                        &successful[*left].result,
+                        &successful[*right].result,
+                        &settings,
+                    )
                 });
                 for index in group_indices.iter().skip(1) {
                     duplicate_paths.insert(successful[*index].result.path.clone());
@@ -962,15 +983,20 @@ pub async fn cull_images(
         .iter()
         .enumerate()
         .filter(|(_, data)| {
-            !duplicate_paths.contains(&data.result.path)
-                && !is_blurry(&data.result, &settings)
-                && !(settings.detect_closed_eyes && data.result.eye_state == "closed")
-                && !has_unknown_eye_signal(&data.result, &settings)
+            is_selection_candidate(
+                &data.result,
+                &settings,
+                duplicate_paths.contains(&data.result.path),
+            )
         })
         .map(|(index, _)| index)
         .collect();
     ranked_clean_indices.sort_by(|left, right| {
-        compare_group_candidates(&successful[*left].result, &successful[*right].result)
+        compare_group_candidates(
+            &successful[*left].result,
+            &successful[*right].result,
+            &settings,
+        )
     });
     let selected_count = selected_limit(ranked_clean_indices.len(), &settings.selection_amount);
     let selected_paths: HashSet<String> = ranked_clean_indices
@@ -1208,8 +1234,9 @@ mod tests {
         let mut forward = [&first, &second];
         let mut reversed = [&second, &first];
 
-        forward.sort_by(|left, right| compare_group_candidates(left, right));
-        reversed.sort_by(|left, right| compare_group_candidates(left, right));
+        let settings = CullingSettings::default();
+        forward.sort_by(|left, right| compare_group_candidates(left, right, &settings));
+        reversed.sort_by(|left, right| compare_group_candidates(left, right, &settings));
 
         assert_eq!(forward[0].path, "a.jpg");
         assert_eq!(reversed[0].path, "a.jpg");
@@ -1284,8 +1311,42 @@ mod tests {
 
         assert_eq!(
             category_and_rating(&result, &settings, false, true, false),
-            ("unrated", 0)
+            ("selected", 5)
         );
+        assert!(is_selection_candidate(&result, &settings, false));
+        assert_eq!(
+            detector_reasons(&result, &settings, false),
+            vec!["eyesUnknown"]
+        );
+    }
+
+    #[test]
+    fn open_eye_evaluation_precedes_quality_without_rejecting_unknown_eyes() {
+        let settings = eye_settings(true);
+        let open = ImageAnalysisResult {
+            eye_state: "open".to_owned(),
+            eye_method: "local-heuristic".to_owned(),
+            ..analysis_result("open.jpg", 0.4)
+        };
+        let unknown = ImageAnalysisResult {
+            eye_state: "unknown".to_owned(),
+            eye_method: "unavailable".to_owned(),
+            ..analysis_result("unknown.jpg", 0.99)
+        };
+
+        assert_eq!(
+            compare_group_candidates(&open, &unknown, &settings),
+            std::cmp::Ordering::Less
+        );
+        assert!(is_selection_candidate(&unknown, &settings, false));
+        assert!(!is_selection_candidate(
+            &ImageAnalysisResult {
+                eye_state: "closed".to_owned(),
+                ..analysis_result("closed.jpg", 1.0)
+            },
+            &settings,
+            false,
+        ));
     }
 
     #[test]
