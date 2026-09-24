@@ -24,7 +24,6 @@ pub struct CullingSettings {
     pub detect_subject: bool,
     pub subject_profile: String,
     pub auto_assign_stars: bool,
-    pub preserve_existing_decisions: bool,
 }
 
 impl Default for CullingSettings {
@@ -39,7 +38,6 @@ impl Default for CullingSettings {
             detect_subject: true,
             subject_profile: "general".to_owned(),
             auto_assign_stars: true,
-            preserve_existing_decisions: true,
         }
     }
 }
@@ -766,8 +764,6 @@ fn culling_category(
         "selected"
     } else if is_highlight {
         "highlights"
-    } else if has_unknown_eye_signal(result, settings) {
-        "unrated"
     } else {
         "unrated"
     }
@@ -1302,6 +1298,23 @@ mod tests {
                 method: "local-heuristic"
             }]),
             "unknown"
+        );
+    }
+
+    #[test]
+    fn unknown_eye_signal_keeps_the_unrated_category_and_reason() {
+        let settings = eye_settings(true);
+        let mut result = analysis_result("unknown.jpg", 0.75);
+        result.eye_state = "unknown".to_owned();
+        result.eye_method = "unavailable".to_owned();
+
+        assert_eq!(
+            category_and_rating(&result, &settings, false, false, false),
+            ("unrated", 0)
+        );
+        assert_eq!(
+            detector_reasons(&result, &settings, false),
+            vec!["eyesUnknown"]
         );
     }
 

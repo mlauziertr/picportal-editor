@@ -417,7 +417,7 @@ fn capture_response_cookies(response: &reqwest::Response, cookies: &CookieStore)
 
 fn secure_storage_error(error: impl std::fmt::Display) -> String {
     format!(
-        "Secure PicPortal session storage is unavailable: {error}. The current connection can be used until shutdown; reconnect next launch or enable the operating system credential store."
+        "Secure PicPortal session storage is unavailable: {error}. Enable the operating system credential store and try again."
     )
 }
 
@@ -438,19 +438,23 @@ fn load_stored_session() -> Result<Option<StoredSession>, String> {
     Err("Secure PicPortal session storage is not supported on this platform. Connect for the current session; use a desktop build with the operating system credential store for restart persistence.".to_owned())
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-fn store_stored_session(session: &PicPortalSession) -> Result<(), String> {
+fn stored_session_data(session: &PicPortalSession) -> Result<StoredSession, String> {
     let cookies = session
         .cookies
         .lock()
         .map_err(|_| "PicPortal cookie state is poisoned".to_owned())?
         .clone();
-    let stored = StoredSession {
+    Ok(StoredSession {
         base_url: session.base_url.clone(),
         account_id: session.account_id.clone(),
         admin: session.admin.clone(),
         cookies,
-    };
+    })
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+fn store_stored_session(session: &PicPortalSession) -> Result<(), String> {
+    let stored = stored_session_data(session)?;
     let secret = serde_json::to_string(&stored)
         .map_err(|error| format!("cannot serialize secure PicPortal session: {error}"))?;
     let entry = Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(secure_storage_error)?;
@@ -581,6 +585,21 @@ async fn refresh_native_session(session: &PicPortalSession) -> bool {
     response.status().is_success()
 }
 
+fn persist_login_session(
+    current_session: &mut Option<PicPortalSession>,
+    mut next_session: PicPortalSession,
+    persist: impl FnOnce(&PicPortalSession) -> Result<(), String>,
+) -> Result<PicPortalSession, String> {
+    persist(&next_session).map_err(|error| {
+        format!(
+            "PicPortal login was not completed because secure session storage could not be updated: {error}"
+        )
+    })?;
+    next_session.persistent = true;
+    *current_session = Some(next_session.clone());
+    Ok(next_session)
+}
+
 fn admin_identity(
     me: MeResponse,
     fallback: &AdminIdentity,
@@ -648,26 +667,22 @@ pub async fn picportal_login(
             name: login.admin.name.unwrap_or_else(|| email.trim().to_owned()),
         },
     )?;
-    let mut session = PicPortalSession {
+    let session = PicPortalSession {
         account_id,
         admin,
         ..provisional
     };
     let galleries = session.galleries().await?;
-    let (persistent, message) = match store_stored_session(&session) {
-        Ok(()) => (true, None),
-        Err(error) => (false, Some(error)),
-    };
-    session.persistent = persistent;
-    *state
+    let mut current_session = state
         .session
         .lock()
-        .map_err(|_| "PicPortal session lock is poisoned".to_owned())? = Some(session.clone());
+        .map_err(|_| "PicPortal session lock is poisoned".to_owned())?;
+    let session = persist_login_session(&mut current_session, session, store_stored_session)?;
     Ok(PicPortalLoginResult {
         admin: session.admin,
         galleries,
-        persistent,
-        message,
+        persistent: true,
+        message: None,
     })
 }
 
@@ -2201,18 +2216,75 @@ mod tests {
         }
     }
 
-    fn synthetic_session() -> PicPortalSession {
+    fn synthetic_session_for(account_id: &str) -> PicPortalSession {
         PicPortalSession {
             client: Client::new(),
             base_url: PRODUCTION_API_BASE_URL.to_owned(),
-            account_id: "synthetic-account".to_owned(),
+            account_id: account_id.to_owned(),
             admin: AdminIdentity {
-                email: "editor@example.test".to_owned(),
-                name: "Editor".to_owned(),
+                email: format!("{account_id}@example.test"),
+                name: account_id.to_owned(),
             },
             cookies: Arc::new(Mutex::new(Vec::new())),
             persistent: false,
         }
+    }
+
+    fn synthetic_session() -> PicPortalSession {
+        synthetic_session_for("synthetic-account")
+    }
+
+    #[test]
+    fn failed_secure_replacement_keeps_the_previous_session_for_restart() {
+        let previous = synthetic_session_for("account-a");
+        let mut active = Some(previous.clone());
+        let stored = stored_session_data(&previous).expect("stored account A");
+
+        let result = persist_login_session(
+            &mut active,
+            synthetic_session_for("account-b"),
+            |session| {
+                assert_eq!(session.account_id, "account-b");
+                Err("synthetic secure storage failure".to_owned())
+            },
+        );
+        let error = match result {
+            Ok(_) => panic!("login must fail when credential replacement fails"),
+            Err(error) => error,
+        };
+        assert!(error.contains("login was not completed"));
+        assert!(error.contains("synthetic secure storage failure"));
+        assert_eq!(
+            active.as_ref().map(|session| session.account_id.as_str()),
+            Some("account-a")
+        );
+
+        let serialized = serde_json::to_string(&stored).expect("serialize prior credential");
+        let restored: StoredSession =
+            serde_json::from_str(&serialized).expect("restore prior credential");
+        assert_eq!(restored.account_id, "account-a");
+    }
+
+    #[test]
+    fn successful_secure_replacement_commits_the_new_session() {
+        let previous = synthetic_session_for("account-a");
+        let mut active = Some(previous.clone());
+        let mut stored = stored_session_data(&previous).expect("stored account A");
+
+        let committed =
+            persist_login_session(&mut active, synthetic_session_for("account-b"), |session| {
+                stored = stored_session_data(session)?;
+                Ok(())
+            })
+            .expect("commit account B");
+
+        assert_eq!(committed.account_id, "account-b");
+        assert!(committed.persistent);
+        assert_eq!(
+            active.as_ref().map(|session| session.account_id.as_str()),
+            Some("account-b")
+        );
+        assert_eq!(stored.account_id, "account-b");
     }
 
     #[test]
