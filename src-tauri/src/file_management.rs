@@ -8,8 +8,8 @@ use std::hash::{Hash, Hasher};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread;
 
 use anyhow::Result;
@@ -88,6 +88,30 @@ struct ImageFileMetadata {
     rating_is_manual: Option<bool>,
     color_label_is_manual: Option<bool>,
     is_raw: bool,
+}
+
+static SIDECAR_WRITE_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
+
+fn sidecar_write_lock(sidecar_path: &Path) -> Arc<Mutex<()>> {
+    let locks = SIDECAR_WRITE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut locks = locks.lock().unwrap_or_else(|error| error.into_inner());
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(sidecar_path).and_then(Weak::upgrade) {
+        return lock;
+    }
+
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(sidecar_path.to_path_buf(), Arc::downgrade(&lock));
+    lock
+}
+
+fn with_sidecar_write_lock<T>(
+    sidecar_path: &Path,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let lock = sidecar_write_lock(sidecar_path);
+    let _guard = lock.lock().unwrap_or_else(|error| error.into_inner());
+    operation()
 }
 
 fn should_preserve_rating_from_automatic_update(
@@ -3077,27 +3101,28 @@ pub fn set_color_label_for_paths(
     paths
         .par_iter()
         .try_for_each(|path| -> Result<(), String> {
-            let (_, sidecar_path) = parse_virtual_path(path);
+            let (source_path, sidecar_path) = parse_virtual_path(path);
 
-            let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
+            with_sidecar_write_lock(&sidecar_path, || {
+                let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
 
-            if !color_label_is_manual && metadata.color_label_is_manual != Some(false) {
-                return Err(format!(
-                    "cannot overwrite a manual or unclassified color label for {path} during automatic culling"
-                ));
-            }
-            apply_color_label_update(&mut metadata, color.as_deref(), color_label_is_manual);
+                if !color_label_is_manual && metadata.color_label_is_manual != Some(false) {
+                    return Err(format!(
+                        "cannot overwrite a manual or unclassified color label for {path} during automatic culling"
+                    ));
+                }
+                apply_color_label_update(&mut metadata, color.as_deref(), color_label_is_manual);
 
-            let json_string = serde_json::to_string_pretty(&metadata)
-                .map_err(|error| format!("cannot serialize metadata for {path}: {error}"))?;
-            std::fs::write(&sidecar_path, json_string)
-                .map_err(|error| format!("cannot persist color label for {path}: {error}"))?;
+                let json_string = serde_json::to_string_pretty(&metadata)
+                    .map_err(|error| format!("cannot serialize metadata for {path}: {error}"))?;
+                std::fs::write(&sidecar_path, json_string)
+                    .map_err(|error| format!("cannot persist color label for {path}: {error}"))?;
 
-            if enable_xmp_sync {
-                let source_path = parse_virtual_path(path).0;
-                sync_metadata_to_xmp(&source_path, &metadata, create_xmp_if_missing);
-            }
-            Ok(())
+                if enable_xmp_sync {
+                    sync_metadata_to_xmp(&source_path, &metadata, create_xmp_if_missing);
+                }
+                Ok(())
+            })
         })?;
 
     Ok(())
@@ -3117,26 +3142,28 @@ pub fn set_rating_for_paths(
     paths
         .par_iter()
         .try_for_each(|path| -> Result<(), String> {
-            let (_, sidecar_path) = parse_virtual_path(path);
-            let sidecar_exists = sidecar_path.exists();
-            let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
+            let (source_path, sidecar_path) = parse_virtual_path(path);
 
-            if !apply_rating_update(&mut metadata, rating, rating_is_manual, sidecar_exists) {
-                return Err(format!(
-                    "cannot overwrite a manual or unclassified rating for {path} during automatic culling"
-                ));
-            }
+            with_sidecar_write_lock(&sidecar_path, || {
+                let sidecar_exists = sidecar_path.exists();
+                let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
 
-            let json_string = serde_json::to_string_pretty(&metadata)
-                .map_err(|error| format!("cannot serialize metadata for {path}: {error}"))?;
-            std::fs::write(&sidecar_path, json_string)
-                .map_err(|error| format!("cannot persist rating for {path}: {error}"))?;
+                if !apply_rating_update(&mut metadata, rating, rating_is_manual, sidecar_exists) {
+                    return Err(format!(
+                        "cannot overwrite a manual or unclassified rating for {path} during automatic culling"
+                    ));
+                }
 
-            if enable_xmp_sync {
-                let source_path = parse_virtual_path(path).0;
-                sync_metadata_to_xmp(&source_path, &metadata, create_xmp_if_missing);
-            }
-            Ok(())
+                let json_string = serde_json::to_string_pretty(&metadata)
+                    .map_err(|error| format!("cannot serialize metadata for {path}: {error}"))?;
+                std::fs::write(&sidecar_path, json_string)
+                    .map_err(|error| format!("cannot persist rating for {path}: {error}"))?;
+
+                if enable_xmp_sync {
+                    sync_metadata_to_xmp(&source_path, &metadata, create_xmp_if_missing);
+                }
+                Ok(())
+            })
         })?;
 
     Ok(())
@@ -4264,10 +4291,17 @@ pub fn sync_metadata_from_xmp(source_path: &Path, metadata: &mut ImageMetadata) 
         let original_color_label_is_manual = metadata.color_label_is_manual;
 
         for tag in xmp_tags {
-            if metadata.color_label_is_manual == Some(true)
-                && tag.starts_with(COLOR_TAG_PREFIX)
-            {
-                continue;
+            if tag.starts_with(COLOR_TAG_PREFIX) {
+                if metadata.color_label_is_manual == Some(true) {
+                    continue;
+                }
+                if current_tags
+                    .iter()
+                    .any(|current| current.starts_with(COLOR_TAG_PREFIX) && current != &tag)
+                {
+                    current_tags.retain(|current| !current.starts_with(COLOR_TAG_PREFIX));
+                    metadata.color_label_is_manual = None;
+                }
             }
             if !current_tags.contains(&tag) {
                 if tag.starts_with(COLOR_TAG_PREFIX) {
@@ -4564,6 +4598,73 @@ mod file_management_regression_tests {
     }
 
     #[test]
+    fn culling_rating_update_serializes_against_a_manual_write() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let sidecar_path = directory.path().join("image.jpg.rrdata");
+        let initial = ImageMetadata {
+            rating: 2,
+            rating_is_manual: Some(false),
+            ..ImageMetadata::default()
+        };
+        fs::write(
+            &sidecar_path,
+            serde_json::to_vec(&initial).expect("serialize automatic rating"),
+        )
+        .expect("write initial sidecar");
+
+        let lock = sidecar_write_lock(&sidecar_path);
+        let culling_read = Arc::new(std::sync::Barrier::new(2));
+        let allow_culling_write = Arc::new(std::sync::Barrier::new(2));
+        let culling_path = sidecar_path.clone();
+        let culling_read_thread = Arc::clone(&culling_read);
+        let allow_culling_write_thread = Arc::clone(&allow_culling_write);
+        let culling = thread::spawn(move || {
+            with_sidecar_write_lock(&culling_path, || {
+                let mut metadata = crate::exif_processing::load_sidecar(&culling_path);
+                culling_read_thread.wait();
+                allow_culling_write_thread.wait();
+                assert!(apply_rating_update(&mut metadata, 5, false, true));
+                let json = serde_json::to_vec(&metadata).expect("serialize culling rating");
+                fs::write(&culling_path, json).expect("persist culling rating");
+                Ok(())
+            })
+            .expect("write culling rating");
+        });
+
+        culling_read.wait();
+        assert!(lock.try_lock().is_err());
+
+        let manual_path = sidecar_path.clone();
+        let (manual_waiting_tx, manual_waiting_rx) = std::sync::mpsc::channel();
+        let manual = thread::spawn(move || {
+            let manual_lock = sidecar_write_lock(&manual_path);
+            assert!(manual_lock.try_lock().is_err());
+            manual_waiting_tx
+                .send(())
+                .expect("signal blocked manual writer");
+            with_sidecar_write_lock(&manual_path, || {
+                let mut metadata = crate::exif_processing::load_sidecar(&manual_path);
+                assert!(apply_rating_update(&mut metadata, 0, true, true));
+                let json = serde_json::to_vec(&metadata).expect("serialize manual zero rating");
+                fs::write(&manual_path, json).expect("persist manual zero rating");
+                Ok(())
+            })
+            .expect("write manual zero rating");
+        });
+
+        manual_waiting_rx
+            .recv()
+            .expect("manual writer waits behind culling");
+        allow_culling_write.wait();
+        culling.join().expect("culling writer thread");
+        manual.join().expect("manual writer thread");
+
+        let reloaded = crate::exif_processing::load_sidecar(&sidecar_path);
+        assert_eq!(reloaded.rating, 0);
+        assert_eq!(reloaded.rating_is_manual, Some(true));
+    }
+
+    #[test]
     fn manual_color_clear_survives_reload_and_stale_xmp_label() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let image_path = directory.path().join("image.jpg");
@@ -4631,6 +4732,45 @@ mod file_management_regression_tests {
         .expect("write sidecar");
         fs::write(image_path.with_extension("xmp"), "<xmp:Label>Red</xmp:Label>")
             .expect("write synthetic XMP");
+
+        let loaded = resolve_image_metadata(
+            &image_path,
+            &sidecar_path,
+            true,
+            &AppSettings::default(),
+        );
+        let reloaded = crate::exif_processing::load_sidecar(&sidecar_path);
+
+        assert_eq!(loaded.tags, Some(vec!["color:red".to_owned()]));
+        assert_eq!(loaded.color_label_is_manual, None);
+        assert_eq!(reloaded.tags, Some(vec!["color:red".to_owned()]));
+        assert_eq!(reloaded.color_label_is_manual, None);
+    }
+
+    #[test]
+    fn xmp_subject_replaces_an_existing_automatic_color_label() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let image_path = directory.path().join("image.jpg");
+        let sidecar_path = directory.path().join("image.jpg.rrdata");
+        let metadata = ImageMetadata {
+            tags: Some(vec!["color:green".to_owned()]),
+            color_label_is_manual: Some(false),
+            ..ImageMetadata::default()
+        };
+        fs::write(
+            &sidecar_path,
+            serde_json::to_vec(&metadata).expect("serialize automatic label"),
+        )
+        .expect("write sidecar");
+        fs::write(
+            image_path.with_extension("xmp"),
+            concat!(
+                "<dc:subject><rdf:Bag>",
+                "<rdf:li>color:red</rdf:li>",
+                "</rdf:Bag></dc:subject>"
+            ),
+        )
+        .expect("write synthetic XMP subject");
 
         let loaded = resolve_image_metadata(
             &image_path,

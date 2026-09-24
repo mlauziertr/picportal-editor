@@ -19,6 +19,7 @@ import { computeSortedLibrary } from './useSortedLibrary';
 import { expandGroupedPaths } from '../utils/imageGrouping';
 import { stripVirtualCopySuffix } from '../utils/virtualCopyPath';
 import {
+  filterCullingAssignmentsForCurrentImages,
   getCullingProtectedPaths,
   persistColorAssignments,
   persistRatingAssignments,
@@ -85,27 +86,41 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
       );
 
       if (Object.keys(ratingResult.succeeded).length > 0 || Object.keys(colorResult.succeeded).length > 0) {
-        setLibrary((state) => ({
-          imageRatings: { ...state.imageRatings, ...ratingResult.succeeded },
-          imageList: state.imageList.map((image) => {
-            const rating = ratingResult.succeeded[image.path];
-            const hasRatingUpdate = rating !== undefined;
-            const hasColorUpdate = colorResult.succeeded[image.path] !== undefined;
-            if (!hasRatingUpdate && !hasColorUpdate) return image;
-            const color = colorResult.succeeded[image.path];
-            const otherTags = (image.tags || []).filter((tag) => !tag.startsWith('color:'));
-            return {
-              ...image,
-              ...(hasRatingUpdate ? { rating, rating_is_manual: false } : {}),
-              ...(hasColorUpdate
-                ? {
-                    tags: color ? [...otherTags, `color:${color}`] : otherTags.length > 0 ? otherTags : null,
-                    color_label_is_manual: false,
-                  }
-                : {}),
-            };
-          }),
-        }));
+        setLibrary((state) => {
+          const currentAssignments = filterCullingAssignmentsForCurrentImages(
+            state.imageList,
+            ratingResult.succeeded,
+            colorResult.succeeded,
+          );
+          if (
+            Object.keys(currentAssignments.ratings).length === 0 &&
+            Object.keys(currentAssignments.colors).length === 0
+          ) {
+            return state;
+          }
+
+          return {
+            imageRatings: { ...state.imageRatings, ...currentAssignments.ratings },
+            imageList: state.imageList.map((image) => {
+              const rating = currentAssignments.ratings[image.path];
+              const hasRatingUpdate = rating !== undefined;
+              const hasColorUpdate = currentAssignments.colors[image.path] !== undefined;
+              if (!hasRatingUpdate && !hasColorUpdate) return image;
+              const color = currentAssignments.colors[image.path];
+              const otherTags = (image.tags || []).filter((tag) => !tag.startsWith('color:'));
+              return {
+                ...image,
+                ...(hasRatingUpdate ? { rating, rating_is_manual: false } : {}),
+                ...(hasColorUpdate
+                  ? {
+                      tags: color ? [...otherTags, `color:${color}`] : otherTags.length > 0 ? otherTags : null,
+                      color_label_is_manual: false,
+                    }
+                  : {}),
+              };
+            }),
+          };
+        });
       }
 
       return {

@@ -30,6 +30,33 @@ export function getCullingProtectedPaths(
   };
 }
 
+export function filterCullingAssignmentsForCurrentImages(
+  images: readonly {
+    path: string;
+    rating_is_manual: boolean | null | undefined;
+    color_label_is_manual?: boolean | null;
+  }[],
+  ratings: Record<string, number>,
+  colors: Record<string, string | null>,
+): { ratings: Record<string, number>; colors: Record<string, string | null> } {
+  const imagesByPath = new Map<string, (typeof images)[number]>();
+  images.forEach((image) => imagesByPath.set(image.path, image));
+
+  const currentRatings: Record<string, number> = {};
+  Object.entries(ratings).forEach(([path, rating]) => {
+    const image = imagesByPath.get(path);
+    if (image && image.rating_is_manual !== true) currentRatings[path] = rating;
+  });
+
+  const currentColors: Record<string, string | null> = {};
+  Object.entries(colors).forEach(([path, color]) => {
+    const image = imagesByPath.get(path);
+    if (image && image.color_label_is_manual !== true) currentColors[path] = color;
+  });
+
+  return { ratings: currentRatings, colors: currentColors };
+}
+
 export function mergeLoadedRating(
   currentRating: number | undefined,
   currentIsManual: boolean | null | undefined,

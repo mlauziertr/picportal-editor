@@ -1734,14 +1734,22 @@ pub async fn estimate_export_sizes(
             unscaled_crop_offset.1 * scale,
         );
 
-        let mask_source_image = composite_patches_on_image(&loaded_image.image, &adjustments_clone)
-            .map_err(|error| format!("Failed to composite estimate mask patches: {error}"))?;
-        let warped_mask_source = export_mask_source(
-            &mask_source_image,
-            &adjustments_clone,
-            loaded_image.is_raw,
-            &mask_definitions,
-        );
+        let warped_mask_source = if mask_definitions
+            .iter()
+            .any(MaskDefinition::requires_warped_image)
+        {
+            let mask_source_image =
+                composite_patches_on_image(&loaded_image.image, &adjustments_clone)
+                    .map_err(|error| format!("Failed to composite estimate mask patches: {error}"))?;
+            export_mask_source(
+                &mask_source_image,
+                &adjustments_clone,
+                loaded_image.is_raw,
+                &mask_definitions,
+            )
+        } else {
+            None
+        };
         let mask_bitmaps: Vec<ImageBuffer<Luma<u8>, Vec<u8>>> = mask_definitions
             .iter()
             .filter_map(|def| {
@@ -1881,10 +1889,16 @@ pub async fn estimate_export_sizes(
             unscaled_crop_offset.1 * gpu_scale,
         );
 
-        let mask_source_image = composite_patches_on_image(&original_image, &js_adjustments)
-            .map_err(|error| format!("Failed to composite estimate mask patches: {error}"))?;
-        let warped_mask_source =
-            export_mask_source(&mask_source_image, &js_adjustments, is_raw, &mask_definitions);
+        let warped_mask_source = if mask_definitions
+            .iter()
+            .any(MaskDefinition::requires_warped_image)
+        {
+            let mask_source_image = composite_patches_on_image(&original_image, &js_adjustments)
+                .map_err(|error| format!("Failed to composite estimate mask patches: {error}"))?;
+            export_mask_source(&mask_source_image, &js_adjustments, is_raw, &mask_definitions)
+        } else {
+            None
+        };
         let mask_bitmaps: Vec<ImageBuffer<Luma<u8>, Vec<u8>>> = mask_definitions
             .iter()
             .filter_map(|def| {

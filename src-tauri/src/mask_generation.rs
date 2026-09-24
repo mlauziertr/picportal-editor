@@ -61,9 +61,11 @@ pub struct MaskDefinition {
 
 impl MaskDefinition {
     pub fn requires_warped_image(&self) -> bool {
-        self.sub_masks
-            .iter()
-            .any(|sm| sm.mask_type == "color" || sm.mask_type == "luminance")
+        self.visible
+            && self.sub_masks.iter().any(|sub_mask| {
+                sub_mask.visible
+                    && (sub_mask.mask_type == "color" || sub_mask.mask_type == "luminance")
+            })
     }
 }
 

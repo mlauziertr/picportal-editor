@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  filterCullingAssignmentsForCurrentImages,
   getCullingProtectedPaths,
   isRatingProtectedFromCulling,
   mergeLoadedColorLabel,
@@ -15,6 +16,23 @@ test('culling preserves manual, unknown, and explicit zero provenance', () => {
   assert.equal(isRatingProtectedFromCulling(null), true);
   assert.equal(isRatingProtectedFromCulling(undefined), true);
   assert.equal(isRatingProtectedFromCulling(false), false);
+});
+
+test('late culling results preserve current manual rating and color decisions', () => {
+  const updates = filterCullingAssignmentsForCurrentImages(
+    [
+      { path: 'manual-zero.jpg', rating_is_manual: true, color_label_is_manual: false },
+      { path: 'manual-clear.jpg', rating_is_manual: false, color_label_is_manual: true },
+      { path: 'automatic.jpg', rating_is_manual: false, color_label_is_manual: false },
+    ],
+    { 'manual-zero.jpg': 5, 'automatic.jpg': 2 },
+    { 'manual-clear.jpg': 'green', 'automatic.jpg': 'blue' },
+  );
+
+  assert.deepEqual(updates, {
+    ratings: { 'automatic.jpg': 2 },
+    colors: { 'automatic.jpg': 'blue' },
+  });
 });
 
 test('automatic color labels do not block automatic rating revisions', () => {
