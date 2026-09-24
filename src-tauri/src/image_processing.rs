@@ -85,6 +85,14 @@ impl ImageMetadata {
             ..Self::default()
         }
     }
+
+    pub fn default_with_unknown_provenance() -> Self {
+        Self {
+            rating_is_manual: None,
+            color_label_is_manual: None,
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]

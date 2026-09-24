@@ -105,7 +105,7 @@ fn sidecar_write_lock(sidecar_path: &Path) -> Arc<Mutex<()>> {
     lock
 }
 
-fn with_sidecar_write_lock<T>(
+pub(crate) fn with_sidecar_write_lock<T>(
     sidecar_path: &Path,
     operation: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
@@ -142,18 +142,25 @@ fn resolve_image_metadata(
     enable_xmp_sync: bool,
     settings: &AppSettings,
 ) -> ImageFileMetadata {
-    let sidecar_exists = sidecar_path.exists();
-    let mut metadata = crate::exif_processing::load_sidecar(sidecar_path);
+    let mut metadata = with_sidecar_write_lock(sidecar_path, || {
+        let sidecar_exists = sidecar_path.exists();
+        let (mut metadata, sidecar_valid) =
+            crate::exif_processing::load_sidecar_unlocked_with_status(sidecar_path);
+        let xmp_changed = enable_xmp_sync && sync_metadata_from_xmp(image_path, &mut metadata);
 
-    let xmp_changed = enable_xmp_sync && sync_metadata_from_xmp(image_path, &mut metadata);
+        if !sidecar_exists && metadata.rating > 0 && metadata.rating_is_manual == Some(false) {
+            metadata.rating_is_manual = None;
+        }
 
-    if !sidecar_exists && metadata.rating > 0 && metadata.rating_is_manual == Some(false) {
-        metadata.rating_is_manual = None;
-    }
-
-    if xmp_changed && let Ok(json) = serde_json::to_string_pretty(&metadata) {
-        let _ = fs::write(sidecar_path, json);
-    }
+        if xmp_changed
+            && sidecar_valid
+            && let Ok(json) = serde_json::to_string_pretty(&metadata)
+        {
+            let _ = fs::write(sidecar_path, json);
+        }
+        Ok(metadata)
+    })
+    .unwrap_or_else(|_| ImageMetadata::default_with_unknown_provenance());
 
     let is_raw = crate::formats::is_raw_file(image_path);
     let tm_override = crate::image_processing::resolve_tonemapper_override(settings, is_raw);
@@ -549,37 +556,40 @@ pub async fn update_exif_fields(
 ) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         paths.par_iter().for_each(|path| {
-            let original_path = Path::new(&path);
+            let original_path = Path::new(path);
             let primary_path = crate::exif_processing::get_primary_sidecar_path(original_path);
-            let temp_metadata = crate::exif_processing::load_sidecar(&primary_path);
 
-            let mut exif_data = temp_metadata.exif.unwrap_or_else(|| {
-                if let Some(existing) = crate::exif_processing::read_rrexif_sidecar(original_path) {
-                    existing
-                } else if let Ok(mmap) = read_file_mapped(original_path) {
-                    crate::exif_processing::read_exif_data_from_bytes(path, &mmap)
-                } else if let Ok(bytes) = fs::read(original_path) {
-                    crate::exif_processing::read_exif_data_from_bytes(path, &bytes)
-                } else {
-                    HashMap::new()
+            let _ = with_sidecar_write_lock(&primary_path, || {
+                let mut metadata = crate::exif_processing::load_sidecar_unlocked(&primary_path);
+                let mut exif_data = metadata.exif.take().unwrap_or_else(|| {
+                    if let Some(existing) =
+                        crate::exif_processing::read_rrexif_sidecar_fallback(original_path)
+                    {
+                        existing
+                    } else if let Ok(mmap) = read_file_mapped(original_path) {
+                        crate::exif_processing::read_exif_data_from_bytes(path, &mmap)
+                    } else if let Ok(bytes) = fs::read(original_path) {
+                        crate::exif_processing::read_exif_data_from_bytes(path, &bytes)
+                    } else {
+                        HashMap::new()
+                    }
+                });
+
+                for (k, v) in &updates {
+                    let trimmed = v.trim();
+                    if trimmed.is_empty() {
+                        exif_data.remove(k);
+                    } else {
+                        exif_data.insert(k.clone(), trimmed.to_string());
+                    }
                 }
+
+                metadata.exif = Some(exif_data);
+                let json =
+                    serde_json::to_string_pretty(&metadata).map_err(|error| error.to_string())?;
+                std::fs::write(&primary_path, json).map_err(|error| error.to_string())?;
+                Ok(())
             });
-
-            for (k, v) in &updates {
-                let trimmed = v.trim();
-                if trimmed.is_empty() {
-                    exif_data.remove(k);
-                } else {
-                    exif_data.insert(k.clone(), trimmed.to_string());
-                }
-            }
-
-            let mut final_metadata = crate::exif_processing::load_sidecar(&primary_path);
-
-            final_metadata.exif = Some(exif_data);
-            if let Ok(json) = serde_json::to_string_pretty(&final_metadata) {
-                let _ = std::fs::write(&primary_path, json);
-            }
         });
         Ok(())
     })
@@ -2608,6 +2618,30 @@ pub fn move_files(
     Ok(())
 }
 
+fn persist_adjustments_to_sidecar(
+    sidecar_path: &Path,
+    source_path: &Path,
+    adjustments: Value,
+    lens_db: Option<&crate::lens_correction::LensDatabase>,
+    xmp_sync: Option<(bool, bool)>,
+) -> Result<(), String> {
+    with_sidecar_write_lock(sidecar_path, || {
+        let mut metadata =
+            crate::exif_processing::load_sidecar_with_exif_unlocked(sidecar_path, source_path);
+        let mut final_adjustments = adjustments;
+        resolve_lens_params_in_adjustments(&mut final_adjustments, &metadata.exif, lens_db);
+        metadata.adjustments = final_adjustments;
+
+        let json_string = serde_json::to_string_pretty(&metadata).map_err(|e| e.to_string())?;
+        std::fs::write(sidecar_path, json_string).map_err(|e| e.to_string())?;
+
+        if let Some((true, create_if_missing)) = xmp_sync {
+            sync_metadata_to_xmp(source_path, &metadata, create_if_missing);
+        }
+        Ok(())
+    })
+}
+
 #[tauri::command]
 pub fn save_metadata_and_update_thumbnail(
     path: String,
@@ -2617,29 +2651,20 @@ pub fn save_metadata_and_update_thumbnail(
 ) -> Result<(), String> {
     let (source_path, sidecar_path) = parse_virtual_path(&path);
 
-    let mut metadata = crate::exif_processing::load_sidecar_with_exif(&sidecar_path, &source_path);
-
-    let mut final_adjustments = adjustments;
-    {
-        let lens_db_guard = state.lens_db.lock().unwrap();
-        resolve_lens_params_in_adjustments(
-            &mut final_adjustments,
-            &metadata.exif,
-            lens_db_guard.as_deref(),
-        );
-    }
-
-    metadata.adjustments = final_adjustments;
-
-    let json_string = serde_json::to_string_pretty(&metadata).map_err(|e| e.to_string())?;
-    std::fs::write(&sidecar_path, json_string).map_err(|e| e.to_string())?;
-
-    if let Ok(settings) = load_settings(app_handle.clone())
-        && settings.enable_xmp_sync.unwrap_or(false)
-    {
-        let create_if_missing = settings.create_xmp_if_missing.unwrap_or(false);
-        sync_metadata_to_xmp(&source_path, &metadata, create_if_missing);
-    }
+    let lens_db = state.lens_db.lock().unwrap().clone();
+    let xmp_sync = load_settings(app_handle.clone()).ok().map(|settings| {
+        (
+            settings.enable_xmp_sync.unwrap_or(false),
+            settings.create_xmp_if_missing.unwrap_or(false),
+        )
+    });
+    persist_adjustments_to_sidecar(
+        &sidecar_path,
+        &source_path,
+        adjustments,
+        lens_db.as_deref(),
+        xmp_sync,
+    )?;
 
     let loaded_image_lock = state.original_image.lock().unwrap();
     let preloaded_image_option = if let Some(loaded_image) = loaded_image_lock.as_ref() {
@@ -2728,38 +2753,42 @@ pub async fn apply_adjustments_to_paths(
         paths.par_iter().for_each(|path| {
             let (source_path, sidecar_path) = parse_virtual_path(path);
 
-            let mut existing_metadata =
-                crate::exif_processing::load_sidecar_with_exif(&sidecar_path, &source_path);
+            let _ = with_sidecar_write_lock(&sidecar_path, || {
+                let mut existing_metadata = crate::exif_processing::load_sidecar_with_exif_unlocked(
+                    &sidecar_path,
+                    &source_path,
+                );
 
-            let mut new_adjustments = existing_metadata.adjustments;
-            if new_adjustments.is_null() {
-                new_adjustments = serde_json::json!({});
-            }
-
-            if let (Some(new_map), Some(pasted_map)) =
-                (new_adjustments.as_object_mut(), adjustments.as_object())
-            {
-                for (k, v) in pasted_map {
-                    new_map.insert(k.clone(), v.clone());
+                let mut new_adjustments = existing_metadata.adjustments;
+                if new_adjustments.is_null() {
+                    new_adjustments = serde_json::json!({});
                 }
-            }
 
-            resolve_lens_params_in_adjustments(
-                &mut new_adjustments,
-                &existing_metadata.exif,
-                lens_db.as_deref(),
-            );
+                if let (Some(new_map), Some(pasted_map)) =
+                    (new_adjustments.as_object_mut(), adjustments.as_object())
+                {
+                    for (k, v) in pasted_map {
+                        new_map.insert(k.clone(), v.clone());
+                    }
+                }
 
-            existing_metadata.adjustments = new_adjustments;
+                resolve_lens_params_in_adjustments(
+                    &mut new_adjustments,
+                    &existing_metadata.exif,
+                    lens_db.as_deref(),
+                );
 
-            if let Ok(json_string) = serde_json::to_string_pretty(&existing_metadata) {
-                let _ = std::fs::write(&sidecar_path, json_string);
-            }
+                existing_metadata.adjustments = new_adjustments;
 
-            if enable_xmp_sync {
-                let source_path = parse_virtual_path(path).0;
-                sync_metadata_to_xmp(&source_path, &existing_metadata, create_xmp_if_missing);
-            }
+                let json_string = serde_json::to_string_pretty(&existing_metadata)
+                    .map_err(|error| error.to_string())?;
+                std::fs::write(&sidecar_path, json_string).map_err(|error| error.to_string())?;
+
+                if enable_xmp_sync {
+                    sync_metadata_to_xmp(&source_path, &existing_metadata, create_xmp_if_missing);
+                }
+                Ok(())
+            });
         });
 
         let state = app_handle.state::<AppState>();
@@ -2822,20 +2851,22 @@ pub async fn reset_adjustments_for_paths(
         let create_xmp_if_missing = settings.create_xmp_if_missing.unwrap_or(false);
 
         paths.par_iter().for_each(|path| {
-            let (_, sidecar_path) = parse_virtual_path(path);
+            let (source_path, sidecar_path) = parse_virtual_path(path);
 
-            let mut existing_metadata = crate::exif_processing::load_sidecar(&sidecar_path);
+            let _ = with_sidecar_write_lock(&sidecar_path, || {
+                let mut existing_metadata =
+                    crate::exif_processing::load_sidecar_unlocked(&sidecar_path);
+                existing_metadata.adjustments = serde_json::json!({});
 
-            existing_metadata.adjustments = serde_json::json!({});
+                let json_string = serde_json::to_string_pretty(&existing_metadata)
+                    .map_err(|error| error.to_string())?;
+                std::fs::write(&sidecar_path, json_string).map_err(|error| error.to_string())?;
 
-            if let Ok(json_string) = serde_json::to_string_pretty(&existing_metadata) {
-                let _ = std::fs::write(&sidecar_path, json_string);
-            }
-
-            if enable_xmp_sync {
-                let source_path = parse_virtual_path(path).0;
-                sync_metadata_to_xmp(&source_path, &existing_metadata, create_xmp_if_missing);
-            }
+                if enable_xmp_sync {
+                    sync_metadata_to_xmp(&source_path, &existing_metadata, create_xmp_if_missing);
+                }
+                Ok(())
+            });
         });
 
         let state = app_handle.state::<AppState>();
@@ -2914,33 +2945,38 @@ pub async fn apply_auto_lens_correction_to_paths(
 
         paths.par_iter().for_each(|path| {
             let (source_path, sidecar_path) = parse_virtual_path(path);
-            let mut existing_metadata =
-                crate::exif_processing::load_sidecar_with_exif(&sidecar_path, &source_path);
+            let _ = with_sidecar_write_lock(&sidecar_path, || {
+                let mut existing_metadata = crate::exif_processing::load_sidecar_with_exif_unlocked(
+                    &sidecar_path,
+                    &source_path,
+                );
 
-            if existing_metadata.adjustments.is_null() {
-                existing_metadata.adjustments = serde_json::json!({});
-            }
+                if existing_metadata.adjustments.is_null() {
+                    existing_metadata.adjustments = serde_json::json!({});
+                }
 
-            if let Some(obj) = existing_metadata.adjustments.as_object_mut() {
-                obj.insert("lensCorrectionMode".to_string(), serde_json::json!("auto"));
-                obj.insert("lensDistortionEnabled".to_string(), serde_json::json!(true));
-                obj.insert("lensTcaEnabled".to_string(), serde_json::json!(true));
-                obj.insert("lensVignetteEnabled".to_string(), serde_json::json!(true));
-            }
+                if let Some(obj) = existing_metadata.adjustments.as_object_mut() {
+                    obj.insert("lensCorrectionMode".to_string(), serde_json::json!("auto"));
+                    obj.insert("lensDistortionEnabled".to_string(), serde_json::json!(true));
+                    obj.insert("lensTcaEnabled".to_string(), serde_json::json!(true));
+                    obj.insert("lensVignetteEnabled".to_string(), serde_json::json!(true));
+                }
 
-            resolve_lens_params_in_adjustments(
-                &mut existing_metadata.adjustments,
-                &existing_metadata.exif,
-                lens_db.as_deref(),
-            );
+                resolve_lens_params_in_adjustments(
+                    &mut existing_metadata.adjustments,
+                    &existing_metadata.exif,
+                    lens_db.as_deref(),
+                );
 
-            if let Ok(json_string) = serde_json::to_string_pretty(&existing_metadata) {
-                let _ = std::fs::write(&sidecar_path, json_string);
-            }
+                let json_string = serde_json::to_string_pretty(&existing_metadata)
+                    .map_err(|error| error.to_string())?;
+                std::fs::write(&sidecar_path, json_string).map_err(|error| error.to_string())?;
 
-            if enable_xmp_sync {
-                sync_metadata_to_xmp(&source_path, &existing_metadata, create_xmp_if_missing);
-            }
+                if enable_xmp_sync {
+                    sync_metadata_to_xmp(&source_path, &existing_metadata, create_xmp_if_missing);
+                }
+                Ok(())
+            });
 
             let result = generate_single_thumbnail_and_cache(
                 path,
@@ -3018,42 +3054,51 @@ pub async fn apply_auto_adjustments_to_paths(
                 let auto_results = perform_auto_analysis(&image);
                 let auto_adjustments_json = auto_results_to_json(&auto_results);
 
-                let mut existing_metadata = crate::exif_processing::load_sidecar(&sidecar_path);
+                with_sidecar_write_lock(&sidecar_path, || {
+                    let mut existing_metadata =
+                        crate::exif_processing::load_sidecar_unlocked(&sidecar_path);
 
-                if existing_metadata.adjustments.is_null() {
-                    existing_metadata.adjustments = serde_json::json!({});
-                }
+                    if existing_metadata.adjustments.is_null() {
+                        existing_metadata.adjustments = serde_json::json!({});
+                    }
 
-                if let (Some(existing_map), Some(auto_map)) = (
-                    existing_metadata.adjustments.as_object_mut(),
-                    auto_adjustments_json.as_object(),
-                ) {
-                    for (k, v) in auto_map {
-                        if k == "sectionVisibility" {
-                            if let Some(existing_vis_val) = existing_map.get_mut(k) {
-                                if let (Some(existing_vis), Some(auto_vis)) =
-                                    (existing_vis_val.as_object_mut(), v.as_object())
-                                {
-                                    for (vis_k, vis_v) in auto_vis {
-                                        existing_vis.insert(vis_k.clone(), vis_v.clone());
+                    if let (Some(existing_map), Some(auto_map)) = (
+                        existing_metadata.adjustments.as_object_mut(),
+                        auto_adjustments_json.as_object(),
+                    ) {
+                        for (k, v) in auto_map {
+                            if k == "sectionVisibility" {
+                                if let Some(existing_vis_val) = existing_map.get_mut(k) {
+                                    if let (Some(existing_vis), Some(auto_vis)) =
+                                        (existing_vis_val.as_object_mut(), v.as_object())
+                                    {
+                                        for (vis_k, vis_v) in auto_vis {
+                                            existing_vis.insert(vis_k.clone(), vis_v.clone());
+                                        }
                                     }
+                                } else {
+                                    existing_map.insert(k.clone(), v.clone());
                                 }
                             } else {
                                 existing_map.insert(k.clone(), v.clone());
                             }
-                        } else {
-                            existing_map.insert(k.clone(), v.clone());
                         }
                     }
-                }
 
-                if let Ok(json_string) = serde_json::to_string_pretty(&existing_metadata) {
-                    let _ = std::fs::write(&sidecar_path, json_string);
-                }
+                    let json_string = serde_json::to_string_pretty(&existing_metadata)
+                        .map_err(|error| error.to_string())?;
+                    std::fs::write(&sidecar_path, json_string)
+                        .map_err(|error| error.to_string())?;
 
-                if enable_xmp_sync {
-                    sync_metadata_to_xmp(&source_path, &existing_metadata, create_xmp_if_missing);
-                }
+                    if enable_xmp_sync {
+                        sync_metadata_to_xmp(
+                            &source_path,
+                            &existing_metadata,
+                            create_xmp_if_missing,
+                        );
+                    }
+                    Ok(())
+                })?;
                 Ok(image)
             })()
             .map_err(|e| eprintln!("Failed to apply auto adjustments to {}: {}", path, e))
@@ -3104,14 +3149,18 @@ pub fn set_color_label_for_paths(
             let (source_path, sidecar_path) = parse_virtual_path(path);
 
             with_sidecar_write_lock(&sidecar_path, || {
-                let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
+                let mut metadata =
+                    crate::exif_processing::load_sidecar_unlocked(&sidecar_path);
 
-                if !color_label_is_manual && metadata.color_label_is_manual != Some(false) {
+                if !try_apply_color_label_update(
+                    &mut metadata,
+                    color.as_deref(),
+                    color_label_is_manual,
+                ) {
                     return Err(format!(
                         "cannot overwrite a manual or unclassified color label for {path} during automatic culling"
                     ));
                 }
-                apply_color_label_update(&mut metadata, color.as_deref(), color_label_is_manual);
 
                 let json_string = serde_json::to_string_pretty(&metadata)
                     .map_err(|error| format!("cannot serialize metadata for {path}: {error}"))?;
@@ -3146,7 +3195,8 @@ pub fn set_rating_for_paths(
 
             with_sidecar_write_lock(&sidecar_path, || {
                 let sidecar_exists = sidecar_path.exists();
-                let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
+                let mut metadata =
+                    crate::exif_processing::load_sidecar_unlocked(&sidecar_path);
 
                 if !apply_rating_update(&mut metadata, rating, rating_is_manual, sidecar_exists) {
                     return Err(format!(
@@ -3175,16 +3225,21 @@ pub fn load_metadata(path: String, app_handle: AppHandle) -> Result<ImageMetadat
     let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(false);
 
     let (source_path, sidecar_path) = parse_virtual_path(&path);
-    let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
 
-    if enable_xmp_sync
-        && sync_metadata_from_xmp(&source_path, &mut metadata)
-        && let Ok(json) = serde_json::to_string_pretty(&metadata)
-    {
-        let _ = fs::write(&sidecar_path, json);
-    }
+    with_sidecar_write_lock(&sidecar_path, || {
+        let (mut metadata, sidecar_valid) =
+            crate::exif_processing::load_sidecar_unlocked_with_status(&sidecar_path);
 
-    Ok(metadata)
+        if enable_xmp_sync
+            && sync_metadata_from_xmp(&source_path, &mut metadata)
+            && sidecar_valid
+            && let Ok(json) = serde_json::to_string_pretty(&metadata)
+        {
+            let _ = fs::write(&sidecar_path, json);
+        }
+
+        Ok(metadata)
+    })
 }
 
 fn get_presets_path(app_handle: &AppHandle) -> Result<std::path::PathBuf, String> {
@@ -4171,15 +4226,18 @@ pub fn create_virtual_copy(
     let new_virtual_path = format!("{}?vc={}", source_path.to_string_lossy(), new_copy_id);
     let (_, new_sidecar_path) = parse_virtual_path(&new_virtual_path);
 
-    if source_sidecar_path.exists() {
-        fs::copy(&source_sidecar_path, &new_sidecar_path)
-            .map_err(|e| format!("Failed to copy sidecar file: {}", e))?;
-    } else {
-        let default_metadata = ImageMetadata::default();
-        let json_string =
-            serde_json::to_string_pretty(&default_metadata).map_err(|e| e.to_string())?;
-        fs::write(new_sidecar_path, json_string).map_err(|e| e.to_string())?;
-    }
+    with_sidecar_write_lock(&source_sidecar_path, || {
+        if source_sidecar_path.exists() {
+            fs::copy(&source_sidecar_path, &new_sidecar_path)
+                .map_err(|e| format!("Failed to copy sidecar file: {}", e))?;
+        } else {
+            let default_metadata = ImageMetadata::default();
+            let json_string =
+                serde_json::to_string_pretty(&default_metadata).map_err(|e| e.to_string())?;
+            fs::write(&new_sidecar_path, json_string).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })?;
 
     if let Some(album_id) = target_album_id {
         let _ = add_to_album(album_id, vec![new_virtual_path.clone()], app_handle);
@@ -4258,6 +4316,18 @@ fn apply_color_label_update(metadata: &mut ImageMetadata, color: Option<&str>, i
 
     metadata.tags = if tags.is_empty() { None } else { Some(tags) };
     metadata.color_label_is_manual = Some(is_manual);
+}
+
+fn try_apply_color_label_update(
+    metadata: &mut ImageMetadata,
+    color: Option<&str>,
+    is_manual: bool,
+) -> bool {
+    if !is_manual && metadata.color_label_is_manual != Some(false) {
+        return false;
+    }
+    apply_color_label_update(metadata, color, is_manual);
+    true
 }
 
 pub fn sync_metadata_from_xmp(source_path: &Path, metadata: &mut ImageMetadata) -> bool {
@@ -4501,8 +4571,11 @@ mod file_management_regression_tests {
     fn xmp_import_preserves_known_manual_zero_rating() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let image_path = directory.path().join("image.jpg");
-        fs::write(image_path.with_extension("xmp"), "<xmp:Rating>4</xmp:Rating>")
-            .expect("write synthetic XMP");
+        fs::write(
+            image_path.with_extension("xmp"),
+            "<xmp:Rating>4</xmp:Rating>",
+        )
+        .expect("write synthetic XMP");
         let mut manual_zero = ImageMetadata {
             rating: 0,
             rating_is_manual: Some(true),
@@ -4524,8 +4597,11 @@ mod file_management_regression_tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let image_path = directory.path().join("image.jpg");
         let sidecar_path = directory.path().join("image.jpg.rrdata");
-        fs::write(image_path.with_extension("xmp"), "<xmp:Rating>4</xmp:Rating>")
-            .expect("write synthetic XMP");
+        fs::write(
+            image_path.with_extension("xmp"),
+            "<xmp:Rating>4</xmp:Rating>",
+        )
+        .expect("write synthetic XMP");
         let automatic_zero = ImageMetadata {
             rating: 0,
             rating_is_manual: Some(false),
@@ -4537,12 +4613,8 @@ mod file_management_regression_tests {
         )
         .expect("write automatic zero sidecar");
 
-        let loaded = resolve_image_metadata(
-            &image_path,
-            &sidecar_path,
-            true,
-            &AppSettings::default(),
-        );
+        let loaded =
+            resolve_image_metadata(&image_path, &sidecar_path, true, &AppSettings::default());
         let reloaded = crate::exif_processing::load_sidecar(&sidecar_path);
 
         assert_eq!(loaded.rating, 4);
@@ -4620,7 +4692,7 @@ mod file_management_regression_tests {
         let allow_culling_write_thread = Arc::clone(&allow_culling_write);
         let culling = thread::spawn(move || {
             with_sidecar_write_lock(&culling_path, || {
-                let mut metadata = crate::exif_processing::load_sidecar(&culling_path);
+                let mut metadata = crate::exif_processing::load_sidecar_unlocked(&culling_path);
                 culling_read_thread.wait();
                 allow_culling_write_thread.wait();
                 assert!(apply_rating_update(&mut metadata, 5, false, true));
@@ -4643,7 +4715,7 @@ mod file_management_regression_tests {
                 .send(())
                 .expect("signal blocked manual writer");
             with_sidecar_write_lock(&manual_path, || {
-                let mut metadata = crate::exif_processing::load_sidecar(&manual_path);
+                let mut metadata = crate::exif_processing::load_sidecar_unlocked(&manual_path);
                 assert!(apply_rating_update(&mut metadata, 0, true, true));
                 let json = serde_json::to_vec(&metadata).expect("serialize manual zero rating");
                 fs::write(&manual_path, json).expect("persist manual zero rating");
@@ -4662,6 +4734,142 @@ mod file_management_regression_tests {
         let reloaded = crate::exif_processing::load_sidecar(&sidecar_path);
         assert_eq!(reloaded.rating, 0);
         assert_eq!(reloaded.rating_is_manual, Some(true));
+    }
+
+    #[test]
+    fn editor_autosave_preserves_a_concurrent_manual_zero_rating() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let sidecar_path = directory.path().join("image.jpg.rrdata");
+        let source_path = directory.path().join("image.jpg");
+        let initial = ImageMetadata {
+            rating: 2,
+            rating_is_manual: Some(false),
+            ..ImageMetadata::default()
+        };
+        fs::write(
+            &sidecar_path,
+            serde_json::to_vec(&initial).expect("serialize initial metadata"),
+        )
+        .expect("write initial sidecar");
+
+        let start = Arc::new(std::sync::Barrier::new(3));
+        let autosave_start = Arc::clone(&start);
+        let autosave_sidecar = sidecar_path.clone();
+        let autosave_source = source_path.clone();
+        let autosave = thread::spawn(move || {
+            autosave_start.wait();
+            persist_adjustments_to_sidecar(
+                &autosave_sidecar,
+                &autosave_source,
+                serde_json::json!({ "exposure": 0.5 }),
+                None,
+                None,
+            )
+            .expect("persist editor adjustments");
+        });
+
+        let manual_start = Arc::clone(&start);
+        let manual_sidecar = sidecar_path.clone();
+        let manual = thread::spawn(move || {
+            manual_start.wait();
+            with_sidecar_write_lock(&manual_sidecar, || {
+                let mut metadata = crate::exif_processing::load_sidecar_unlocked(&manual_sidecar);
+                assert!(apply_rating_update(&mut metadata, 0, true, true));
+                let json = serde_json::to_vec(&metadata).expect("serialize manual zero rating");
+                fs::write(&manual_sidecar, json).expect("persist manual zero rating");
+                Ok(())
+            })
+            .expect("write manual zero rating");
+        });
+
+        start.wait();
+        autosave.join().expect("autosave thread");
+        manual.join().expect("manual rating thread");
+
+        let reloaded = crate::exif_processing::load_sidecar(&sidecar_path);
+        assert_eq!(reloaded.rating, 0);
+        assert_eq!(reloaded.rating_is_manual, Some(true));
+        assert_eq!(reloaded.adjustments["exposure"].as_f64(), Some(0.5));
+    }
+
+    #[test]
+    fn xmp_metadata_load_preserves_a_concurrent_manual_zero_rating() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let image_path = directory.path().join("image.jpg");
+        let sidecar_path = directory.path().join("image.jpg.rrdata");
+        fs::write(
+            image_path.with_extension("xmp"),
+            "<xmp:Rating>4</xmp:Rating>",
+        )
+        .expect("write synthetic XMP");
+        let initial = ImageMetadata {
+            rating: 0,
+            rating_is_manual: Some(false),
+            ..ImageMetadata::default()
+        };
+        fs::write(
+            &sidecar_path,
+            serde_json::to_vec(&initial).expect("serialize initial metadata"),
+        )
+        .expect("write initial sidecar");
+
+        let start = Arc::new(std::sync::Barrier::new(3));
+        let xmp_start = Arc::clone(&start);
+        let xmp_image = image_path.clone();
+        let xmp_sidecar = sidecar_path.clone();
+        let xmp_loader = thread::spawn(move || {
+            xmp_start.wait();
+            resolve_image_metadata(&xmp_image, &xmp_sidecar, true, &AppSettings::default());
+        });
+
+        let manual_start = Arc::clone(&start);
+        let manual_sidecar = sidecar_path.clone();
+        let manual_writer = thread::spawn(move || {
+            manual_start.wait();
+            with_sidecar_write_lock(&manual_sidecar, || {
+                let mut metadata = crate::exif_processing::load_sidecar_unlocked(&manual_sidecar);
+                assert!(apply_rating_update(&mut metadata, 0, true, true));
+                let json = serde_json::to_vec(&metadata).expect("serialize manual zero rating");
+                fs::write(&manual_sidecar, json).expect("persist manual zero rating");
+                Ok(())
+            })
+            .expect("write manual zero rating");
+        });
+
+        start.wait();
+        xmp_loader.join().expect("XMP loader thread");
+        manual_writer.join().expect("manual rating thread");
+
+        let reloaded = crate::exif_processing::load_sidecar(&sidecar_path);
+        assert_eq!(reloaded.rating, 0);
+        assert_eq!(reloaded.rating_is_manual, Some(true));
+    }
+
+    #[test]
+    fn malformed_sidecar_has_unknown_provenance_and_is_preserved_by_culling() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let sidecar_path = directory.path().join("image.jpg.rrdata");
+        let original = b"{ malformed sidecar";
+        fs::write(&sidecar_path, original).expect("write malformed sidecar");
+
+        let loaded = crate::exif_processing::load_sidecar(&sidecar_path);
+        assert_eq!(loaded.rating_is_manual, None);
+        assert_eq!(loaded.color_label_is_manual, None);
+
+        with_sidecar_write_lock(&sidecar_path, || {
+            let mut metadata = crate::exif_processing::load_sidecar_unlocked(&sidecar_path);
+            assert!(!apply_rating_update(&mut metadata, 4, false, true));
+            assert!(!try_apply_color_label_update(
+                &mut metadata,
+                Some("red"),
+                false
+            ));
+            Ok(())
+        })
+        .expect("check automatic culling updates");
+
+        let persisted = fs::read(&sidecar_path).expect("read malformed sidecar");
+        assert_eq!(persisted.as_slice(), original.as_slice());
     }
 
     #[test]
@@ -4702,8 +4910,11 @@ mod file_management_regression_tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let image_path = directory.path().join("image.jpg");
         let sidecar_path = directory.path().join("image.jpg.rrdata");
-        fs::write(image_path.with_extension("xmp"), "<xmp:Label>Green</xmp:Label>")
-            .expect("write synthetic XMP");
+        fs::write(
+            image_path.with_extension("xmp"),
+            "<xmp:Label>Green</xmp:Label>",
+        )
+        .expect("write synthetic XMP");
         let settings = AppSettings::default();
 
         let loaded = resolve_image_metadata(&image_path, &sidecar_path, true, &settings);
@@ -4730,15 +4941,14 @@ mod file_management_regression_tests {
             serde_json::to_vec(&metadata).expect("serialize automatic label"),
         )
         .expect("write sidecar");
-        fs::write(image_path.with_extension("xmp"), "<xmp:Label>Red</xmp:Label>")
-            .expect("write synthetic XMP");
+        fs::write(
+            image_path.with_extension("xmp"),
+            "<xmp:Label>Red</xmp:Label>",
+        )
+        .expect("write synthetic XMP");
 
-        let loaded = resolve_image_metadata(
-            &image_path,
-            &sidecar_path,
-            true,
-            &AppSettings::default(),
-        );
+        let loaded =
+            resolve_image_metadata(&image_path, &sidecar_path, true, &AppSettings::default());
         let reloaded = crate::exif_processing::load_sidecar(&sidecar_path);
 
         assert_eq!(loaded.tags, Some(vec!["color:red".to_owned()]));
@@ -4772,12 +4982,8 @@ mod file_management_regression_tests {
         )
         .expect("write synthetic XMP subject");
 
-        let loaded = resolve_image_metadata(
-            &image_path,
-            &sidecar_path,
-            true,
-            &AppSettings::default(),
-        );
+        let loaded =
+            resolve_image_metadata(&image_path, &sidecar_path, true, &AppSettings::default());
         let reloaded = crate::exif_processing::load_sidecar(&sidecar_path);
 
         assert_eq!(loaded.tags, Some(vec!["color:red".to_owned()]));
