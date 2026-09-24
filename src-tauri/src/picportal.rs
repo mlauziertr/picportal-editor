@@ -516,18 +516,20 @@ fn is_auth_failure(error: &str) -> bool {
     error.contains("HTTP 401:") || error.contains("HTTP 403:")
 }
 
-fn clear_session_state(state: &PicPortalState, app: Option<&AppHandle>) {
+fn clear_session_state(state: &PicPortalState) {
     if let Ok(mut current) = state.session.lock() {
         current.take();
     }
-    if let Some(app) = app {
-        let _ = app.emit("picportal-session-invalidated", ());
-    }
 }
 
-fn invalidate_session(state: &PicPortalState, app: Option<&AppHandle>) {
-    let _ = clear_stored_session();
-    clear_session_state(state, app);
+fn complete_local_session_removal(
+    state: &PicPortalState,
+    secure_storage_clear: Result<(), String>,
+    context: &str,
+) -> Result<(), String> {
+    secure_storage_clear.map_err(|error| format!("{context}: {error}"))?;
+    clear_session_state(state);
+    Ok(())
 }
 
 fn complete_picportal_logout(
@@ -535,10 +537,11 @@ fn complete_picportal_logout(
     secure_storage_clear: Result<(), String>,
     remote_error: Option<String>,
 ) -> Result<(), String> {
-    secure_storage_clear.map_err(|error| {
-        format!("PicPortal logout not completed because secure session storage could not be cleared: {error}")
-    })?;
-    clear_session_state(state, None);
+    complete_local_session_removal(
+        state,
+        secure_storage_clear,
+        "PicPortal logout not completed because secure session storage could not be cleared",
+    )?;
     remote_error.map_or(Ok(()), |error| {
         Err(format!(
             "PicPortal session was removed locally, but remote logout could not be confirmed: {error}"
@@ -546,13 +549,48 @@ fn complete_picportal_logout(
     })
 }
 
-fn session_error(error: String, state: &PicPortalState, app: Option<&AppHandle>) -> String {
+fn complete_picportal_invalidation(
+    state: &PicPortalState,
+    secure_storage_clear: Result<(), String>,
+    app: Option<&AppHandle>,
+) -> Result<(), String> {
+    complete_local_session_removal(
+        state,
+        secure_storage_clear,
+        "PicPortal session invalidation not completed because secure session storage could not be cleared",
+    )?;
+    if let Some(app) = app {
+        let _ = app.emit("picportal-session-invalidated", ());
+    }
+    Ok(())
+}
+
+fn invalidate_session(state: &PicPortalState, app: Option<&AppHandle>) -> Result<(), String> {
+    complete_picportal_invalidation(state, clear_stored_session(), app)
+}
+
+fn auth_failure_message(error: &str, invalidation: Result<(), String>) -> String {
+    match invalidation {
+        Ok(()) => SESSION_EXPIRED_MESSAGE.to_owned(),
+        Err(clear_error) => {
+            format!("PicPortal authentication was rejected ({error}); {clear_error}")
+        }
+    }
+}
+
+fn session_error_with_invalidation(
+    error: String,
+    invalidate: impl FnOnce() -> Result<(), String>,
+) -> String {
     if is_auth_failure(&error) {
-        invalidate_session(state, app);
-        SESSION_EXPIRED_MESSAGE.to_owned()
+        auth_failure_message(&error, invalidate())
     } else {
         error
     }
+}
+
+fn session_error(error: String, state: &PicPortalState, app: Option<&AppHandle>) -> String {
+    session_error_with_invalidation(error, || invalidate_session(state, app))
 }
 
 async fn session_identity(session: &PicPortalSession) -> Result<MeResponse, String> {
@@ -699,10 +737,12 @@ pub async fn picportal_restore_session(
         let galleries = match session.galleries().await {
             Ok(galleries) => galleries,
             Err(error) if is_auth_failure(&error) => {
-                invalidate_session(&state, None);
-                return Ok(disconnected_status(Some(
-                    SESSION_EXPIRED_MESSAGE.to_owned(),
-                )));
+                let message = session_error(error, &state, None);
+                return if message == SESSION_EXPIRED_MESSAGE {
+                    Ok(disconnected_status(Some(message)))
+                } else {
+                    Err(message)
+                };
             }
             Err(error) => return Err(error),
         };
@@ -736,16 +776,20 @@ pub async fn picportal_restore_session(
                 .map_err(|retry_error| session_error(retry_error, &state, None))?
         }
         Err(error) if is_auth_failure(&error) => {
-            invalidate_session(&state, None);
-            return Ok(disconnected_status(Some(
-                "PicPortal session expired or was revoked; connect again".to_owned(),
-            )));
+            let message = session_error(error, &state, None);
+            return if message == SESSION_EXPIRED_MESSAGE {
+                Ok(disconnected_status(Some(message)))
+            } else {
+                Err(message)
+            };
         }
         Err(error) => return Err(error),
     };
     let (account_id, admin) = admin_identity(me, &session.admin)?;
     if account_id != session.account_id {
-        invalidate_session(&state, None);
+        if let Err(error) = invalidate_session(&state, None) {
+            return Err(format!("PicPortal account changed; {error}"));
+        }
         return Ok(disconnected_status(Some(
             "PicPortal account changed; connect again".to_owned(),
         )));
@@ -989,6 +1033,12 @@ async fn publish_paths(
                 let authentication_failed = is_auth_failure(&error);
                 result.failed += 1;
                 mark_queue_error(&mut queue, &path, session, &gallery.id, &error);
+                let message = if authentication_failed {
+                    session_invalidated = true;
+                    auth_failure_message(&error, invalidate_session(state, Some(app)))
+                } else {
+                    error
+                };
                 result.items.push(PublishItemResult {
                     path,
                     state: if state.publish_cancelled.load(Ordering::SeqCst) {
@@ -997,16 +1047,8 @@ async fn publish_paths(
                         "failed".to_owned()
                     },
                     photo_id: None,
-                    error: Some(if authentication_failed {
-                        SESSION_EXPIRED_MESSAGE.to_owned()
-                    } else {
-                        error
-                    }),
+                    error: Some(message),
                 });
-                if authentication_failed {
-                    invalidate_session(state, Some(app));
-                    session_invalidated = true;
-                }
                 if state.publish_cancelled.load(Ordering::SeqCst) {
                     result.cancelled = true;
                     break;
@@ -2420,6 +2462,53 @@ mod tests {
                 .expect_err("remote failure must remain visible")
                 .contains("removed locally")
         );
+        assert!(state.session.lock().expect("session lock").is_none());
+    }
+
+    #[test]
+    fn authentication_failure_keeps_session_when_secure_removal_fails() {
+        let state = PicPortalState::default();
+        *state.session.lock().expect("session lock") =
+            Some(synthetic_session_for("account-a"));
+
+        let message = session_error_with_invalidation(
+            "HTTP 401: synthetic unauthorized".to_owned(),
+            || {
+                complete_picportal_invalidation(
+                    &state,
+                    Err("synthetic secure storage failure".to_owned()),
+                    None,
+                )
+            },
+        );
+
+        assert!(message.contains("authentication was rejected"));
+        assert!(message.contains("HTTP 401"));
+        assert!(message.contains("could not be cleared"));
+        assert_ne!(message, SESSION_EXPIRED_MESSAGE);
+        assert_eq!(
+            state
+                .session
+                .lock()
+                .expect("session lock")
+                .as_ref()
+                .map(|session| session.account_id.as_str()),
+            Some("account-a")
+        );
+    }
+
+    #[test]
+    fn authentication_failure_clears_session_after_secure_removal_succeeds() {
+        let state = PicPortalState::default();
+        *state.session.lock().expect("session lock") =
+            Some(synthetic_session_for("account-a"));
+
+        let message = session_error_with_invalidation(
+            "HTTP 401: synthetic unauthorized".to_owned(),
+            || complete_picportal_invalidation(&state, Ok(()), None),
+        );
+
+        assert_eq!(message, SESSION_EXPIRED_MESSAGE);
         assert!(state.session.lock().expect("session lock").is_none());
     }
 
