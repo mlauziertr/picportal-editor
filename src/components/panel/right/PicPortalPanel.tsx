@@ -219,8 +219,9 @@ export default function PicPortalPanel({
       clearSession();
       setStatus(t('picportal.loggedOut', { defaultValue: 'Disconnected' }));
     } catch (error) {
-      clearSession();
-      setStatus(String(error));
+      const message = String(error);
+      if (message.includes('PicPortal session was removed locally')) clearSession();
+      setStatus(message);
     } finally {
       setBusy(false);
     }

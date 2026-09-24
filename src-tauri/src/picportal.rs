@@ -512,14 +512,34 @@ fn is_auth_failure(error: &str) -> bool {
     error.contains("HTTP 401:") || error.contains("HTTP 403:")
 }
 
-fn invalidate_session(state: &PicPortalState, app: Option<&AppHandle>) {
+fn clear_session_state(state: &PicPortalState, app: Option<&AppHandle>) {
     if let Ok(mut current) = state.session.lock() {
         current.take();
     }
-    let _ = clear_stored_session();
     if let Some(app) = app {
         let _ = app.emit("picportal-session-invalidated", ());
     }
+}
+
+fn invalidate_session(state: &PicPortalState, app: Option<&AppHandle>) {
+    let _ = clear_stored_session();
+    clear_session_state(state, app);
+}
+
+fn complete_picportal_logout(
+    state: &PicPortalState,
+    secure_storage_clear: Result<(), String>,
+    remote_error: Option<String>,
+) -> Result<(), String> {
+    secure_storage_clear.map_err(|error| {
+        format!("PicPortal logout not completed because secure session storage could not be cleared: {error}")
+    })?;
+    clear_session_state(state, None);
+    remote_error.map_or(Ok(()), |error| {
+        Err(format!(
+            "PicPortal session was removed locally, but remote logout could not be confirmed: {error}"
+        ))
+    })
 }
 
 fn session_error(error: String, state: &PicPortalState, app: Option<&AppHandle>) -> String {
@@ -768,11 +788,7 @@ pub async fn picportal_logout(state: State<'_, PicPortalState>) -> Result<(), St
             Err(error) => remote_error = Some(format!("PicPortal logout failed: {error}")),
         }
     }
-    invalidate_session(&state, None);
-    if let Some(error) = clear_stored_session().err() {
-        remote_error.get_or_insert(error);
-    }
-    remote_error.map_or(Ok(()), Err)
+    complete_picportal_logout(&state, clear_stored_session(), remote_error)
 }
 
 #[tauri::command]
@@ -2185,6 +2201,20 @@ mod tests {
         }
     }
 
+    fn synthetic_session() -> PicPortalSession {
+        PicPortalSession {
+            client: Client::new(),
+            base_url: PRODUCTION_API_BASE_URL.to_owned(),
+            account_id: "synthetic-account".to_owned(),
+            admin: AdminIdentity {
+                email: "editor@example.test".to_owned(),
+                name: "Editor".to_owned(),
+            },
+            cookies: Arc::new(Mutex::new(Vec::new())),
+            persistent: false,
+        }
+    }
+
     #[test]
     fn direct_export_accepts_only_delivery_formats() {
         assert_eq!(
@@ -2284,6 +2314,41 @@ mod tests {
             )
             .expect("stable operation id")
         );
+    }
+
+    #[test]
+    fn secure_storage_failure_keeps_the_in_memory_session_for_logout_retry() {
+        let state = PicPortalState::default();
+        *state.session.lock().expect("session lock") = Some(synthetic_session());
+
+        let result = complete_picportal_logout(
+            &state,
+            Err("synthetic secure storage failure".to_owned()),
+            None,
+        );
+
+        assert!(
+            result
+                .expect_err("logout must fail")
+                .contains("logout not completed")
+        );
+        assert!(state.session.lock().expect("session lock").is_some());
+    }
+
+    #[test]
+    fn remote_logout_failure_is_reported_after_local_session_removal() {
+        let state = PicPortalState::default();
+        *state.session.lock().expect("session lock") = Some(synthetic_session());
+
+        let result =
+            complete_picportal_logout(&state, Ok(()), Some("synthetic network failure".to_owned()));
+
+        assert!(
+            result
+                .expect_err("remote failure must remain visible")
+                .contains("removed locally")
+        );
+        assert!(state.session.lock().expect("session lock").is_none());
     }
 
     #[test]
