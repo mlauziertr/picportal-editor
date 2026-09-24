@@ -1,7 +1,6 @@
 //! Local Grounding DINO and MediaPipe Pose worker boundary.
 //!
 //! Python is an optional local adapter for verified DINO and Pose artifacts.
-//! PicPortal deliberately does not expose or invoke the upstream VGG operation.
 //! There is no remote fallback.
 
 use std::fs;

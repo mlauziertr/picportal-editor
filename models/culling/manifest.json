@@ -59,19 +59,6 @@
       }
     ]
   },
-  "focusModel": {
-    "id": "vinthony/depth-distillation-vgg16",
-    "checkpoint": "vgg_best.pth",
-    "sourceUrl": "https://drive.google.com/uc?export=download&id=1VigqrPdiIF18VALo92L9WCuASnpzu7qa",
-    "sourceLicense": "MIT",
-    "sourceLicenseUrl": "https://raw.githubusercontent.com/vinthony/depth-distillation/master/LICENSE",
-    "sourceLicenseFilename": "VGG-LICENSE.txt",
-    "sourceLicenseSha256": "fca4fb2b7af053895c597466a6dcfc7b40c38924cfc679ebd337d9c7a52ce8f9",
-    "sourceLicenseBytes": 1067,
-    "bytes": 77824617,
-    "sha256": null,
-    "verification": "A user-provided SHA-256 sidecar is required before this optional model is enabled."
-  },
   "poseModel": {
     "id": "google/pose-landmarker-lite-float16",
     "filename": "pose_landmarker_lite.task",

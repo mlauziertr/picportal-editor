@@ -3,8 +3,8 @@
 This directory contains model contracts and licenses only; it does not contain
 weights. Culling inference is local-only and runs only against already-present
 artifacts whose hashes match `manifest.json`. This integration does not download
-weights or Python dependencies, and it does not enable the optional VGG focus
-checkpoint. Unknown or unavailable signals remain explicitly unknown.
+weights or Python dependencies. Unknown or unavailable signals remain explicitly
+unknown.
 
 - Grounding DINO tiny proposes subject boxes from the selected local session
   profile. Dance uses two separate prompts, with the person prompt only if the
@@ -20,5 +20,4 @@ checkpoint. Unknown or unavailable signals remain explicitly unknown.
 The Python worker path is external/user-controlled through
 `PICPORTAL_CULLING_PYTHON`. If Python, the sidecar, or verified model files are
 not present, the corresponding result stays unavailable/unknown. No inference
-request is sent to a remote service. The VGG fields retained in the upstream
-manifest are not used by PicPortal and no VGG weight is required or loaded.
+request is sent to a remote service.
