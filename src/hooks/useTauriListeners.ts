@@ -6,7 +6,11 @@ import { useProcessStore } from '../store/useProcessStore';
 import { useEditorStore } from '../store/useEditorStore';
 import { useUIStore } from '../store/useUIStore';
 import { useLibraryStore } from '../store/useLibraryStore';
-import { mergeLoadedColorLabel, mergeLoadedRating } from '../utils/ratingPersistence';
+import {
+  mergeLoadedColorLabel,
+  mergeLoadedRating,
+  mergeThumbnailRatings,
+} from '../utils/ratingPersistence';
 
 interface TauriListenerProps {
   refreshAllFolderTrees: () => void;
@@ -59,7 +63,7 @@ export function useTauriListeners({
 
       if (Object.keys(pendingRatings).length > 0 || Object.keys(pendingEdits).length > 0) {
         useLibraryStore.getState().setLibrary((state) => ({
-          imageRatings: { ...state.imageRatings, ...pendingRatings },
+          imageRatings: mergeThumbnailRatings(state.imageRatings, pendingRatings, state.imageList),
           imageList:
             Object.keys(pendingEdits).length > 0
               ? state.imageList.map((img) =>

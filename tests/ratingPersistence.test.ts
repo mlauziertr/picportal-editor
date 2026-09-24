@@ -3,9 +3,11 @@ import test from 'node:test';
 import {
   filterCullingAssignmentsForCurrentImages,
   getCullingProtectedPaths,
+  getNextManualRating,
   isRatingProtectedFromCulling,
   mergeLoadedColorLabel,
   mergeLoadedRating,
+  mergeThumbnailRatings,
   persistBatchWithReconciliation,
   persistColorAssignments,
   persistRatingAssignments,
@@ -23,16 +25,62 @@ test('late culling results preserve current manual rating and color decisions', 
     [
       { path: 'manual-zero.jpg', rating_is_manual: true, color_label_is_manual: false },
       { path: 'manual-clear.jpg', rating_is_manual: false, color_label_is_manual: true },
+      { path: 'unknown-rating.jpg', rating_is_manual: null, color_label_is_manual: false },
+      { path: 'unknown-color.jpg', rating_is_manual: false, color_label_is_manual: null },
       { path: 'automatic.jpg', rating_is_manual: false, color_label_is_manual: false },
     ],
-    { 'manual-zero.jpg': 5, 'automatic.jpg': 2 },
-    { 'manual-clear.jpg': 'green', 'automatic.jpg': 'blue' },
+    { 'manual-zero.jpg': 5, 'unknown-rating.jpg': 3, 'automatic.jpg': 2 },
+    {
+      'manual-clear.jpg': 'green',
+      'unknown-color.jpg': 'red',
+      'automatic.jpg': 'blue',
+    },
   );
 
   assert.deepEqual(updates, {
     ratings: { 'automatic.jpg': 2 },
     colors: { 'automatic.jpg': 'blue' },
   });
+});
+
+test('delayed thumbnail ratings retain manual zero for the library and rating toggles', () => {
+  const imageList = [
+    {
+      is_edited: false,
+      modified: 0,
+      path: 'manual-zero.jpg',
+      rating: 0,
+      rating_is_manual: true,
+      tags: null,
+      exif: null,
+      is_virtual_copy: false,
+      is_cloud_placeholder: false,
+      is_raw: false,
+      group_id: null,
+    },
+    {
+      is_edited: false,
+      modified: 0,
+      path: 'automatic.jpg',
+      rating: 2,
+      rating_is_manual: false,
+      tags: null,
+      exif: null,
+      is_virtual_copy: false,
+      is_cloud_placeholder: false,
+      is_raw: false,
+      group_id: null,
+    },
+  ];
+  const imageRatings = mergeThumbnailRatings(
+    { 'manual-zero.jpg': 0, 'automatic.jpg': 2 },
+    { 'manual-zero.jpg': 5, 'automatic.jpg': 1 },
+    imageList,
+  );
+
+  assert.deepEqual(imageRatings, { 'manual-zero.jpg': 0, 'automatic.jpg': 1 });
+  assert.equal(getNextManualRating(imageRatings['manual-zero.jpg'] ?? 0, 5), 5);
+  assert.equal(getNextManualRating(5, 5), 0);
 });
 
 test('automatic color labels do not block automatic rating revisions', () => {

@@ -21,6 +21,7 @@ import { stripVirtualCopySuffix } from '../utils/virtualCopyPath';
 import {
   filterCullingAssignmentsForCurrentImages,
   getCullingProtectedPaths,
+  getNextManualRating,
   persistColorAssignments,
   persistRatingAssignments,
 } from '../utils/ratingPersistence';
@@ -39,7 +40,7 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
     const pathsToRate = expandGroupedPaths(imageList, selectedPaths, groupingMode);
 
     const currentRating = imageRatings[selectedPaths[0]] || 0;
-    const finalRating = newRating === currentRating ? 0 : newRating;
+    const finalRating = getNextManualRating(currentRating, newRating);
 
     setLibrary((state) => {
       const newRatings = { ...state.imageRatings };

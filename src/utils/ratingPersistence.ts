@@ -45,16 +45,40 @@ export function filterCullingAssignmentsForCurrentImages(
   const currentRatings: Record<string, number> = {};
   Object.entries(ratings).forEach(([path, rating]) => {
     const image = imagesByPath.get(path);
-    if (image && image.rating_is_manual !== true) currentRatings[path] = rating;
+    if (image?.rating_is_manual === false) currentRatings[path] = rating;
   });
 
   const currentColors: Record<string, string | null> = {};
   Object.entries(colors).forEach(([path, color]) => {
     const image = imagesByPath.get(path);
-    if (image && image.color_label_is_manual !== true) currentColors[path] = color;
+    if (image?.color_label_is_manual === false) currentColors[path] = color;
   });
 
   return { ratings: currentRatings, colors: currentColors };
+}
+
+export function mergeThumbnailRatings(
+  currentRatings: Record<string, number>,
+  pendingRatings: Record<string, number>,
+  images: readonly {
+    path: string;
+    rating: number;
+    rating_is_manual: boolean | null | undefined;
+  }[],
+): Record<string, number> {
+  const imagesByPath = new Map(images.map((image) => [image.path, image]));
+  const mergedRatings = { ...currentRatings };
+
+  Object.entries(pendingRatings).forEach(([path, rating]) => {
+    const image = imagesByPath.get(path);
+    mergedRatings[path] = image?.rating_is_manual === true ? image.rating : rating;
+  });
+
+  return mergedRatings;
+}
+
+export function getNextManualRating(currentRating: number, selectedRating: number): number {
+  return selectedRating === currentRating ? 0 : selectedRating;
 }
 
 export function mergeLoadedRating(
