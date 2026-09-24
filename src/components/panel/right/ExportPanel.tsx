@@ -31,6 +31,8 @@ import { useOsPlatform } from '../../../hooks/useOsPlatform';
 import Text from '../../ui/Text';
 import { TextColors, TextVariants, TextWeights } from '../../../types/typography';
 import { useEditorStore } from '../../../store/useEditorStore';
+import type { Adjustments } from '../../../utils/adjustments';
+import { valueForPath } from '../../../utils/pathBoundSnapshot';
 import { useUIStore } from '../../../store/useUIStore';
 import PicPortalPanel, { PicPortalExportOptions } from './PicPortalPanel';
 
@@ -255,7 +257,10 @@ export default function ExportPanel({
     setSubfolder,
   } = useExportSettings();
 
-  const adjustmentsRef = useRef(useEditorStore.getState().adjustments);
+  const adjustmentsRef = useRef<{ path: string | null; value: Adjustments | null }>({
+    path: selectedImage?.path ?? null,
+    value: selectedImage?.isReady ? useEditorStore.getState().adjustments : null,
+  });
 
   const [isAdvancedExpanded, setIsAdvancedExpanded] = useState(false);
   const [picPortalOptions, setPicPortalOptions] = useState<PicPortalExportOptions>({
@@ -457,16 +462,34 @@ export default function ExportPanel({
           : null,
     };
     const format = FILE_FORMATS.find((f: FileFormat) => f.id === fileFormat)?.extensions[0] || 'jpeg';
+    const currentPath = selectedImage?.path ?? null;
+    const currentAdjustments = useEditorStore.getState().adjustments;
+    if (adjustmentsRef.current.path !== currentPath) {
+      adjustmentsRef.current = {
+        path: currentPath,
+        value: selectedImage?.isReady ? currentAdjustments : null,
+      };
+    } else if (currentPath && adjustmentsRef.current.value === null && selectedImage?.isReady) {
+      adjustmentsRef.current.value = currentAdjustments;
+    }
+
     const runEstimate = () =>
-      debouncedEstimateSize(pathsToExport, adjustmentsRef.current, selectedImage?.path, exportSettings, format);
+      debouncedEstimateSize(
+        pathsToExport,
+        valueForPath(adjustmentsRef.current, selectedImage?.path ?? null),
+        selectedImage?.path,
+        exportSettings,
+        format,
+      );
 
     runEstimate();
 
-    let prevAdjustments = useEditorStore.getState().adjustments;
+    let prevAdjustments = currentAdjustments;
     const unsubscribe = useEditorStore.subscribe((state) => {
       if (state.adjustments !== prevAdjustments) {
         prevAdjustments = state.adjustments;
-        adjustmentsRef.current = state.adjustments;
+        const path = state.selectedImage?.path ?? null;
+        adjustmentsRef.current = { path, value: path ? state.adjustments : null };
         runEstimate();
       }
     });
@@ -479,6 +502,7 @@ export default function ExportPanel({
     isPanelReallyActive,
     pathsToExport,
     selectedImage?.path,
+    selectedImage?.isReady,
     fileFormat,
     jpegQuality,
     tiffBitDepth,
@@ -528,6 +552,8 @@ export default function ExportPanel({
       return;
     }
 
+    const currentEditPath = selectedImage?.path ?? null;
+    const currentEditAdjustments = valueForPath(adjustmentsRef.current, currentEditPath);
     const exportSettings: ExportSettings = {
       filenameTemplate,
       jpegQuality,
@@ -570,8 +596,8 @@ export default function ExportPanel({
         baseOriginFolders: rootPaths,
         exportSettings,
         outputFormat: selectedFormat.extensions[0],
-        currentEditPath: selectedImage?.path || null,
-        currentEditAdjustments: adjustmentsRef.current || null,
+        currentEditPath,
+        currentEditAdjustments,
         galleryId: picPortalOptions.galleryId,
         includeFaceAnalysis: picPortalOptions.includeFaceAnalysis,
       });
@@ -613,6 +639,8 @@ export default function ExportPanel({
     }
     if (numImages === 0 || isExporting) return;
 
+    const currentEditPath = selectedImage?.path ?? null;
+    const currentEditAdjustments = valueForPath(adjustmentsRef.current, currentEditPath);
     const exportSettings: ExportSettings = {
       filenameTemplate,
       jpegQuality,
@@ -701,8 +729,8 @@ export default function ExportPanel({
           baseOriginFolders: rootPaths,
           exportSettings,
           outputFormat: selectedFormat.extensions[0],
-          currentEditPath: selectedImage?.path || null,
-          currentEditAdjustments: adjustmentsRef.current || null,
+          currentEditPath,
+          currentEditAdjustments,
         });
       }
     } catch (error) {
