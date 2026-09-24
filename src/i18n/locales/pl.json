@@ -1110,7 +1110,7 @@
     },
     "splash": {
       "addFolder": "Dodaj folder",
-      "brand": "RapidRAW",
+      "brand": "PicPortal Editor",
       "continueSession": "Kontynuuj sesję",
       "contribute": "Współtwórz na GitHubie",
       "descriptionAndroid": "Niewiarygodnie szybki, akcelerowany przez GPU edytor obrazów RAW. Otwórz bibliotekę, aby rozpocząć.",
@@ -1894,6 +1894,17 @@
       "title": "Tagowanie"
     },
     "thanks": {
+      "attribution": {
+        "basedOn": "Na podstawie",
+        "by": "autorstwa",
+        "license": "Licencja AGPL-3.0",
+        "originalAuthor": "Timon Käch",
+        "originalProject": "RapidRAW",
+        "source": "Oryginalny kod źródłowy",
+        "splashImages": "Autor obrazów powitalnych:",
+        "support": "Wesprzyj oryginalny projekt na Ko-fi",
+        "title": "Informacje o autorstwie"
+      },
       "description": "Ogromne podziękowania dla następujących projektów, które były niezwykle ważne przy tworzeniu RapidRAW:",
       "list": {
         "darktable": "Za kilka referencyjnych implementacji, które posłużyły za wskazówki.",

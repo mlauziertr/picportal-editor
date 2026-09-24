@@ -427,17 +427,6 @@ export default function MainLibrary(props: MainLibraryProps) {
                     as="div"
                     className="absolute bottom-8 left-8 lg:left-16 space-y-1 z-10 drop-shadow-sm"
                   >
-                    <p>
-                      {t('library.splash.imagesBy')}{' '}
-                      <a
-                        href="https://instagram.com/timonkaech.photography"
-                        className="hover:underline"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                      >
-                        Timon Käch
-                      </a>
-                    </p>
                     {appVersion && (
                       <div className="flex items-center space-x-2">
                         <p>
@@ -467,26 +456,6 @@ export default function MainLibrary(props: MainLibraryProps) {
                               </span>
                             )}
                           </span>
-                        </p>
-                        <span>-</span>
-                        <p>
-                          <a
-                            href="https://ko-fi.com/cybertimon"
-                            className="hover:underline"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                          >
-                            {t('library.splash.donate')}
-                          </a>
-                          <span className="mx-1">{t('library.splash.or')}</span>
-                          <a
-                            href="https://github.com/CyberTimon/RapidRAW"
-                            className="hover:underline"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                          >
-                            {t('library.splash.contribute')}
-                          </a>
                         </p>
                       </div>
                     )}
