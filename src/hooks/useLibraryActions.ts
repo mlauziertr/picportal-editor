@@ -17,6 +17,7 @@ import { globalImageCache } from '../utils/ImageLRUCache';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { computeSortedLibrary } from './useSortedLibrary';
 import { expandGroupedPaths } from '../utils/imageGrouping';
+import { stripVirtualCopySuffix } from '../utils/virtualCopyPath';
 import {
   isRatingProtectedFromCulling,
   persistColorAssignments,
@@ -190,20 +191,21 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
             : [];
     if (pathsToUpdate.length === 0) return;
 
-    const physicalPathsSet = new Set(pathsToUpdate.map((p) => p.split('?vc=')[0]));
+    const physicalPathsSet = new Set(pathsToUpdate.map(stripVirtualCopySuffix));
     const physicalPathsArray = Array.from(physicalPathsSet);
 
     try {
       await invoke(Invokes.UpdateExifFields, { paths: physicalPathsArray, updates });
 
       setEditor((state) => {
-        if (!state.selectedImage || !physicalPathsSet.has(state.selectedImage.path.split('?vc=')[0])) return state;
+        if (!state.selectedImage || !physicalPathsSet.has(stripVirtualCopySuffix(state.selectedImage.path)))
+          return state;
         return { selectedImage: { ...state.selectedImage, exif: { ...(state.selectedImage.exif || {}), ...updates } } };
       });
 
       setLibrary((state) => ({
         imageList: state.imageList.map((img) => {
-          if (physicalPathsSet.has(img.path.split('?vc=')[0])) {
+          if (physicalPathsSet.has(stripVirtualCopySuffix(img.path))) {
             return { ...img, exif: { ...(img.exif || {}), ...updates } };
           }
           return img;

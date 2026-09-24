@@ -59,6 +59,7 @@ import TaggingSubMenu from '../context/TaggingSubMenu';
 import { useEditorActions } from './useEditorActions';
 import { useLibraryActions } from './useLibraryActions';
 import { globalImageCache } from '../utils/ImageLRUCache';
+import { isVirtualCopyPath, splitVirtualCopyPath, stripVirtualCopySuffix } from '../utils/virtualCopyPath';
 
 export interface UseAppContextMenusProps {
   handleImageSelect: (path: string) => void;
@@ -377,16 +378,15 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
 
       const selectionHasVirtualCopies =
         isSingleSelection &&
-        !finalSelection[0].includes('?vc=') &&
-        imageList.some((image) => image.path.startsWith(`${finalSelection[0]}?vc=`));
+        !isVirtualCopyPath(finalSelection[0]) &&
+        imageList.some((image) => splitVirtualCopyPath(image.path)?.sourcePath === finalSelection[0]);
 
       const hasAssociatedFiles = finalSelection.some((selectedPath) => {
         const image = imageList.find((img) => img.path === selectedPath);
         if (image?.group_id != null) return true;
 
         const getBasePath = (p: string) => {
-          const qMark = p.indexOf('?');
-          const clean = qMark === -1 ? p : p.substring(0, qMark);
+          const clean = stripVirtualCopySuffix(p);
           const dot = clean.lastIndexOf('.');
           return dot === -1 ? clean : clean.substring(0, dot);
         };

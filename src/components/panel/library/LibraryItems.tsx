@@ -12,6 +12,7 @@ import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 import { useDraggable } from '@dnd-kit/core';
 import { COLOR_LABELS, Color } from '../../../utils/adjustments';
+import { splitVirtualCopyPath } from '../../../utils/virtualCopyPath';
 import { ThumbnailAspectRatio, ImageFile, ExifOverlay } from '../../ui/AppProperties';
 import Text from '../../ui/Text';
 import { TextColors, TextVariants, TextWeights, TEXT_COLOR_KEYS } from '../../../types/typography';
@@ -73,11 +74,11 @@ const ThumbnailComponent = ({
   });
 
   const { baseName, isVirtualCopy } = useMemo(() => {
-    const fullFileName = path.split(/[\\/]/).pop() || '';
-    const parts = fullFileName.split('?vc=');
+    const virtualCopy = splitVirtualCopyPath(path);
+    const sourcePath = virtualCopy?.sourcePath ?? path;
     return {
-      baseName: parts[0],
-      isVirtualCopy: parts.length > 1,
+      baseName: sourcePath.split(/[\\/]/).pop() || '',
+      isVirtualCopy: virtualCopy !== null,
     };
   }, [path]);
 
@@ -509,11 +510,11 @@ const ListItemComponent = ({
   });
 
   const { baseName, isVirtualCopy } = useMemo(() => {
-    const fullFileName = path.split(/[\\/]/).pop() || '';
-    const parts = fullFileName.split('?vc=');
+    const virtualCopy = splitVirtualCopyPath(path);
+    const sourcePath = virtualCopy?.sourcePath ?? path;
     return {
-      baseName: parts[0],
-      isVirtualCopy: parts.length > 1,
+      baseName: sourcePath.split(/[\\/]/).pop() || '',
+      isVirtualCopy: virtualCopy !== null,
     };
   }, [path]);
 

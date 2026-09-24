@@ -18,6 +18,7 @@ import { TextColors, TextVariants, TextWeights, TEXT_COLOR_KEYS } from '../../..
 import { useProcessStore } from '../../../store/useProcessStore';
 import { ExifOverlay } from '../../ui/AppProperties';
 import { useSettingsStore } from '../../../store/useSettingsStore';
+import { stripVirtualCopySuffix } from '../../../utils/virtualCopyPath';
 
 const LibraryListRow = (props: React.ComponentProps<typeof Row>): React.ReactElement | null => <Row {...props} />;
 
@@ -141,7 +142,7 @@ const groupImagesByFolder = (images: any[], baseFolderPath: string | null) => {
   const groups: Record<string, any[]> = {};
 
   images.forEach((img) => {
-    const physicalPath = img.path.split('?vc=')[0];
+    const physicalPath = stripVirtualCopySuffix(img.path);
     const separator = physicalPath.includes('/') ? '/' : '\\';
     const lastSep = physicalPath.lastIndexOf(separator);
     const dir = lastSep > -1 ? physicalPath.substring(0, lastSep) : physicalPath;

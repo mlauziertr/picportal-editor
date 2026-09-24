@@ -416,11 +416,27 @@ pub struct ImportSettings {
     pub delete_after_import: bool,
 }
 
+pub fn virtual_copy_parts(virtual_path: &str) -> Option<(&str, &str)> {
+    let (source_path, copy_id) = virtual_path.rsplit_once("?vc=")?;
+    if copy_id.len() != 6
+        || !copy_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || !is_supported_image_file(source_path)
+    {
+        return None;
+    }
+    Some((source_path, copy_id))
+}
+
+pub fn is_virtual_copy_path(virtual_path: &str) -> bool {
+    virtual_copy_parts(virtual_path).is_some()
+}
+
 pub fn parse_virtual_path(virtual_path: &str) -> (PathBuf, PathBuf) {
-    let (source_path_str, copy_id) = if let Some((base, id)) = virtual_path.rsplit_once("?vc=") {
-        (base.to_string(), Some(id.to_string()))
-    } else {
-        (virtual_path.to_string(), None)
+    let (source_path_str, copy_id) = match virtual_copy_parts(virtual_path) {
+        Some((source_path, copy_id)) => (source_path.to_string(), Some(copy_id.to_string())),
+        None => (virtual_path.to_string(), None),
     };
 
     let source_path = PathBuf::from(source_path_str);
@@ -999,7 +1015,7 @@ fn sync_album_path_changes(
                                     current_img = new_path.clone();
                                     *changed = true;
                                 } else if let Some((base_path, vc_id)) =
-                                    current_img.rsplit_once("?vc=")
+                                    virtual_copy_parts(&current_img)
                                     && let Some(new_base) = r.get(base_path)
                                 {
                                     current_img = format!("{}?vc={}", new_base, vc_id);
@@ -1021,7 +1037,7 @@ fn sync_album_path_changes(
                                         }
 
                                         if let Some((base_path, _)) =
-                                            current_img.rsplit_once("?vc=")
+                                            virtual_copy_parts(&current_img)
                                             && base_path == del_path_str
                                         {
                                             is_deleted = true;
@@ -1077,7 +1093,7 @@ pub fn get_album_images(
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
 
-            let is_virtual_copy = virtual_path.contains("?vc=");
+            let is_virtual_copy = is_virtual_copy_path(&virtual_path);
             let is_cloud_placeholder = is_cloud_placeholder(&source_path);
 
             let xmp_is_placeholder = enable_xmp_sync
@@ -3517,7 +3533,7 @@ pub fn delete_files_from_disk(paths: Vec<String>, app_handle: AppHandle) -> Resu
         let (source_path, sidecar_path) = parse_virtual_path(&path_str);
         deletions.insert(path_str.clone());
 
-        if path_str.contains("?vc=") {
+        if is_virtual_copy_path(&path_str) {
             if sidecar_path.exists() {
                 files_to_trash.insert(sidecar_path);
             }
@@ -4365,8 +4381,36 @@ pub fn sync_metadata_to_xmp(source_path: &Path, metadata: &ImageMetadata, create
 }
 
 #[cfg(test)]
-mod rating_provenance_tests {
+mod file_management_regression_tests {
     use super::*;
+
+    #[test]
+    fn virtual_copy_suffix_is_not_confused_with_question_marks_in_folders() {
+        let folder_with_marker = "/synthetic?vc=abcdef/photos/image.jpg";
+        let virtual_path = "/synthetic?vc=abcdef/photos/image.jpg?vc=123abc";
+
+        let (folder_source, folder_sidecar) = parse_virtual_path(folder_with_marker);
+        assert_eq!(folder_source, PathBuf::from(folder_with_marker));
+        assert_eq!(
+            folder_sidecar,
+            PathBuf::from("/synthetic?vc=abcdef/photos/image.jpg.rrdata")
+        );
+        assert!(!is_virtual_copy_path(folder_with_marker));
+
+        let (copy_source, copy_sidecar) = parse_virtual_path(virtual_path);
+        assert_eq!(copy_source, PathBuf::from(folder_with_marker));
+        assert_eq!(
+            copy_sidecar,
+            PathBuf::from("/synthetic?vc=abcdef/photos/image.jpg.123abc.rrdata")
+        );
+        assert!(is_virtual_copy_path(virtual_path));
+
+        let directory_name = "/synthetic-folder?vc=abcdef";
+        assert_eq!(
+            parse_virtual_path(directory_name).0,
+            PathBuf::from(directory_name)
+        );
+    }
 
     #[test]
     fn manual_zero_rating_survives_persistence_and_automatic_reclassification() {

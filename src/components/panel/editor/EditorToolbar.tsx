@@ -10,6 +10,7 @@ import { TextColors, TextVariants, TextWeights } from '../../../types/typography
 import { useLibraryStore } from '../../../store/useLibraryStore';
 import { useSettingsStore } from '../../../store/useSettingsStore';
 import { findGroupVariants, getVariantLabel } from '../../../utils/imageGrouping';
+import { isVirtualCopyPath, splitVirtualCopyPath } from '../../../utils/virtualCopyPath';
 
 interface EditorToolbarProps {
   canRedo: boolean;
@@ -72,7 +73,7 @@ const EditorToolbar = memo(
 
     const variantOptions = useMemo(() => {
       if (groupingMode === 'off' || !onImageSelect) return [];
-      const isVC = selectedImage.path.includes('?vc=');
+      const isVC = isVirtualCopyPath(selectedImage.path);
       if (isVC) return [];
       const variants = findGroupVariants(imageList, selectedImage.group_id);
       if (variants.length < 2) return [];
@@ -81,8 +82,8 @@ const EditorToolbar = memo(
 
     const { baseName, isVirtualCopy, vcId, exifData, hasExif } = useMemo(() => {
       const path = selectedImage.path;
-      const parts = path.split('?vc=');
-      const fullFileName = parts[0].split(/[\\/]/).pop() || '';
+      const virtualCopy = splitVirtualCopyPath(path);
+      const fullFileName = (virtualCopy?.sourcePath ?? path).split(/[\\/]/).pop() || '';
 
       const exif = selectedImage.exif || {};
 
@@ -117,8 +118,8 @@ const EditorToolbar = memo(
 
       return {
         baseName: fullFileName,
-        isVirtualCopy: parts.length > 1,
-        vcId: parts.length > 1 ? parts[1] : null,
+        isVirtualCopy: virtualCopy !== null,
+        vcId: virtualCopy?.copyId ?? null,
         exifData: data,
         hasExif: hasData,
       };

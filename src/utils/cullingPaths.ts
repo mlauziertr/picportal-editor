@@ -1,5 +1,7 @@
+import { stripVirtualCopySuffix } from './virtualCopyPath';
+
 export function isDirectChildPath(path: string, folderPath: string): boolean {
-  const normalizedPath = path.split('?')[0].replace(/\\/g, '/');
+  const normalizedPath = stripVirtualCopySuffix(path).replace(/\\/g, '/');
   const normalizedFolder = folderPath.replace(/\\/g, '/').replace(/\/+$/, '');
   const folderPrefix = normalizedFolder ? `${normalizedFolder}/` : '/';
   if (!normalizedPath.startsWith(folderPrefix)) return false;

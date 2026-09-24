@@ -1,4 +1,5 @@
 import { GroupPreference, GroupingMode, ImageFile } from '../components/ui/AppProperties';
+import { stripVirtualCopySuffix } from './virtualCopyPath';
 
 export type GroupId = string;
 
@@ -70,7 +71,7 @@ function pickPrimary(files: ImageFile[], preference: GroupPreference): ImageFile
 }
 
 function getFileExtension(path: string): string {
-  const clean = path.split('?')[0];
+  const clean = stripVirtualCopySuffix(path);
   const dot = clean.lastIndexOf('.');
   if (dot === -1) return '';
   return clean.substring(dot + 1).toLowerCase();

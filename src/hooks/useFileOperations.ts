@@ -9,6 +9,7 @@ import { useProcessStore } from '../store/useProcessStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { Invokes } from '../components/ui/AppProperties';
 import { Status } from '../components/ui/ExportImportProperties';
+import { isVirtualCopyPath, splitVirtualCopyPath, stripVirtualCopySuffix } from '../utils/virtualCopyPath';
 
 export function useFileOperations(
   refreshImageList: () => Promise<void>,
@@ -37,7 +38,7 @@ export function useFileOperations(
       let nextImagePath: string | null = null;
 
       if (activePath) {
-        const physicalPath = activePath.split('?vc=')[0];
+        const physicalPath = stripVirtualCopySuffix(activePath);
         const isActiveImageDeleted = pathsToDelete.some((p) => p === activePath || p === physicalPath);
 
         if (isActiveImageDeleted) {
@@ -71,7 +72,7 @@ export function useFileOperations(
         await refreshImageList();
 
         if (selectedImage && activeView === 'editor') {
-          const physicalPath = selectedImage.path.split('?vc=')[0];
+          const physicalPath = stripVirtualCopySuffix(selectedImage.path);
           const isFileBeingEditedDeleted = pathsToDelete.some((p) => p === selectedImage.path || p === physicalPath);
 
           if (isFileBeingEditedDeleted) {
@@ -89,7 +90,7 @@ export function useFileOperations(
           }
 
           if (selectedImage) {
-            const physicalPath = selectedImage.path.split('?vc=')[0];
+            const physicalPath = stripVirtualCopySuffix(selectedImage.path);
             if (pathsToDelete.some((p) => p === selectedImage.path || p === physicalPath)) {
               useEditorStore.getState().setEditor({ selectedImage: null });
             }
@@ -116,8 +117,8 @@ export function useFileOperations(
 
     const selectionHasVirtualCopies =
       isSingle &&
-      !pathsToDelete[0].includes('?vc=') &&
-      imageList.some((image) => image.path.startsWith(`${pathsToDelete[0]}?vc=`));
+      !isVirtualCopyPath(pathsToDelete[0]) &&
+      imageList.some((image) => splitVirtualCopyPath(image.path)?.sourcePath === pathsToDelete[0]);
 
     let modalTitle = 'Confirm Delete';
     let modalMessage = '';
