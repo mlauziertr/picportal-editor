@@ -4269,6 +4269,9 @@ pub fn sync_metadata_from_xmp(source_path: &Path, metadata: &mut ImageMetadata) 
                 continue;
             }
             if !current_tags.contains(&tag) {
+                if tag.starts_with(COLOR_TAG_PREFIX) {
+                    metadata.color_label_is_manual = None;
+                }
                 current_tags.push(tag);
             }
         }
@@ -4280,6 +4283,7 @@ pub fn sync_metadata_from_xmp(source_path: &Path, metadata: &mut ImageMetadata) 
             if !current_tags.contains(&label_tag) {
                 current_tags.retain(|t| !t.starts_with(COLOR_TAG_PREFIX));
                 current_tags.push(label_tag);
+                metadata.color_label_is_manual = None;
             }
         }
 
@@ -4504,6 +4508,24 @@ mod file_management_regression_tests {
         assert!(!sync_metadata_from_xmp(&image_path, &mut reloaded));
         assert_eq!(reloaded.tags, None);
         assert_eq!(reloaded.color_label_is_manual, Some(true));
+    }
+
+    #[test]
+    fn xmp_import_without_a_sidecar_keeps_color_provenance_unknown() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let image_path = directory.path().join("image.jpg");
+        let sidecar_path = directory.path().join("image.jpg.rrdata");
+        fs::write(image_path.with_extension("xmp"), "<xmp:Label>Green</xmp:Label>")
+            .expect("write synthetic XMP");
+        let settings = AppSettings::default();
+
+        let loaded = resolve_image_metadata(&image_path, &sidecar_path, true, &settings);
+        let reloaded = crate::exif_processing::load_sidecar(&sidecar_path);
+
+        assert_eq!(loaded.tags, Some(vec!["color:green".to_owned()]));
+        assert_eq!(loaded.color_label_is_manual, None);
+        assert_eq!(reloaded.tags, Some(vec!["color:green".to_owned()]));
+        assert_eq!(reloaded.color_label_is_manual, None);
     }
 
     #[test]

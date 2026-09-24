@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   getCullingProtectedPaths,
   isRatingProtectedFromCulling,
+  mergeLoadedColorLabel,
   mergeLoadedRating,
   persistBatchWithReconciliation,
   persistColorAssignments,
@@ -45,6 +46,26 @@ test('manual and ambiguous color decisions stay protected independently of stars
 test('stale metadata refresh cannot replace a manually cleared rating', () => {
   assert.deepEqual(mergeLoadedRating(0, true, 4, false), { rating: 0, ratingIsManual: true });
   assert.deepEqual(mergeLoadedRating(undefined, null, 4, null), { rating: 4, ratingIsManual: null });
+});
+
+test('stale metadata events preserve an explicit manual color clear', () => {
+  assert.deepEqual(
+    mergeLoadedColorLabel(null, true, ['color:green'], false),
+    { tags: null, colorLabelIsManual: true },
+  );
+  assert.deepEqual(
+    mergeLoadedColorLabel(
+      ['color:blue', 'user:current'],
+      true,
+      ['color:green', 'user:loaded'],
+      false,
+    ),
+    { tags: ['user:loaded', 'color:blue'], colorLabelIsManual: true },
+  );
+  assert.deepEqual(mergeLoadedColorLabel(null, null, null, true), {
+    tags: null,
+    colorLabelIsManual: true,
+  });
 });
 
 test('partial rating failures retain only durable successful groups', async () => {

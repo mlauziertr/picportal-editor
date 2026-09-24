@@ -36,7 +36,9 @@ use crate::lut_processing::{
 };
 use crate::mask_generation::{MaskDefinition, generate_mask_bitmap};
 
-use crate::cache_utils::{calculate_full_job_hash, calculate_transform_hash};
+use crate::cache_utils::{
+    calculate_full_job_hash, calculate_image_cache_hash, calculate_transform_hash,
+};
 use crate::{
     apply_all_transformations, generate_transformed_preview, get_cached_or_generate_mask,
     hydrate_adjustments, load_settings, resolve_warped_image_for_masks,
@@ -122,6 +124,24 @@ pub(crate) enum ExportAdjustmentsMode {
 
 fn is_active_export_path(image_path: &str, active_path: Option<&str>) -> bool {
     active_path == Some(image_path)
+}
+
+fn matching_loaded_image(
+    loaded_image: Option<crate::app_state::LoadedImage>,
+    requested_path: &str,
+) -> Option<crate::app_state::LoadedImage> {
+    loaded_image.filter(|image| image.path == requested_path)
+}
+
+fn estimate_preview_cache_matches(
+    cached: &crate::app_state::CachedPreview,
+    image_path: &str,
+    adjustments: &Value,
+    preview_dim: u32,
+) -> bool {
+    cached.transform_hash
+        == calculate_image_cache_hash(image_path, calculate_transform_hash(adjustments))
+        && cached.preview_dim == preview_dim
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -1233,24 +1253,24 @@ pub(crate) async fn export_images_impl(
                     }
 
                     let base_image = if is_current_edit {
-                        match crate::get_original_image(&state) {
-                            Ok((orig_data_arc, _)) => {
-                                composite_patches_on_image(&orig_data_arc, &js_adjustments)
-                                    .map_err(|e| format!("Failed to composite AI patches: {}", e))?
-                            }
-                            Err(_) => {
-                                let bytes =
-                                    fs::read(&source_path_str).map_err(|e| e.to_string())?;
-                                load_and_composite(
-                                    &bytes,
-                                    &source_path_str,
-                                    &js_adjustments,
-                                    false,
-                                    &settings,
-                                    None,
-                                )
-                                .map_err(|e| format!("Failed to load fallback image: {}", e))?
-                            }
+                        let cached_original = matching_loaded_image(
+                            state.original_image.lock().unwrap().clone(),
+                            &image_path_str,
+                        );
+                        if let Some(original) = cached_original {
+                            composite_patches_on_image(&original.image, &js_adjustments)
+                                .map_err(|e| format!("Failed to composite AI patches: {}", e))?
+                        } else {
+                            let bytes = fs::read(&source_path_str).map_err(|e| e.to_string())?;
+                            load_and_composite(
+                                &bytes,
+                                &source_path_str,
+                                &js_adjustments,
+                                false,
+                                &settings,
+                                None,
+                            )
+                            .map_err(|e| format!("Failed to load fallback image: {}", e))?
                         }
                     } else {
                         match read_file_mapped(Path::new(&source_path_str)) {
@@ -1612,23 +1632,54 @@ pub async fn estimate_export_sizes(
     let single_image_extrapolated_size: usize = if is_current_edit
         && current_edit_adjustments.is_some()
     {
-        let loaded_image = state
-            .original_image
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or("No original image loaded")?;
+        let loaded_image = match matching_loaded_image(
+            state.original_image.lock().unwrap().clone(),
+            first_path,
+        ) {
+            Some(image) => image,
+            None => {
+                let file_slice: Vec<u8>;
+                let mmap_guard;
+                let file_data: &[u8] = match read_file_mapped(Path::new(&source_path_str)) {
+                    Ok(mmap) => {
+                        mmap_guard = Some(mmap);
+                        mmap_guard.as_ref().unwrap()
+                    }
+                    Err(_) => {
+                        file_slice = fs::read(&source_path_str).map_err(|error| error.to_string())?;
+                        &file_slice
+                    }
+                };
+                let image = load_base_image_from_bytes(
+                    file_data,
+                    &source_path_str,
+                    false,
+                    &settings,
+                    None,
+                )
+                .map_err(|error| error.to_string())?;
+                crate::app_state::LoadedImage {
+                    path: first_path.to_string(),
+                    image: Arc::new(image),
+                    is_raw,
+                }
+            }
+        };
         let mut adjustments_clone = current_edit_adjustments.clone().unwrap();
         hydrate_adjustments(&state, &mut adjustments_clone);
 
-        let new_transform_hash = calculate_transform_hash(&adjustments_clone);
         let cached_preview_lock = state.cached_preview.lock().unwrap();
         let preview_dim = settings.editor_preview_resolution.unwrap_or(1920);
 
         let (preview_image, scale, unscaled_crop_offset) = if let Some(cached) =
             &*cached_preview_lock
         {
-            if cached.transform_hash == new_transform_hash && cached.preview_dim == preview_dim {
+            if estimate_preview_cache_matches(
+                cached,
+                &loaded_image.path,
+                &adjustments_clone,
+                preview_dim,
+            ) {
                 let img = Arc::clone(&cached.image);
                 let s = cached.scale;
                 let offset = cached.unscaled_crop_offset;
@@ -1888,6 +1939,60 @@ mod tests {
         assert!(!is_active_export_path(
             first_copy,
             Some("/synthetic/image.jpg?vc=123abc")
+        ));
+    }
+
+    #[test]
+    fn cached_source_image_must_match_the_selected_virtual_copy() {
+        let first_copy = "/synthetic/image.jpg?vc=123abc";
+        let second_copy = "/synthetic/image.jpg?vc=abcdef";
+        let cached_first = crate::app_state::LoadedImage {
+            path: first_copy.to_owned(),
+            image: Arc::new(DynamicImage::new_rgb8(1, 1)),
+            is_raw: false,
+        };
+
+        assert!(matching_loaded_image(Some(cached_first.clone()), second_copy).is_none());
+        assert_eq!(
+            matching_loaded_image(Some(cached_first), first_copy)
+                .expect("matching image")
+                .path,
+            first_copy
+        );
+    }
+
+    #[test]
+    fn estimate_preview_cache_uses_renderer_path_bound_hashes() {
+        let image_path = "/synthetic/image.jpg?vc=123abc";
+        let adjustments = serde_json::json!({ "orientationSteps": 0, "rotation": 0.0 });
+        let transform_hash = calculate_transform_hash(&adjustments);
+        let cached = crate::app_state::CachedPreview {
+            image: Arc::new(DynamicImage::new_rgb8(1, 1)),
+            small_image: Arc::new(DynamicImage::new_rgb8(1, 1)),
+            transform_hash: calculate_image_cache_hash(image_path, transform_hash),
+            scale: 1.0,
+            unscaled_crop_offset: (0.0, 0.0),
+            preview_dim: 1920,
+            interactive_divisor: 1.0,
+        };
+
+        assert!(estimate_preview_cache_matches(
+            &cached,
+            image_path,
+            &adjustments,
+            1920
+        ));
+        assert!(!estimate_preview_cache_matches(
+            &cached,
+            "/synthetic/image.jpg?vc=abcdef",
+            &adjustments,
+            1920
+        ));
+        assert!(!estimate_preview_cache_matches(
+            &cached,
+            image_path,
+            &adjustments,
+            1280
         ));
     }
 }

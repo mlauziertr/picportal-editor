@@ -6,7 +6,7 @@ import { useProcessStore } from '../store/useProcessStore';
 import { useEditorStore } from '../store/useEditorStore';
 import { useUIStore } from '../store/useUIStore';
 import { useLibraryStore } from '../store/useLibraryStore';
-import { mergeLoadedRating } from '../utils/ratingPersistence';
+import { mergeLoadedColorLabel, mergeLoadedRating } from '../utils/ratingPersistence';
 
 interface TauriListenerProps {
   refreshAllFolderTrees: () => void;
@@ -144,6 +144,12 @@ export function useTauriListeners({
             rating,
             rating_is_manual,
           );
+          const loadedColorLabel = mergeLoadedColorLabel(
+            currentImage?.tags,
+            currentImage?.color_label_is_manual,
+            tags,
+            color_label_is_manual,
+          );
           return {
             imageRatings: { ...state.imageRatings, [path]: loadedRating.rating },
             imageList: state.imageList.map((img) =>
@@ -152,9 +158,12 @@ export function useTauriListeners({
                     ...img,
                     rating: loadedRating.rating,
                     rating_is_manual: loadedRating.ratingIsManual,
-                    color_label_is_manual,
+                    color_label_is_manual: loadedColorLabel.colorLabelIsManual,
                     is_edited,
-                    tags: tags ?? img.tags,
+                    tags:
+                      loadedColorLabel.colorLabelIsManual === true
+                        ? loadedColorLabel.tags
+                        : tags ?? img.tags,
                   }
                 : img,
             ),

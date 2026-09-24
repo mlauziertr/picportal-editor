@@ -42,6 +42,25 @@ export function mergeLoadedRating(
   return { rating: loadedRating, ratingIsManual: loadedIsManual };
 }
 
+export function mergeLoadedColorLabel(
+  currentTags: string[] | null | undefined,
+  currentIsManual: boolean | null | undefined,
+  loadedTags: string[] | null,
+  loadedIsManual: boolean | null,
+): { tags: string[] | null; colorLabelIsManual: boolean | null } {
+  if (currentIsManual !== true) {
+    return { tags: loadedTags, colorLabelIsManual: loadedIsManual };
+  }
+
+  const currentColorTags = (currentTags || []).filter((tag) => tag.startsWith('color:'));
+  const incomingTags = (loadedTags ?? currentTags ?? []).filter((tag) => !tag.startsWith('color:'));
+  const tags = [...incomingTags, ...currentColorTags];
+  return {
+    tags: tags.length > 0 ? tags : null,
+    colorLabelIsManual: true,
+  };
+}
+
 export interface RatingPersistenceFailure {
   rating: number;
   paths: string[];
