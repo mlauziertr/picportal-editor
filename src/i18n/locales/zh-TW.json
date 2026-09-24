@@ -1600,6 +1600,7 @@
     "refresh": "重新整理圖庫",
     "restoring": "正在還原安全的 PicPortal 工作階段…",
     "selectedImages_other": "將轉譯並上傳 {{count}} 張影像",
+    "selectGallery": "選擇圖庫",
     "sessionExpired": "PicPortal 工作階段已過期；請重新連線",
     "status": "狀態",
     "statusActive": "已啟用",

@@ -1647,6 +1647,7 @@
     "selectedImages_one": "{{count}} image sera rendue et téléversée",
     "selectedImages_many": "{{count}} images seront rendues et téléversées",
     "selectedImages_other": "{{count}} images seront rendues et téléversées",
+    "selectGallery": "Sélectionner une galerie",
     "sessionExpired": "Session PicPortal expirée ; reconnectez-vous",
     "status": "Statut",
     "statusActive": "Active",

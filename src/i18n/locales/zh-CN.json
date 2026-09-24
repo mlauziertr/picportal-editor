@@ -1600,6 +1600,7 @@
     "refresh": "刷新图库",
     "restoring": "正在恢复安全的 PicPortal 会话…",
     "selectedImages_other": "将渲染并上传 {{count}} 张图片",
+    "selectGallery": "选择图库",
     "sessionExpired": "PicPortal 会话已过期；请重新连接",
     "status": "状态",
     "statusActive": "已启用",

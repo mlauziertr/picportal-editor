@@ -1686,6 +1686,7 @@
     "selectedImages_few": "{{count}} obrazy zostaną wyrenderowane i przesłane",
     "selectedImages_many": "{{count}} obrazów zostanie wyrenderowanych i przesłanych",
     "selectedImages_other": "{{count}} obrazów zostanie wyrenderowanych i przesłanych",
+    "selectGallery": "Wybierz galerię",
     "sessionExpired": "Sesja PicPortal wygasła; połącz ponownie",
     "status": "Status",
     "statusActive": "Aktywna",

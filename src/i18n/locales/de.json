@@ -1608,6 +1608,7 @@
     "restoring": "Sichere PicPortal-Sitzung wird wiederhergestellt…",
     "selectedImages_one": "{{count}} Bild wird gerendert und hochgeladen",
     "selectedImages_other": "{{count}} Bilder werden gerendert und hochgeladen",
+    "selectGallery": "Galerie auswählen",
     "sessionExpired": "PicPortal-Sitzung abgelaufen; erneut verbinden",
     "status": "Status",
     "statusActive": "Aktiv",

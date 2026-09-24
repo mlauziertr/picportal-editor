@@ -1600,6 +1600,7 @@
     "refresh": "ギャラリーを更新",
     "restoring": "安全な PicPortal セッションを復元しています…",
     "selectedImages_other": "{{count}} 枚の画像をレンダリングしてアップロードします",
+    "selectGallery": "ギャラリーを選択",
     "sessionExpired": "PicPortal セッションの期限が切れました。再接続してください",
     "status": "ステータス",
     "statusActive": "有効",

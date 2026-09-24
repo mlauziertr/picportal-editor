@@ -1647,6 +1647,7 @@
     "selectedImages_one": "{{count}} imagem será renderizada e carregada",
     "selectedImages_many": "{{count}} imagens serão renderizadas e carregadas",
     "selectedImages_other": "{{count}} imagens serão renderizadas e carregadas",
+    "selectGallery": "Selecione uma galeria",
     "sessionExpired": "Sessão do PicPortal expirada; conecte-se novamente",
     "status": "Estado",
     "statusActive": "Ativa",

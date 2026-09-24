@@ -1686,6 +1686,7 @@
     "selectedImages_few": "Будет обработано и загружено {{count}} изображения",
     "selectedImages_many": "Будет обработано и загружено {{count}} изображений",
     "selectedImages_other": "Будет обработано и загружено {{count}} изображений",
+    "selectGallery": "Выберите галерею",
     "sessionExpired": "Сессия PicPortal истекла; подключитесь снова",
     "status": "Статус",
     "statusActive": "Активна",

@@ -1608,6 +1608,7 @@
     "restoring": "Restoring secure PicPortal session…",
     "selectedImages_one": "{{count}} image will be rendered and uploaded",
     "selectedImages_other": "{{count}} images will be rendered and uploaded",
+    "selectGallery": "Select a gallery",
     "sessionExpired": "PicPortal session expired; connect again",
     "status": "Status",
     "statusActive": "Active",

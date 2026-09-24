@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { LogIn, LogOut, RefreshCw, FolderPlus } from 'lucide-react';
@@ -7,6 +7,7 @@ import Button from '../../ui/Button';
 import Text from '../../ui/Text';
 import { TextColors, TextVariants } from '../../../types/typography';
 import { Invokes } from '../../ui/AppProperties';
+import { picPortalDestinationChanged, retainExplicitGallerySelection } from '../../../utils/picPortalSelection';
 
 export interface PicPortalExportOptions {
   galleryId: string;
@@ -67,6 +68,8 @@ export default function PicPortalPanel({
   const [admin, setAdmin] = useState<AdminIdentity | null>(null);
   const [galleries, setGalleries] = useState<GallerySummary[]>([]);
   const [galleryId, setGalleryId] = useState('');
+  const galleryIdRef = useRef('');
+  const accountIdentityRef = useRef<string | null>(null);
   const [includeFaceAnalysis, setIncludeFaceAnalysis] = useState(false);
   const [newGalleryTitle, setNewGalleryTitle] = useState('');
   const [newGalleryType, setNewGalleryType] = useState<GalleryType>('');
@@ -83,6 +86,8 @@ export default function PicPortalPanel({
   const selectedGallery = galleries.find((gallery) => gallery.id === galleryId) ?? null;
 
   const clearSession = useCallback(() => {
+    accountIdentityRef.current = null;
+    galleryIdRef.current = '';
     setAdmin(null);
     setGalleries([]);
     setGalleryId('');
@@ -96,11 +101,22 @@ export default function PicPortalPanel({
         if (session.message) setStatus(session.message);
         return;
       }
+      const nextAccount = session.admin.email.trim().toLowerCase();
+      const nextGalleryId =
+        accountIdentityRef.current === nextAccount
+          ? retainExplicitGallerySelection(
+              galleryIdRef.current,
+              session.galleries.map((gallery) => gallery.id),
+            )
+          : '';
+      if (picPortalDestinationChanged(accountIdentityRef.current, galleryIdRef.current, nextAccount, nextGalleryId)) {
+        setIncludeFaceAnalysis(false);
+      }
+      accountIdentityRef.current = nextAccount;
+      galleryIdRef.current = nextGalleryId;
       setAdmin(session.admin);
       setGalleries(session.galleries);
-      setGalleryId((current) =>
-        session.galleries.some((gallery) => gallery.id === current) ? current : session.galleries[0]?.id || '',
-      );
+      setGalleryId(nextGalleryId);
       if (session.message) setStatus(session.message);
     },
     [clearSession],
@@ -146,8 +162,23 @@ export default function PicPortalPanel({
     setBusy(true);
     try {
       const next = await invoke<GallerySummary[]>(Invokes.PicPortalGalleries);
+      const nextGalleryId = retainExplicitGallerySelection(
+        galleryIdRef.current,
+        next.map((gallery) => gallery.id),
+      );
+      if (
+        picPortalDestinationChanged(
+          accountIdentityRef.current,
+          galleryIdRef.current,
+          accountIdentityRef.current,
+          nextGalleryId,
+        )
+      ) {
+        setIncludeFaceAnalysis(false);
+      }
+      galleryIdRef.current = nextGalleryId;
       setGalleries(next);
-      setGalleryId((current) => (next.some((gallery) => gallery.id === current) ? current : next[0]?.id || ''));
+      setGalleryId(nextGalleryId);
       setStatus('');
     } catch (error) {
       if (isExpiredError(error)) clearSession();
@@ -162,9 +193,15 @@ export default function PicPortalPanel({
     setStatus('');
     try {
       const result = await invoke<LoginResult>(Invokes.PicPortalLogin, { email, password });
+      const nextAccount = result.admin.email.trim().toLowerCase();
+      if (picPortalDestinationChanged(accountIdentityRef.current, galleryIdRef.current, nextAccount, '')) {
+        setIncludeFaceAnalysis(false);
+      }
+      accountIdentityRef.current = nextAccount;
+      galleryIdRef.current = '';
       setAdmin(result.admin);
       setGalleries(result.galleries);
-      setGalleryId(result.galleries[0]?.id || '');
+      setGalleryId('');
       setPassword('');
       const connected = t('picportal.loggedIn', { defaultValue: 'Connected to PicPortal' });
       setStatus(result.message ? `${connected}\n${result.message}` : connected);
@@ -216,8 +253,18 @@ export default function PicPortalPanel({
         },
       });
       setGalleries((current) => [...current.filter((item) => item.id !== gallery.id), gallery]);
+      if (
+        picPortalDestinationChanged(
+          accountIdentityRef.current,
+          galleryIdRef.current,
+          accountIdentityRef.current,
+          gallery.id,
+        )
+      ) {
+        setIncludeFaceAnalysis(false);
+      }
+      galleryIdRef.current = gallery.id;
       setGalleryId(gallery.id);
-      setIncludeFaceAnalysis(false);
       setStatus(t('picportal.galleryCreated', { defaultValue: 'Gallery created' }));
       setNewGalleryTitle('');
       setNewGalleryType('');
@@ -327,9 +374,26 @@ export default function PicPortalPanel({
           <select
             className="w-full rounded-md bg-bg-primary border border-border-color px-2 py-1 text-sm"
             value={galleryId}
-            onChange={(event) => setGalleryId(event.target.value)}
+            onChange={(event) => {
+              const nextGalleryId = event.target.value;
+              if (
+                picPortalDestinationChanged(
+                  accountIdentityRef.current,
+                  galleryIdRef.current,
+                  accountIdentityRef.current,
+                  nextGalleryId,
+                )
+              ) {
+                setIncludeFaceAnalysis(false);
+              }
+              galleryIdRef.current = nextGalleryId;
+              setGalleryId(nextGalleryId);
+            }}
             disabled={busy || disabled}
           >
+            <option value="" disabled>
+              {t('picportal.selectGallery', { defaultValue: 'Select a gallery' })}
+            </option>
             {galleries.map((gallery) => (
               <option key={gallery.id} value={gallery.id}>
                 {gallery.title || gallery.slug}
