@@ -1348,7 +1348,21 @@
         "unrated": "No reliable detector signal was available"
       },
       "applyDecisions": "Assign ratings and color labels",
-      "detailEyes": "Eyes"
+      "detailEyes": "Eyes",
+      "detectSubject": "检测照片主体",
+      "subjectProfile": "拍摄类型",
+      "profileDance": "舞蹈 / 动作",
+      "profileGeneral": "常规",
+      "profilePortrait": "人像",
+      "profileSports": "体育",
+      "profileWedding": "婚礼",
+      "subjectUnknown": "主体归属不确定",
+      "subjectProposalCount": "本地主体建议：{{number}} 项",
+      "subjectConfidence": "{{label}} · 本地检测器置信度 {{score}}%",
+      "detailSubject": "主体归属",
+      "detectSubjectHint": "Grounding DINO 和 Pose 在本地运行。建议仅供审核参考，不会更改评分或删除文件；未知结果仍保持未知。",
+      "subjectAnalysisStatus": "本地主体审核：{{status}}",
+      "subjectMethod": "{{method}}。主体和姿态信号仅供本地审核参考，不会更改评分或删除文件。"
     },
     "denoise": {
       "batchProgressText": "降噪中 {{current}} / {{total}}...",

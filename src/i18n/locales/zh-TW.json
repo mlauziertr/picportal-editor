@@ -1348,7 +1348,21 @@
         "unrated": "No reliable detector signal was available"
       },
       "applyDecisions": "Assign ratings and color labels",
-      "detailEyes": "Eyes"
+      "detailEyes": "Eyes",
+      "detectSubject": "偵測相片主體",
+      "subjectProfile": "拍攝類型",
+      "profileDance": "舞蹈 / 動作",
+      "profileGeneral": "一般",
+      "profilePortrait": "人像",
+      "profileSports": "運動",
+      "profileWedding": "婚禮",
+      "subjectUnknown": "主體歸屬不確定",
+      "subjectProposalCount": "本地主體提案：{{number}} 項",
+      "subjectConfidence": "{{label}} · 本地偵測器信心 {{score}}%",
+      "detailSubject": "主體歸屬",
+      "detectSubjectHint": "Grounding DINO 與 Pose 在本機執行。提案僅供審閱參考，不會更改評分或刪除檔案；未知結果會維持未知。",
+      "subjectAnalysisStatus": "本地主體審閱：{{status}}",
+      "subjectMethod": "{{method}}。主體與姿勢訊號僅供本機審閱參考，不會更改評分或刪除檔案。"
     },
     "denoise": {
       "batchProgressText": "降噪中 {{current}} / {{total}}...",

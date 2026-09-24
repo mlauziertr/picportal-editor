@@ -1405,7 +1405,21 @@
         "unrated": "No reliable detector signal was available"
       },
       "applyDecisions": "Assign ratings and color labels",
-      "detailEyes": "Eyes"
+      "detailEyes": "Eyes",
+      "detectSubject": "Wykrywaj obiekt zdjęcia",
+      "subjectProfile": "Profil sesji",
+      "profileDance": "Taniec / akcja",
+      "profileGeneral": "Ogólne",
+      "profilePortrait": "Portret",
+      "profileSports": "Sport",
+      "profileWedding": "Ślub",
+      "subjectUnknown": "Niepewne przypisanie obiektu",
+      "subjectProposalCount": "Lokalne propozycje obiektu: {{number}}",
+      "subjectConfidence": "{{label}} · pewność lokalnego detektora: {{score}}%",
+      "detailSubject": "Przypisanie obiektu",
+      "detectSubjectHint": "Grounding DINO i Pose działają lokalnie. Propozycje są wyłącznie wskazówką do weryfikacji — nie zmieniają ocen ani nie usuwają plików, a nieznane wyniki pozostają nieznane.",
+      "subjectAnalysisStatus": "Lokalna analiza obiektu: {{status}}",
+      "subjectMethod": "{{method}}. Sygnały obiektu i pozy są tylko lokalną pomocą przy weryfikacji; nie zmieniają ocen ani nie usuwają plików."
     },
     "denoise": {
       "batchProgressText": "Odszumianie {{current}} z {{total}}...",

@@ -1348,7 +1348,21 @@
         "unrated": "No reliable detector signal was available"
       },
       "applyDecisions": "Assign ratings and color labels",
-      "detailEyes": "Eyes"
+      "detailEyes": "Eyes",
+      "detectSubject": "사진의 피사체 감지",
+      "subjectProfile": "촬영 프로필",
+      "profileDance": "댄스 / 액션",
+      "profileGeneral": "일반",
+      "profilePortrait": "인물",
+      "profileSports": "스포츠",
+      "profileWedding": "웨딩",
+      "subjectUnknown": "피사체 연결이 불확실함",
+      "subjectProposalCount": "로컬 피사체 제안 {{number}}개",
+      "subjectConfidence": "{{label}} · 로컬 감지기 신뢰도 {{score}}%",
+      "detailSubject": "피사체 추정",
+      "detectSubjectHint": "Grounding DINO와 Pose는 로컬에서 실행됩니다. 제안은 검토 참고 정보일 뿐이며 평점을 바꾸거나 파일을 삭제하지 않습니다. 알 수 없는 결과는 알 수 없는 상태로 유지됩니다.",
+      "subjectAnalysisStatus": "피사체 로컬 검토: {{status}}",
+      "subjectMethod": "{{method}}. 피사체와 포즈 신호는 로컬 검토 참고 정보일 뿐이며 평점을 바꾸거나 파일을 삭제하지 않습니다."
     },
     "denoise": {
       "batchProgressText": "{{total}}개 중 {{current}}개 노이즈 제거 중...",

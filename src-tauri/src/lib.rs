@@ -41,6 +41,7 @@ mod panorama_utils;
 mod picportal;
 mod preset_converter;
 mod raw_processing;
+mod subject_inference;
 mod tagging;
 mod tagging_utils;
 mod window_customizer;

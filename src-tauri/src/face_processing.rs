@@ -9,6 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use image::DynamicImage;
 use ort::{session::Session, value::Tensor};
 use serde::Deserialize;
 use tauri::{AppHandle, Manager};
@@ -53,6 +54,13 @@ pub struct LocalFace {
     pub embedding: Vec<f32>,
     pub thumbnail: Vec<u8>,
     pub thumbnail_sha256: String,
+    pub eye: EyeAssessment,
+}
+
+#[derive(Debug)]
+pub struct CullingFace {
+    pub bbox: FaceBox,
+    pub confidence: f32,
     pub eye: EyeAssessment,
 }
 
@@ -195,7 +203,42 @@ impl FaceRuntime {
         })
     }
 
+    /// Runs YuNet detection/eye review only; culling never computes an SFace embedding.
+    pub fn analyze_for_culling(
+        &mut self,
+        image: &DynamicImage,
+        score_threshold: f32,
+    ) -> Result<Vec<CullingFace>, String> {
+        if !score_threshold.is_finite() || !(0.0..=1.0).contains(&score_threshold) {
+            return Err("FACE_CULLING_THRESHOLD_INVALID".to_owned());
+        }
+        let rgb = image.to_rgb8();
+        let (width, height) = rgb.dimensions();
+        self.detect_with_threshold(rgb.as_raw(), width, height, score_threshold)
+            .map(|candidates| {
+                candidates
+                    .into_iter()
+                    .map(|candidate| CullingFace {
+                        bbox: candidate.bbox,
+                        confidence: candidate.confidence,
+                        eye: candidate.eye,
+                    })
+                    .collect()
+            })
+    }
+
     fn detect(&mut self, rgb: &[u8], width: u32, height: u32) -> Result<Vec<Candidate>, String> {
+        let score_threshold = self.contract.detector_score_threshold;
+        self.detect_with_threshold(rgb, width, height, score_threshold)
+    }
+
+    fn detect_with_threshold(
+        &mut self,
+        rgb: &[u8],
+        width: u32,
+        height: u32,
+        score_threshold: f32,
+    ) -> Result<Vec<Candidate>, String> {
         let input_size = self.contract.detector_input;
         let (input, scale_x, scale_y, resized_width, resized_height) =
             detector_tensor(rgb, width, height, input_size)?;
@@ -229,7 +272,7 @@ impl FaceRuntime {
                     let confidence = (values[level][index].clamp(0.0, 1.0)
                         * values[level + 3][index].clamp(0.0, 1.0))
                     .sqrt();
-                    if confidence < self.contract.detector_score_threshold {
+                    if confidence < score_threshold {
                         continue;
                     }
                     let boxes = &values[level + 6];

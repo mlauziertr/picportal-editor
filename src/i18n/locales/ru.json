@@ -1405,7 +1405,21 @@
         "unrated": "No reliable detector signal was available"
       },
       "applyDecisions": "Assign ratings and color labels",
-      "detailEyes": "Eyes"
+      "detailEyes": "Eyes",
+      "detectSubject": "Определять объект съёмки",
+      "subjectProfile": "Профиль съёмки",
+      "profileDance": "Танец / действие",
+      "profileGeneral": "Общий",
+      "profilePortrait": "Портрет",
+      "profileSports": "Спорт",
+      "profileWedding": "Свадьба",
+      "subjectUnknown": "Привязка объекта не определена",
+      "subjectProposalCount": "Локальных предложений объекта: {{number}}",
+      "subjectConfidence": "{{label}} · уверенность локального детектора: {{score}}%",
+      "detailSubject": "Определение объекта съёмки",
+      "detectSubjectHint": "Grounding DINO и Pose работают локально. Предложения нужны только для проверки: они не меняют оценки и не удаляют файлы, а неизвестные результаты остаются неизвестными.",
+      "subjectAnalysisStatus": "Локальная проверка объекта: {{status}}",
+      "subjectMethod": "{{method}}. Сигналы объекта и позы — только локальная информация для проверки; они не меняют оценки и не удаляют файлы."
     },
     "denoise": {
       "batchProgressText": "Шумоподавление: {{current}} из {{total}}...",

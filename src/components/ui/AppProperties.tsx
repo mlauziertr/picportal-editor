@@ -407,6 +407,8 @@ export interface CullingSettings {
   detectBlurry: boolean;
   detectClosedEyes: boolean;
   detectHighlights: boolean;
+  detectSubject: boolean;
+  subjectProfile: 'general' | 'portrait' | 'wedding' | 'sports' | 'dance';
   autoAssignStars: boolean;
   preserveExistingDecisions: boolean;
 }
@@ -430,6 +432,19 @@ export interface ImageAnalysisResult {
   reasons: string[];
   category: CullingCategory | string;
   suggestedRating: number;
+  subjectStatus: string;
+  subjectMethod: string;
+  subjectBoxes: Array<{ x: number; y: number; width: number; height: number; score: number; label: string }>;
+  attributedFaces: Array<{
+    role: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    confidence: number;
+    eyeState: string;
+    eyeConfidence: number;
+  }>;
 }
 
 export interface CullGroup {
@@ -450,6 +465,7 @@ export interface CullingSuggestions {
   starAssignments: Record<string, number>;
   colorAssignments: Record<string, string | null>;
   eyeAnalysisStatus: string;
+  subjectAnalysisStatus: string;
 }
 
 export interface CullingPersistenceSummary {

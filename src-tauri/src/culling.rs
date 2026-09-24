@@ -1,6 +1,5 @@
 use crate::app_settings::load_settings;
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use image::{GenericImageView, GrayImage, imageops};
+use image::{DynamicImage, GenericImageView, GrayImage, imageops};
 use image_hasher::{HashAlg, HasherConfig};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -9,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tauri::{AppHandle, Emitter, State};
 
-use crate::{PicPortalState, face_processing, image_loader};
+use crate::{PicPortalState, face_processing, image_loader, subject_inference};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase", default)]
@@ -22,6 +21,8 @@ pub struct CullingSettings {
     pub detect_blurry: bool,
     pub detect_closed_eyes: bool,
     pub detect_highlights: bool,
+    pub detect_subject: bool,
+    pub subject_profile: String,
     pub auto_assign_stars: bool,
     pub preserve_existing_decisions: bool,
 }
@@ -35,10 +36,25 @@ impl Default for CullingSettings {
             detect_blurry: true,
             detect_closed_eyes: true,
             detect_highlights: true,
+            detect_subject: true,
+            subject_profile: "general".to_owned(),
             auto_assign_stars: true,
             preserve_existing_decisions: true,
         }
     }
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AttributedFace {
+    pub role: String,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub confidence: f32,
+    pub eye_state: String,
+    pub eye_confidence: f32,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -63,6 +79,10 @@ pub struct ImageAnalysisResult {
     pub reasons: Vec<String>,
     pub category: String,
     pub suggested_rating: u8,
+    pub subject_status: String,
+    pub subject_method: String,
+    pub subject_boxes: Vec<subject_inference::SubjectBox>,
+    pub attributed_faces: Vec<AttributedFace>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -87,6 +107,7 @@ pub struct CullingSuggestions {
     pub star_assignments: HashMap<String, u8>,
     pub color_assignments: HashMap<String, Option<String>>,
     pub eye_analysis_status: String,
+    pub subject_analysis_status: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -99,6 +120,402 @@ struct CullingProgress {
 struct ImageAnalysisData {
     hash: image_hasher::ImageHash,
     result: ImageAnalysisResult,
+}
+
+const SUBJECT_OVERLAP_MIN: f32 = 0.5;
+const NOSE_DISTANCE_FACTOR: f32 = 1.5;
+const TORSO_INSIDE_MIN: usize = 2;
+const YUNET_PRIMARY_THRESHOLD: f32 = 0.9;
+// Match the verified f049 YuNet contract: only retry at 0.7 when 0.9 found no face.
+const YUNET_FALLBACK_THRESHOLD: f32 = 0.7;
+
+fn should_try_yunet_fallback(primary_face_count: usize) -> bool {
+    primary_face_count == 0
+}
+
+#[derive(Clone)]
+struct AssociationFace {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+#[derive(Clone)]
+struct AssociationPose {
+    nose_x: f32,
+    nose_y: f32,
+    torso: Vec<(f32, f32)>,
+}
+
+fn subject_phrases(profile: &str) -> &'static [&'static str] {
+    match profile {
+        "dance" => &["a couple dancing together.", "a person dancing."],
+        "portrait" => &["a person being photographed."],
+        "sports" => &["a person participating in a sport."],
+        "wedding" => &["a couple or group of people at a wedding."],
+        _ => &["a person or group of people."],
+    }
+}
+
+fn point_in_subject(x: f32, y: f32, subject: &subject_inference::SubjectBox) -> bool {
+    x >= subject.x
+        && x <= subject.x + subject.width
+        && y >= subject.y
+        && y <= subject.y + subject.height
+}
+
+fn face_overlap(face: &AssociationFace, boxes: &[subject_inference::SubjectBox]) -> f32 {
+    let area = face.width * face.height;
+    if area <= 0.0 {
+        return 0.0;
+    }
+    boxes
+        .iter()
+        .map(|subject| {
+            let left = face.x.max(subject.x);
+            let top = face.y.max(subject.y);
+            let right = (face.x + face.width).min(subject.x + subject.width);
+            let bottom = (face.y + face.height).min(subject.y + subject.height);
+            ((right - left).max(0.0) * (bottom - top).max(0.0)) / area
+        })
+        .fold(0.0, f32::max)
+}
+
+fn pose_matches_subject(pose: &AssociationPose, boxes: &[subject_inference::SubjectBox]) -> bool {
+    pose.torso
+        .iter()
+        .filter(|(x, y)| {
+            boxes
+                .iter()
+                .any(|subject| point_in_subject(*x, *y, subject))
+        })
+        .count()
+        >= TORSO_INSIDE_MIN
+}
+
+fn face_is_linked(
+    face: &AssociationFace,
+    boxes: &[subject_inference::SubjectBox],
+    poses: &[AssociationPose],
+) -> bool {
+    if face_overlap(face, boxes) < SUBJECT_OVERLAP_MIN {
+        return false;
+    }
+    let center_x = face.x + face.width / 2.0;
+    let center_y = face.y + face.height / 2.0;
+    let limit = NOSE_DISTANCE_FACTOR * face.width.max(face.height);
+    poses
+        .iter()
+        .filter(|pose| pose_matches_subject(pose, boxes))
+        .any(|pose| {
+            ((center_x - pose.nose_x).powi(2) + (center_y - pose.nose_y).powi(2)).sqrt() <= limit
+        })
+}
+
+fn reviewed_eye_state(eyes: &[face_processing::EyeAssessment]) -> &'static str {
+    if eyes
+        .iter()
+        .any(|eye| eye.state == face_processing::EyeState::Closed)
+    {
+        "closed"
+    } else if eyes.is_empty()
+        || eyes
+            .iter()
+            .any(|eye| eye.state != face_processing::EyeState::Open)
+    {
+        "unknown"
+    } else {
+        "open"
+    }
+}
+
+fn scale_pose_frame(
+    frame: subject_inference::PoseFrame,
+    origin_x: f32,
+    origin_y: f32,
+    target_width: f32,
+    target_height: f32,
+) -> Vec<AssociationPose> {
+    let scale_x = target_width / frame.width.max(1.0);
+    let scale_y = target_height / frame.height.max(1.0);
+    frame
+        .bodies
+        .into_iter()
+        .map(|body| AssociationPose {
+            nose_x: origin_x + body.nose_x * scale_x,
+            nose_y: origin_y + body.nose_y * scale_y,
+            torso: body
+                .torso
+                .into_iter()
+                .map(|(x, y)| (origin_x + x * scale_x, origin_y + y * scale_y))
+                .collect(),
+        })
+        .collect()
+}
+
+fn exact_subject_crop(
+    image: &DynamicImage,
+    subject: &subject_inference::SubjectBox,
+) -> Option<(DynamicImage, f32, f32, f32, f32)> {
+    let x0 = subject.x.max(0.0);
+    let y0 = subject.y.max(0.0);
+    let x1 = (subject.x + subject.width).min(image.width() as f32);
+    let y1 = (subject.y + subject.height).min(image.height() as f32);
+    let x = x0.floor() as u32;
+    let y = y0.floor() as u32;
+    if x >= image.width() || y >= image.height() {
+        return None;
+    }
+    let width = (x1.ceil() as u32).saturating_sub(x).min(image.width() - x);
+    let height = (y1.ceil() as u32).saturating_sub(y).min(image.height() - y);
+    if width < 8 || height < 8 {
+        return None;
+    }
+    let crop = DynamicImage::ImageRgba8(imageops::crop_imm(image, x, y, width, height).to_image());
+    Some((crop, x as f32, y as f32, width as f32, height as f32))
+}
+
+fn collect_association_poses(
+    worker: &mut subject_inference::LocalWorker,
+    image: &DynamicImage,
+    frame: &DynamicImage,
+    boxes: &[subject_inference::SubjectBox],
+) -> Result<Vec<AssociationPose>, String> {
+    let mut poses = scale_pose_frame(
+        worker.pose(frame)?,
+        0.0,
+        0.0,
+        image.width() as f32,
+        image.height() as f32,
+    );
+    for subject in boxes {
+        if let Some((crop, x, y, width, height)) = exact_subject_crop(image, subject) {
+            if let Ok(crop_pose) = worker.pose(&crop) {
+                poses.extend(scale_pose_frame(crop_pose, x, y, width, height));
+            }
+        }
+    }
+    Ok(poses)
+}
+
+fn load_culling_image(
+    path: &str,
+    settings: &crate::app_settings::AppSettings,
+) -> Result<DynamicImage, String> {
+    let source_path = crate::file_management::parse_virtual_path(path).0;
+    if crate::file_management::is_cloud_placeholder(&source_path) {
+        return Err(format!("'{path}' is stored in iCloud and not downloaded"));
+    }
+    let bytes = std::fs::read(&source_path).map_err(|error| error.to_string())?;
+    image_loader::load_base_image_from_bytes(
+        &bytes,
+        &source_path.to_string_lossy(),
+        true,
+        settings,
+        None,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn apply_assisted_signals(
+    result: &mut ImageAnalysisResult,
+    image: &DynamicImage,
+    settings: &CullingSettings,
+    worker: &mut Option<subject_inference::LocalWorker>,
+    face_runtime: Option<&mut face_processing::FaceRuntime>,
+) {
+    let frame = image.thumbnail(1920, 1920);
+    let sx = image.width().max(1) as f32 / frame.width().max(1) as f32;
+    let sy = image.height().max(1) as f32 / frame.height().max(1) as f32;
+    let mut boxes = Vec::new();
+    let mut subject_method = if settings.detect_subject {
+        "grounding-dino-unavailable"
+    } else {
+        "disabled"
+    }
+    .to_owned();
+    if settings.detect_subject {
+        if let Some(local_worker) = worker.as_mut().filter(|item| item.subject_is_ready()) {
+            let mut failed = false;
+            for phrase in subject_phrases(&settings.subject_profile) {
+                match local_worker.detect(&frame, phrase) {
+                    Ok(found) => {
+                        boxes = found
+                            .into_iter()
+                            .filter(|item| item.width > 0.0 && item.height > 0.0)
+                            .map(|item| subject_inference::SubjectBox {
+                                x: item.x * sx,
+                                y: item.y * sy,
+                                width: item.width * sx,
+                                height: item.height * sy,
+                                score: item.score,
+                                label: item.label,
+                            })
+                            .collect();
+                        if !boxes.is_empty() {
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        failed = true;
+                        break;
+                    }
+                }
+            }
+            subject_method = if failed {
+                "grounding-dino-error".to_owned()
+            } else {
+                "grounding-dino-local".to_owned()
+            };
+        }
+    }
+
+    let mut faces = Vec::new();
+    let mut face_method = "yunet-unavailable".to_owned();
+    if let Some(runtime) = face_runtime {
+        match runtime.analyze_for_culling(image, YUNET_PRIMARY_THRESHOLD) {
+            Ok(primary) => {
+                faces = primary;
+                face_method = "yunet-0.9".to_owned();
+                if should_try_yunet_fallback(faces.len()) {
+                    match runtime.analyze_for_culling(image, YUNET_FALLBACK_THRESHOLD) {
+                        Ok(fallback) if !fallback.is_empty() => {
+                            faces = fallback;
+                            face_method = "yunet-fallback-0.7".to_owned();
+                        }
+                        Ok(_) => face_method = "yunet-no-face".to_owned(),
+                        Err(_) => face_method.push_str(";fallback-error"),
+                    }
+                }
+            }
+            Err(_) => face_method = "yunet-error".to_owned(),
+        }
+    }
+
+    let mut pose_method = "pose-not-requested".to_owned();
+    let roles = if !settings.detect_subject {
+        vec!["primary"; faces.len()]
+    } else if boxes.is_empty() {
+        vec!["unknown"; faces.len()]
+    } else if let Some(local_worker) = worker.as_mut().filter(|item| item.pose_is_ready()) {
+        match collect_association_poses(local_worker, image, &frame, &boxes) {
+            Ok(poses) => {
+                pose_method = "pose-lite".to_owned();
+                faces
+                    .iter()
+                    .map(|face| {
+                        let association = AssociationFace {
+                            x: face.bbox.x,
+                            y: face.bbox.y,
+                            width: face.bbox.width,
+                            height: face.bbox.height,
+                        };
+                        if face_is_linked(&association, &boxes, &poses) {
+                            "primary"
+                        } else {
+                            "secondary"
+                        }
+                    })
+                    .collect()
+            }
+            Err(_) => {
+                pose_method = "pose-error".to_owned();
+                vec!["unknown"; faces.len()]
+            }
+        }
+    } else {
+        pose_method = "pose-unavailable".to_owned();
+        vec!["unknown"; faces.len()]
+    };
+
+    let primary_count = roles.iter().filter(|role| **role == "primary").count();
+    result.subject_status = (if !settings.detect_subject {
+        "not-evaluated"
+    } else if boxes.is_empty() || primary_count == 0 {
+        "unknown"
+    } else if primary_count > 1 {
+        "multiple"
+    } else {
+        "primary"
+    })
+    .to_owned();
+    result.subject_method = format!("{subject_method};{pose_method};{face_method}");
+    let source_width = image.width().max(1) as f32;
+    let source_height = image.height().max(1) as f32;
+    result.subject_boxes = boxes
+        .iter()
+        .map(|item| subject_inference::SubjectBox {
+            x: item.x / source_width,
+            y: item.y / source_height,
+            width: item.width / source_width,
+            height: item.height / source_height,
+            score: item.score,
+            label: item.label.clone(),
+        })
+        .collect();
+    result.face_count = faces.len();
+    result.face_thumbnails.clear();
+    result.attributed_faces = faces
+        .iter()
+        .zip(&roles)
+        .map(|(face, role)| AttributedFace {
+            role: (*role).to_owned(),
+            x: face.bbox.x / source_width,
+            y: face.bbox.y / source_height,
+            width: face.bbox.width / source_width,
+            height: face.bbox.height / source_height,
+            confidence: face.confidence,
+            eye_state: if *role == "primary" && settings.detect_closed_eyes {
+                match face.eye.state {
+                    face_processing::EyeState::Open => "open",
+                    face_processing::EyeState::Closed => "closed",
+                    _ => "unknown",
+                }
+                .to_owned()
+            } else if settings.detect_closed_eyes {
+                "not-attributed".to_owned()
+            } else {
+                "disabled".to_owned()
+            },
+            eye_confidence: if *role == "primary" {
+                face.eye.confidence
+            } else {
+                0.0
+            },
+        })
+        .collect();
+
+    if !settings.detect_closed_eyes {
+        result.eye_state = "disabled".to_owned();
+        result.eye_method = "disabled".to_owned();
+        result.eye_confidence = 0.0;
+        return;
+    }
+    let primary_eyes: Vec<_> = faces
+        .iter()
+        .zip(&roles)
+        .filter(|(_, role)| **role == "primary")
+        .map(|(face, _)| face.eye)
+        .collect();
+    result.eye_confidence = primary_eyes
+        .iter()
+        .map(|eye| eye.confidence)
+        .fold(0.0, f32::max);
+    result.eye_state = if faces.is_empty() && face_method == "yunet-no-face" {
+        "notApplicable".to_owned()
+    } else {
+        reviewed_eye_state(&primary_eyes).to_owned()
+    };
+    result.eye_method = if faces.is_empty() && face_method == "yunet-no-face" {
+        "yunet-no-face".to_owned()
+    } else if primary_eyes.is_empty() && !faces.is_empty() {
+        "subject-not-attributed".to_owned()
+    } else if result.eye_state == "unknown" && face_method == "yunet-unavailable" {
+        "unavailable".to_owned()
+    } else {
+        format!("{face_method};local-heuristic")
+    };
 }
 
 const WEIGHT_SHARPNESS: f64 = 0.40;
@@ -205,6 +622,10 @@ fn analyze_image(
             reasons: Vec::new(),
             category: "unrated".to_owned(),
             suggested_rating: 0,
+            subject_status: "not-evaluated".to_owned(),
+            subject_method: "not-requested".to_owned(),
+            subject_boxes: Vec::new(),
+            attributed_faces: Vec::new(),
         },
     })
 }
@@ -245,29 +666,6 @@ fn compare_group_candidates(
         .quality_score
         .total_cmp(&left.quality_score)
         .then_with(|| left.path.cmp(&right.path))
-}
-
-fn encode_face_source(
-    path: &str,
-    settings: &crate::app_settings::AppSettings,
-) -> Result<Vec<u8>, String> {
-    let source_path = crate::file_management::parse_virtual_path(path).0;
-    let file_bytes = std::fs::read(&source_path).map_err(|error| error.to_string())?;
-    let source_path_string = source_path.to_string_lossy();
-    let image = image_loader::load_base_image_from_bytes(
-        &file_bytes,
-        &source_path_string,
-        true,
-        settings,
-        None,
-    )
-    .map_err(|error| error.to_string())?;
-    let bounded = image.thumbnail(1600, 1600).to_rgb8();
-    let mut output = std::io::Cursor::new(Vec::new());
-    bounded
-        .write_to(&mut output, image::ImageFormat::Jpeg)
-        .map_err(|error| format!("cannot prepare local face analysis image: {error}"))?;
-    Ok(output.into_inner())
 }
 
 fn category_rating(category: &str) -> u8 {
@@ -373,49 +771,10 @@ fn detector_reasons(
     if has_unknown_eye_signal(result, settings) {
         reasons.push("eyesUnknown".to_owned());
     }
+    if result.subject_status == "unknown" {
+        reasons.push("subjectUnknown".to_owned());
+    }
     reasons
-}
-
-fn set_eye_signal(result: &mut ImageAnalysisResult, analysis: &face_processing::LocalFaceAnalysis) {
-    result.face_count = analysis.faces.len();
-    result.face_thumbnails = analysis
-        .faces
-        .iter()
-        .map(|face| format!("data:image/webp;base64,{}", BASE64.encode(&face.thumbnail)))
-        .collect();
-    if analysis.faces.is_empty() {
-        result.eye_state = "notApplicable".to_owned();
-        result.eye_method = "yunet-no-face".to_owned();
-        return;
-    }
-    let mut saw_open = false;
-    let mut saw_closed = false;
-    let mut saw_indeterminate = false;
-    let mut confidence = 0.0_f32;
-    let mut method = "local-heuristic";
-    for face in &analysis.faces {
-        confidence = confidence.max(face.eye.confidence);
-        method = face.eye.method;
-        match face.eye.state {
-            face_processing::EyeState::Open => saw_open = true,
-            face_processing::EyeState::Closed => saw_closed = true,
-            face_processing::EyeState::Unknown | face_processing::EyeState::NotApplicable => {
-                saw_indeterminate = true
-            }
-        }
-    }
-    result.eye_state = if saw_indeterminate {
-        "unknown"
-    } else if saw_closed && !saw_open {
-        "closed"
-    } else if saw_open && !saw_closed {
-        "open"
-    } else {
-        "unknown"
-    }
-    .to_owned();
-    result.eye_confidence = confidence;
-    result.eye_method = method.to_owned();
 }
 
 #[tauri::command]
@@ -463,40 +822,107 @@ pub async fn cull_images(
         }
     }
 
-    let mut eye_status = if settings.detect_closed_eyes {
-        "pending".to_owned()
+    let mut local_worker = None;
+    let mut subject_status = (if settings.detect_subject {
+        if successful.is_empty() {
+            "no-images"
+        } else {
+            "pending"
+        }
     } else {
-        "disabled".to_owned()
+        "disabled"
+    })
+    .to_owned();
+    if settings.detect_subject && !successful.is_empty() {
+        match subject_inference::LocalWorker::start(&app_handle) {
+            Ok(worker) => {
+                subject_status = if !worker.subject_is_ready() {
+                    "subject-unavailable".to_owned()
+                } else if !worker.pose_is_ready() {
+                    "subject-ready-pose-unavailable".to_owned()
+                } else {
+                    "ready".to_owned()
+                };
+                local_worker = Some(worker);
+            }
+            Err(_) => subject_status = "unavailable".to_owned(),
+        }
+    }
+
+    let needs_face_runtime =
+        (settings.detect_subject || settings.detect_closed_eyes) && !successful.is_empty();
+    let mut runtime_guard = if needs_face_runtime {
+        Some(
+            face_state
+                .face_runtime
+                .lock()
+                .map_err(|_| "face runtime lock is poisoned".to_owned())?,
+        )
+    } else {
+        None
     };
-    if settings.detect_closed_eyes && !successful.is_empty() {
-        let mut runtime_guard = face_state
-            .face_runtime
-            .lock()
-            .map_err(|_| "face runtime lock is poisoned".to_owned())?;
-        match face_processing::ensure_runtime(&mut runtime_guard, &app_handle) {
-            Ok(runtime) => {
-                eye_status = "available-local-heuristic".to_owned();
-                for data in &mut successful {
-                    match encode_face_source(&data.result.path, &app_settings)
-                        .and_then(|bytes| runtime.analyze(&bytes))
-                    {
-                        Ok(analysis) => set_eye_signal(&mut data.result, &analysis),
-                        Err(error) => {
-                            data.result.eye_method = "unavailable".to_owned();
-                            log::debug!(
-                                "Eye analysis unavailable for {}: {error}",
-                                data.result.path
-                            );
-                        }
+    let face_runtime_available = runtime_guard
+        .as_mut()
+        .is_some_and(|guard| face_processing::ensure_runtime(guard, &app_handle).is_ok());
+    let eye_status = if !settings.detect_closed_eyes {
+        "disabled".to_owned()
+    } else if face_runtime_available {
+        "available-local-heuristic".to_owned()
+    } else {
+        "unavailable".to_owned()
+    };
+    if settings.detect_subject && !face_runtime_available && subject_status == "ready" {
+        subject_status = "face-unavailable".to_owned();
+    }
+
+    if settings.detect_subject || settings.detect_closed_eyes {
+        let _ = app_handle.emit(
+            "culling-progress",
+            CullingProgress {
+                current: 0,
+                total: total_count,
+                stage: "Reviewing local subject, pose and eye signals...".to_owned(),
+            },
+        );
+        for (index, data) in successful.iter_mut().enumerate() {
+            match load_culling_image(&data.result.path, &app_settings) {
+                Ok(image) => {
+                    let face_runtime = runtime_guard.as_mut().and_then(|guard| guard.as_mut());
+                    apply_assisted_signals(
+                        &mut data.result,
+                        &image,
+                        &settings,
+                        &mut local_worker,
+                        face_runtime,
+                    );
+                }
+                Err(error) => {
+                    failed_paths.push(data.result.path.clone());
+                    data.result.subject_status = if settings.detect_subject {
+                        "unknown"
+                    } else {
+                        "not-evaluated"
                     }
+                    .to_owned();
+                    data.result.subject_method = "image-unavailable".to_owned();
+                    if settings.detect_closed_eyes {
+                        data.result.eye_state = "unknown".to_owned();
+                        data.result.eye_method = "unavailable".to_owned();
+                    }
+                    log::debug!(
+                        "Assisted culling review unavailable for {}: {error}",
+                        data.result.path
+                    );
                 }
             }
-            Err(error) => {
-                eye_status = format!("unavailable: {error}");
-                for data in &mut successful {
-                    data.result.eye_method = "unavailable".to_owned();
-                }
-            }
+            let _ = app_handle.emit(
+                "culling-progress",
+                CullingProgress {
+                    current: index + 1,
+                    total: total_count,
+                    stage: "Reviewing local subject, pose and eye signals...".to_owned(),
+                },
+            );
         }
     }
 
@@ -511,6 +937,7 @@ pub async fn cull_images(
     let mut suggestions = CullingSuggestions {
         failed_paths,
         eye_analysis_status: eye_status,
+        subject_analysis_status: subject_status,
         ..Default::default()
     };
     let mut duplicate_paths = HashSet::new();
@@ -656,6 +1083,10 @@ mod tests {
             reasons: Vec::new(),
             category: "unrated".to_owned(),
             suggested_rating: 0,
+            subject_status: "not-evaluated".to_owned(),
+            subject_method: "not-requested".to_owned(),
+            subject_boxes: Vec::new(),
+            attributed_faces: Vec::new(),
         }
     }
 
@@ -668,40 +1099,6 @@ mod tests {
         }
     }
 
-    fn face(state: face_processing::EyeState) -> face_processing::LocalFace {
-        face_processing::LocalFace {
-            bbox: face_processing::FaceBox {
-                x: 0.0,
-                y: 0.0,
-                width: 1.0,
-                height: 1.0,
-            },
-            confidence: 1.0,
-            embedding: Vec::new(),
-            thumbnail: Vec::new(),
-            thumbnail_sha256: String::new(),
-            eye: face_processing::EyeAssessment {
-                state,
-                confidence: 0.5,
-                method: "local-heuristic",
-            },
-        }
-    }
-
-    fn face_analysis(states: Vec<face_processing::EyeState>) -> face_processing::LocalFaceAnalysis {
-        face_processing::LocalFaceAnalysis {
-            source_sha256: String::new(),
-            source_width: 1,
-            source_height: 1,
-            faces: states.into_iter().map(face).collect(),
-            model_id: String::new(),
-            model_digest: String::new(),
-            pipeline_version: String::new(),
-            embedding_dimension: 0,
-            detector_input: 0,
-        }
-    }
-
     fn category_and_rating(
         result: &ImageAnalysisResult,
         settings: &CullingSettings,
@@ -711,6 +1108,74 @@ mod tests {
     ) -> (&'static str, u8) {
         let category = culling_category(result, settings, is_duplicate, is_selected, is_highlight);
         (category, category_rating(category))
+    }
+
+    fn subject_box(x: f32, y: f32, width: f32, height: f32) -> subject_inference::SubjectBox {
+        subject_inference::SubjectBox {
+            x,
+            y,
+            width,
+            height,
+            score: 0.8,
+            label: "person".to_owned(),
+        }
+    }
+
+    #[test]
+    fn yunet_fallback_is_only_used_when_primary_pass_is_empty() {
+        assert!(should_try_yunet_fallback(0));
+        assert!(!should_try_yunet_fallback(1));
+        assert!(!should_try_yunet_fallback(2));
+        assert_eq!(YUNET_PRIMARY_THRESHOLD, 0.9);
+        assert_eq!(YUNET_FALLBACK_THRESHOLD, 0.7);
+    }
+
+    #[test]
+    fn subject_link_requires_box_overlap_and_a_pose_bust_nose() {
+        let subjects = [subject_box(100.0, 100.0, 200.0, 300.0)];
+        let face = AssociationFace {
+            x: 130.0,
+            y: 130.0,
+            width: 40.0,
+            height: 50.0,
+        };
+        let linked_pose = AssociationPose {
+            nose_x: 150.0,
+            nose_y: 150.0,
+            torso: vec![(120.0, 220.0), (180.0, 230.0)],
+        };
+        assert!(face_is_linked(&face, &subjects, &[linked_pose.clone()]));
+
+        let no_bust_pose = AssociationPose {
+            nose_x: 150.0,
+            nose_y: 150.0,
+            torso: vec![(20.0, 20.0), (30.0, 30.0)],
+        };
+        assert!(!face_is_linked(&face, &subjects, &[no_bust_pose]));
+
+        let outside_face = AssociationFace { x: 400.0, ..face };
+        assert!(!face_is_linked(&outside_face, &subjects, &[linked_pose]));
+    }
+
+    #[test]
+    fn unknown_subject_is_visible_but_does_not_change_category_score() {
+        let settings = CullingSettings {
+            detect_closed_eyes: false,
+            detect_blurry: false,
+            detect_duplicates: false,
+            ..Default::default()
+        };
+        let mut result = analysis_result("unknown-subject.jpg", 0.8);
+        result.subject_status = "unknown".to_owned();
+
+        assert_eq!(
+            category_and_rating(&result, &settings, false, true, false),
+            ("selected", 5)
+        );
+        assert_eq!(
+            detector_reasons(&result, &settings, false),
+            vec!["subjectUnknown"]
+        );
     }
 
     #[test]
@@ -751,56 +1216,62 @@ mod tests {
     }
 
     #[test]
-    fn eye_outcome_indeterminate_faces_are_unknown() {
+    fn any_closed_primary_eye_remains_a_review_signal() {
         let settings = eye_settings(true);
-        for states in [
-            vec![
-                face_processing::EyeState::Closed,
-                face_processing::EyeState::Unknown,
-            ],
-            vec![
-                face_processing::EyeState::Open,
-                face_processing::EyeState::Closed,
-            ],
-        ] {
-            let mut result = analysis_result("faces.jpg", 0.75);
-            set_eye_signal(&mut result, &face_analysis(states));
+        let eyes = [
+            face_processing::EyeAssessment {
+                state: face_processing::EyeState::Closed,
+                confidence: 0.5,
+                method: "local-heuristic",
+            },
+            face_processing::EyeAssessment {
+                state: face_processing::EyeState::Open,
+                confidence: 0.8,
+                method: "local-heuristic",
+            },
+        ];
+        let mut result = analysis_result("faces.jpg", 0.75);
+        result.eye_state = reviewed_eye_state(&eyes).to_owned();
+        result.eye_method = "local-heuristic".to_owned();
 
-            assert_eq!(result.eye_state, "unknown");
-            assert_eq!(
-                category_and_rating(&result, &settings, false, true, false),
-                ("unrated", 0)
-            );
-        }
+        assert_eq!(result.eye_state, "closed");
+        assert_eq!(
+            category_and_rating(&result, &settings, false, true, false),
+            ("closedEyes", 1)
+        );
     }
 
     #[test]
-    fn eye_outcome_conclusive_faces_preserve_categories() {
+    fn open_primary_eyes_leave_selection_to_technical_quality() {
         let settings = eye_settings(true);
-        let mut open = analysis_result("open.jpg", 0.75);
-        set_eye_signal(
-            &mut open,
-            &face_analysis(vec![
-                face_processing::EyeState::Open,
-                face_processing::EyeState::Open,
-            ]),
-        );
-        let mut closed = analysis_result("closed.jpg", 0.75);
-        set_eye_signal(
-            &mut closed,
-            &face_analysis(vec![
-                face_processing::EyeState::Closed,
-                face_processing::EyeState::Closed,
-            ]),
-        );
+        let eyes = [
+            face_processing::EyeAssessment {
+                state: face_processing::EyeState::Open,
+                confidence: 0.5,
+                method: "local-heuristic",
+            },
+            face_processing::EyeAssessment {
+                state: face_processing::EyeState::Open,
+                confidence: 0.7,
+                method: "local-heuristic",
+            },
+        ];
+        let mut result = analysis_result("open.jpg", 0.75);
+        result.eye_state = reviewed_eye_state(&eyes).to_owned();
+        result.eye_method = "local-heuristic".to_owned();
 
         assert_eq!(
-            category_and_rating(&open, &settings, false, true, false),
+            category_and_rating(&result, &settings, false, true, false),
             ("selected", 5)
         );
+        assert_eq!(reviewed_eye_state(&[]), "unknown");
         assert_eq!(
-            category_and_rating(&closed, &settings, false, true, false),
-            ("closedEyes", 1)
+            reviewed_eye_state(&[face_processing::EyeAssessment {
+                state: face_processing::EyeState::Unknown,
+                confidence: 0.0,
+                method: "local-heuristic"
+            }]),
+            "unknown"
         );
     }
 

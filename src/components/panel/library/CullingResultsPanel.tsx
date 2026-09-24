@@ -75,6 +75,12 @@ export default function CullingResultsPanel({
           <Text color={TextColors.secondary} className="mt-1 break-all">
             {folderPath || t('modals.culling.noFolder', { defaultValue: 'Current folder' })}
           </Text>
+          <Text color={TextColors.secondary} variant={TextVariants.small} className="mt-1">
+            {t('modals.culling.subjectAnalysisStatus', {
+              status: suggestions.subjectAnalysisStatus || 'unknown',
+              defaultValue: 'Local subject review: {{status}}',
+            })}
+          </Text>
         </div>
         <Button variant="ghost" onClick={onClose} aria-label={t('modals.culling.close')}>
           <X size={18} />
@@ -186,7 +192,39 @@ export default function CullingResultsPanel({
                   </Text>
                   <div>{selectedResult.eyeState}</div>
                 </div>
+                <div className="rounded bg-bg-primary p-2">
+                  <Text color={TextColors.secondary} variant={TextVariants.small}>
+                    {t('modals.culling.detailSubject', { defaultValue: 'Subject attribution' })}
+                  </Text>
+                  <div>{selectedResult.subjectStatus}</div>
+                  <div className="text-xs text-text-secondary">
+                    {t('modals.culling.subjectProposalCount', {
+                      number: selectedResult.subjectBoxes.length,
+                      defaultValue: '{{number}} local subject proposals',
+                    })}
+                  </div>
+                </div>
               </div>
+              <Text color={TextColors.secondary} variant={TextVariants.small} className="mt-3 break-words">
+                {t('modals.culling.subjectMethod', {
+                  method: selectedResult.subjectMethod,
+                  defaultValue:
+                    '{{method}}. Subject and pose signals are local review context only; they do not change ratings or delete files.',
+                })}
+              </Text>
+              {selectedResult.subjectBoxes.length > 0 && (
+                <ul className="mt-2 space-y-1 text-xs text-text-secondary">
+                  {selectedResult.subjectBoxes.map((box, index) => (
+                    <li key={`${selectedResult.path}-subject-${index}`}>
+                      {t('modals.culling.subjectConfidence', {
+                        label: box.label,
+                        score: Math.round(box.score * 100),
+                        defaultValue: '{{label}} · {{score}}% local detector confidence',
+                      })}
+                    </li>
+                  ))}
+                </ul>
+              )}
               {selectedResult.faceThumbnails.length > 0 && (
                 <div className="mt-4">
                   <Text color={TextColors.secondary} variant={TextVariants.small}>
@@ -218,7 +256,9 @@ export default function CullingResultsPanel({
                       ? t('modals.culling.noDetectorWarning', {
                           defaultValue: 'No detector warning; this photo is unrated.',
                         })
-                      : t(`modals.culling.reason.${reason}`, { defaultValue: reason })}
+                      : reason === 'subjectUnknown'
+                        ? t('modals.culling.subjectUnknown', { defaultValue: 'Subject attribution uncertain' })
+                        : t(`modals.culling.reason.${reason}`, { defaultValue: reason })}
                   </li>
                 ))}
               </ul>

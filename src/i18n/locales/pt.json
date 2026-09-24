@@ -1378,7 +1378,21 @@
         "unrated": "No reliable detector signal was available"
       },
       "applyDecisions": "Assign ratings and color labels",
-      "detailEyes": "Eyes"
+      "detailEyes": "Eyes",
+      "detectSubject": "Detetar o motivo fotográfico",
+      "subjectProfile": "Perfil da sessão",
+      "profileDance": "Dança / ação",
+      "profileGeneral": "Geral",
+      "profilePortrait": "Retrato",
+      "profileSports": "Desporto",
+      "profileWedding": "Casamento",
+      "subjectUnknown": "Atribuição do motivo incerta",
+      "subjectProposalCount": "{{number}} propostas locais de motivo",
+      "subjectConfidence": "{{label}} · {{score}}% de confiança do detetor local",
+      "detailSubject": "Atribuição do sujeito",
+      "detectSubjectHint": "Grounding DINO e Pose são executados localmente. As propostas são apenas contexto de revisão; não alteram as classificações nem eliminam ficheiros, e os resultados desconhecidos continuam desconhecidos.",
+      "subjectAnalysisStatus": "Revisão local do sujeito: {{status}}",
+      "subjectMethod": "{{method}}. Os sinais do sujeito e da pose são apenas contexto local de revisão; não alteram as classificações nem eliminam ficheiros."
     },
     "denoise": {
       "batchProgressText": "Reduzindo ruído {{current}} de {{total}}...",

@@ -1351,7 +1351,21 @@
         "unrated": "No reliable detector signal was available"
       },
       "applyDecisions": "Assign ratings and color labels",
-      "detailEyes": "Eyes"
+      "detailEyes": "Eyes",
+      "detectSubject": "Fotografisches Motiv erkennen",
+      "subjectProfile": "Aufnahmeprofil",
+      "profileDance": "Tanz / Action",
+      "profileGeneral": "Allgemein",
+      "profilePortrait": "Porträt",
+      "profileSports": "Sport",
+      "profileWedding": "Hochzeit",
+      "subjectUnknown": "Motivzuordnung unsicher",
+      "subjectProposalCount": "{{number}} lokale Motivvorschläge",
+      "subjectConfidence": "{{label}} · {{score}} % Vertrauen des lokalen Detektors",
+      "detailSubject": "Motivzuordnung",
+      "detectSubjectHint": "Grounding DINO und Pose werden lokal ausgeführt. Die Vorschläge dienen nur als Prüfhinweise, ändern weder Bewertungen noch löschen sie Dateien; unbekannte Ergebnisse bleiben unbekannt.",
+      "subjectAnalysisStatus": "Lokale Motivprüfung: {{status}}",
+      "subjectMethod": "{{method}}. Motiv- und Posensignale dienen nur der lokalen Prüfung; sie ändern keine Bewertungen und löschen keine Dateien."
     },
     "denoise": {
       "batchProgressText": "Entrauschen von {{current}} aus {{total}}...",

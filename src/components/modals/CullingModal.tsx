@@ -27,6 +27,8 @@ const DEFAULT_SETTINGS: CullingSettings = {
   detectBlurry: true,
   detectClosedEyes: true,
   detectHighlights: true,
+  detectSubject: true,
+  subjectProfile: 'general',
   autoAssignStars: true,
   preserveExistingDecisions: true,
 };
@@ -42,6 +44,14 @@ const severityOptions = [
   { value: 'lenient' as const, label: 'Lenient' },
   { value: 'moderate' as const, label: 'Moderate' },
   { value: 'strict' as const, label: 'Strict' },
+];
+
+const subjectProfiles: Array<{ value: CullingSettings['subjectProfile']; label: string }> = [
+  { value: 'general', label: 'General people' },
+  { value: 'portrait', label: 'Portrait' },
+  { value: 'wedding', label: 'Wedding' },
+  { value: 'sports', label: 'Sports' },
+  { value: 'dance', label: 'Dance' },
 ];
 
 function SegmentedChoice<T extends string>({
@@ -274,6 +284,40 @@ export default function CullingModal({
                 </button>
                 {isCustomizeOpen && (
                   <div className="space-y-4 border-t border-border-color/40 px-4 py-4">
+                    <Switch
+                      checked={settings.detectSubject}
+                      label={t('modals.culling.detectSubject', { defaultValue: 'Local subject proposals' })}
+                      onChange={(detectSubject) => setSettings((current) => ({ ...current, detectSubject }))}
+                      tooltip={t('modals.culling.detectSubjectHint', {
+                        defaultValue:
+                          'Grounding DINO and Pose run locally. Proposals are review context only, do not change ratings or delete files, and unknown results stay unknown.',
+                      })}
+                    />
+                    {settings.detectSubject && (
+                      <label className="block">
+                        <Text color={TextColors.secondary} variant={TextVariants.small} className="mb-1">
+                          {t('modals.culling.subjectProfile', { defaultValue: 'Subject prompt' })}
+                        </Text>
+                        <select
+                          className="w-full rounded-md border border-border-color bg-bg-primary px-3 py-2 text-text-primary"
+                          value={settings.subjectProfile}
+                          onChange={(event) =>
+                            setSettings((current) => ({
+                              ...current,
+                              subjectProfile: event.target.value as CullingSettings['subjectProfile'],
+                            }))
+                          }
+                        >
+                          {subjectProfiles.map((profile) => (
+                            <option key={profile.value} value={profile.value}>
+                              {t(`modals.culling.profile${profile.value[0].toUpperCase()}${profile.value.slice(1)}`, {
+                                defaultValue: profile.label,
+                              })}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    )}
                     <Switch
                       checked={settings.detectHighlights}
                       label={t('modals.culling.detectHighlights', { defaultValue: 'Technical highlights' })}

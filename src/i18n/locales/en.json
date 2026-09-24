@@ -1351,7 +1351,21 @@
         "unrated": "No reliable detector signal was available"
       },
       "applyDecisions": "Assign ratings and color labels",
-      "detailEyes": "Eyes"
+      "detailEyes": "Eyes",
+      "detectSubject": "Detect the photographic subject",
+      "subjectProfile": "Session profile",
+      "profileDance": "Dance / action",
+      "profileGeneral": "General",
+      "profilePortrait": "Portrait",
+      "profileSports": "Sports",
+      "profileWedding": "Wedding",
+      "subjectUnknown": "Subject attribution uncertain",
+      "subjectProposalCount": "{{number}} local subject proposals",
+      "subjectConfidence": "{{label}} · {{score}}% local detector confidence",
+      "detailSubject": "Subject attribution",
+      "detectSubjectHint": "Grounding DINO and Pose run locally. Proposals are review context only, do not change ratings or delete files, and unknown results stay unknown.",
+      "subjectAnalysisStatus": "Local subject review: {{status}}",
+      "subjectMethod": "{{method}}. Subject and pose signals are local review context only; they do not change ratings or delete files."
     },
     "denoise": {
       "batchProgressText": "Denoising {{current}} of {{total}}...",

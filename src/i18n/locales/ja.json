@@ -1348,7 +1348,21 @@
         "unrated": "No reliable detector signal was available"
       },
       "applyDecisions": "Assign ratings and color labels",
-      "detailEyes": "Eyes"
+      "detailEyes": "Eyes",
+      "detectSubject": "写真の被写体を検出",
+      "subjectProfile": "撮影プロファイル",
+      "profileDance": "ダンス / アクション",
+      "profileGeneral": "一般",
+      "profilePortrait": "ポートレート",
+      "profileSports": "スポーツ",
+      "profileWedding": "ウェディング",
+      "subjectUnknown": "被写体の割り当てが不確か",
+      "subjectProposalCount": "ローカル被写体候補 {{number}} 件",
+      "subjectConfidence": "{{label}} · ローカル検出器の信頼度 {{score}}%",
+      "detailSubject": "被写体の推定",
+      "detectSubjectHint": "Grounding DINO と Pose はローカルで実行されます。提案は確認の参考情報にすぎず、評価を変更したりファイルを削除したりしません。不明な結果は不明のままです。",
+      "subjectAnalysisStatus": "被写体のローカル確認: {{status}}",
+      "subjectMethod": "{{method}}。被写体とポーズの情報はローカルでの確認用に限られ、評価を変更したりファイルを削除したりしません。"
     },
     "denoise": {
       "batchProgressText": "ノイズ低減を実行中 ({{current}}/{{total}})...",
