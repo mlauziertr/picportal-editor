@@ -218,10 +218,11 @@ pub fn load_sidecar(sidecar_path: &Path) -> ImageMetadata {
     }
 
     let Ok(content) = fs::read_to_string(sidecar_path) else {
-        return ImageMetadata::default();
+        return ImageMetadata::default_with_unknown_rating();
     };
 
-    let mut meta = serde_json::from_str::<ImageMetadata>(&content).unwrap_or_default();
+    let mut meta = serde_json::from_str::<ImageMetadata>(&content)
+        .unwrap_or_else(|_| ImageMetadata::default_with_unknown_rating());
     let mut healed = false;
 
     if let Some(ref mut exif_map) = meta.exif {

@@ -1,10 +1,24 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  isRatingProtectedFromCulling,
+  mergeLoadedRating,
   persistBatchWithReconciliation,
   persistColorAssignments,
   persistRatingAssignments,
 } from '../src/utils/ratingPersistence.ts';
+
+test('culling preserves manual, unknown, and explicit zero provenance', () => {
+  assert.equal(isRatingProtectedFromCulling(true), true);
+  assert.equal(isRatingProtectedFromCulling(null), true);
+  assert.equal(isRatingProtectedFromCulling(undefined), true);
+  assert.equal(isRatingProtectedFromCulling(false), false);
+});
+
+test('stale metadata refresh cannot replace a manually cleared rating', () => {
+  assert.deepEqual(mergeLoadedRating(0, true, 4, false), { rating: 0, ratingIsManual: true });
+  assert.deepEqual(mergeLoadedRating(undefined, null, 4, null), { rating: 4, ratingIsManual: null });
+});
 
 test('partial rating failures retain only durable successful groups', async () => {
   const calls: Array<{ paths: string[]; rating: number }> = [];

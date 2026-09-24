@@ -85,7 +85,30 @@ struct ImageFileMetadata {
     is_edited: bool,
     tags: Option<Vec<String>>,
     rating: u8,
+    rating_is_manual: Option<bool>,
     is_raw: bool,
+}
+
+fn should_preserve_rating_from_automatic_update(
+    metadata: &ImageMetadata,
+    sidecar_exists: bool,
+) -> bool {
+    metadata.rating_is_manual == Some(true)
+        || (metadata.rating_is_manual.is_none() && (metadata.rating > 0 || sidecar_exists))
+}
+
+fn apply_rating_update(
+    metadata: &mut ImageMetadata,
+    rating: u8,
+    is_manual: bool,
+    sidecar_exists: bool,
+) -> bool {
+    if !is_manual && should_preserve_rating_from_automatic_update(metadata, sidecar_exists) {
+        return false;
+    }
+    metadata.rating = rating;
+    metadata.rating_is_manual = Some(is_manual);
+    true
 }
 
 fn resolve_image_metadata(
@@ -94,12 +117,16 @@ fn resolve_image_metadata(
     enable_xmp_sync: bool,
     settings: &AppSettings,
 ) -> ImageFileMetadata {
+    let sidecar_exists = sidecar_path.exists();
     let mut metadata = crate::exif_processing::load_sidecar(sidecar_path);
 
-    if enable_xmp_sync
-        && sync_metadata_from_xmp(image_path, &mut metadata)
-        && let Ok(json) = serde_json::to_string_pretty(&metadata)
-    {
+    let xmp_changed = enable_xmp_sync && sync_metadata_from_xmp(image_path, &mut metadata);
+
+    if !sidecar_exists && metadata.rating > 0 && metadata.rating_is_manual == Some(false) {
+        metadata.rating_is_manual = None;
+    }
+
+    if xmp_changed && let Ok(json) = serde_json::to_string_pretty(&metadata) {
         let _ = fs::write(sidecar_path, json);
     }
 
@@ -111,6 +138,7 @@ fn resolve_image_metadata(
         is_edited,
         tags: metadata.tags,
         rating: metadata.rating,
+        rating_is_manual: metadata.rating_is_manual,
         is_raw,
     }
 }
@@ -119,12 +147,13 @@ fn emit_image_metadata_loaded(
     app_handle: &AppHandle,
     path: &str,
     rating: u8,
+    rating_is_manual: Option<bool>,
     is_edited: bool,
     tags: &Option<Vec<String>>,
 ) {
     let _ = app_handle.emit(
         "image-metadata-loaded",
-        serde_json::json!({ "path": path, "rating": rating, "is_edited": is_edited, "tags": tags }),
+        serde_json::json!({ "path": path, "rating": rating, "rating_is_manual": rating_is_manual, "is_edited": is_edited, "tags": tags }),
     );
 }
 
@@ -188,6 +217,7 @@ pub fn start_metadata_workers(app_handle: tauri::AppHandle) {
                     &app_clone,
                     &item.virtual_path,
                     metadata.rating,
+                    metadata.rating_is_manual,
                     metadata.is_edited,
                     &metadata.tags,
                 );
@@ -284,6 +314,8 @@ pub struct ImageFile {
     modified: u64,
     is_edited: bool,
     rating: u8,
+    #[serde(default)]
+    rating_is_manual: Option<bool>,
     tags: Option<Vec<String>>,
     exif: Option<HashMap<String, String>>,
     is_virtual_copy: bool,
@@ -657,6 +689,7 @@ pub fn list_images_in_dir(path: String, app_handle: AppHandle) -> Result<Vec<Ima
                         is_edited: false,
                         tags: None,
                         rating: 0,
+                        rating_is_manual: None,
                         is_raw: crate::formats::is_raw_file(&path_buf),
                     }
                 } else {
@@ -673,6 +706,7 @@ pub fn list_images_in_dir(path: String, app_handle: AppHandle) -> Result<Vec<Ima
                     is_raw: metadata.is_raw,
                     group_id: None,
                     rating: metadata.rating,
+                    rating_is_manual: metadata.rating_is_manual,
                     is_cloud_placeholder,
                 });
             }
@@ -790,6 +824,7 @@ pub fn list_images_recursive(
                         is_edited: false,
                         tags: None,
                         rating: 0,
+                        rating_is_manual: None,
                         is_raw: crate::formats::is_raw_file(&path_buf),
                     }
                 } else {
@@ -806,6 +841,7 @@ pub fn list_images_recursive(
                     is_raw: metadata.is_raw,
                     group_id: None,
                     rating: metadata.rating,
+                    rating_is_manual: metadata.rating_is_manual,
                     is_cloud_placeholder,
                 });
             }
@@ -1061,6 +1097,7 @@ pub fn get_album_images(
                     is_edited: false,
                     tags: None,
                     rating: 0,
+                    rating_is_manual: None,
                     is_raw: crate::formats::is_raw_file(&source_path),
                 }
             } else {
@@ -1077,6 +1114,7 @@ pub fn get_album_images(
                 is_raw: metadata.is_raw,
                 group_id: None,
                 rating: metadata.rating,
+                rating_is_manual: metadata.rating_is_manual,
                 is_cloud_placeholder,
             })
         })
@@ -3048,6 +3086,7 @@ pub fn set_color_label_for_paths(
 pub fn set_rating_for_paths(
     paths: Vec<String>,
     rating: u8,
+    rating_is_manual: bool,
     app_handle: AppHandle,
 ) -> Result<(), String> {
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
@@ -3058,10 +3097,14 @@ pub fn set_rating_for_paths(
         .par_iter()
         .try_for_each(|path| -> Result<(), String> {
             let (_, sidecar_path) = parse_virtual_path(path);
-
+            let sidecar_exists = sidecar_path.exists();
             let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
 
-            metadata.rating = rating;
+            if !apply_rating_update(&mut metadata, rating, rating_is_manual, sidecar_exists) {
+                return Err(format!(
+                    "cannot overwrite a manual or unclassified rating for {path} during automatic culling"
+                ));
+            }
 
             let json_string = serde_json::to_string_pretty(&metadata)
                 .map_err(|error| format!("cannot serialize metadata for {path}: {error}"))?;
@@ -4318,5 +4361,52 @@ pub fn sync_metadata_to_xmp(source_path: &Path, metadata: &ImageMetadata, create
         }
 
         let _ = fs::write(&xmp_file, content);
+    }
+}
+
+#[cfg(test)]
+mod rating_provenance_tests {
+    use super::*;
+
+    #[test]
+    fn manual_zero_rating_survives_persistence_and_automatic_reclassification() {
+        let mut metadata = ImageMetadata::default();
+        assert!(apply_rating_update(&mut metadata, 0, true, false));
+
+        let persisted = serde_json::to_vec(&metadata).expect("serialize manual zero rating");
+        let mut reloaded: ImageMetadata =
+            serde_json::from_slice(&persisted).expect("reload manual zero rating");
+        assert_eq!(reloaded.rating, 0);
+        assert_eq!(reloaded.rating_is_manual, Some(true));
+        assert!(!apply_rating_update(&mut reloaded, 5, false, true));
+        assert_eq!(reloaded.rating, 0);
+        assert_eq!(reloaded.rating_is_manual, Some(true));
+    }
+
+    #[test]
+    fn legacy_ratings_are_conservative_but_new_unrated_files_can_be_classified() {
+        let mut legacy_positive: ImageMetadata = serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "rating": 4,
+            "adjustments": {}
+        }))
+        .expect("load legacy positive rating");
+        assert_eq!(legacy_positive.rating_is_manual, None);
+        assert!(!apply_rating_update(&mut legacy_positive, 2, false, true));
+        assert_eq!(legacy_positive.rating, 4);
+
+        let mut legacy_zero: ImageMetadata = serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "rating": 0,
+            "adjustments": {}
+        }))
+        .expect("load legacy zero rating");
+        assert!(!apply_rating_update(&mut legacy_zero, 3, false, true));
+        assert_eq!(legacy_zero.rating_is_manual, None);
+
+        let mut new_unrated = ImageMetadata::default();
+        assert!(apply_rating_update(&mut new_unrated, 3, false, false));
+        assert_eq!(new_unrated.rating, 3);
+        assert_eq!(new_unrated.rating_is_manual, Some(false));
     }
 }

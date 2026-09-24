@@ -297,6 +297,7 @@ export interface ImageFile {
   modified: number;
   path: string;
   rating: number;
+  rating_is_manual: boolean | null;
   tags: Array<string> | null;
   exif: { [key: string]: string } | null;
   is_virtual_copy: boolean;
@@ -410,7 +411,6 @@ export interface CullingSettings {
   detectSubject: boolean;
   subjectProfile: 'general' | 'portrait' | 'wedding' | 'sports' | 'dance';
   autoAssignStars: boolean;
-  preserveExistingDecisions: boolean;
 }
 
 export type CullingCategory = 'selected' | 'highlights' | 'duplicate' | 'blurred' | 'closedEyes' | 'unrated';

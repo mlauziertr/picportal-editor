@@ -6,6 +6,7 @@ import { useProcessStore } from '../store/useProcessStore';
 import { useEditorStore } from '../store/useEditorStore';
 import { useUIStore } from '../store/useUIStore';
 import { useLibraryStore } from '../store/useLibraryStore';
+import { mergeLoadedRating } from '../utils/ratingPersistence';
 
 interface TauriListenerProps {
   refreshAllFolderTrees: () => void;
@@ -124,16 +125,39 @@ export function useTauriListeners({
           scheduleFlush();
         }
       }),
-      listen('image-metadata-loaded', (event: any) => {
+      listen<{
+        path: string;
+        rating: number;
+        rating_is_manual: boolean | null;
+        is_edited: boolean;
+        tags: string[] | null;
+      }>('image-metadata-loaded', (event) => {
         if (!isEffectActive) return;
-        const { path, rating, is_edited, tags } = event.payload;
+        const { path, rating, rating_is_manual, is_edited, tags } = event.payload;
 
-        useLibraryStore.getState().setLibrary((state) => ({
-          imageRatings: { ...state.imageRatings, [path]: rating },
-          imageList: state.imageList.map((img) =>
-            img.path === path ? { ...img, is_edited, tags: tags ?? img.tags } : img,
-          ),
-        }));
+        useLibraryStore.getState().setLibrary((state) => {
+          const currentImage = state.imageList.find((image) => image.path === path);
+          const loadedRating = mergeLoadedRating(
+            state.imageRatings[path] ?? currentImage?.rating,
+            currentImage?.rating_is_manual,
+            rating,
+            rating_is_manual,
+          );
+          return {
+            imageRatings: { ...state.imageRatings, [path]: loadedRating.rating },
+            imageList: state.imageList.map((img) =>
+              img.path === path
+                ? {
+                    ...img,
+                    rating: loadedRating.rating,
+                    rating_is_manual: loadedRating.ratingIsManual,
+                    is_edited,
+                    tags: tags ?? img.tags,
+                  }
+                : img,
+            ),
+          };
+        });
       }),
       listen('ai-model-download-start', (event: any) => {
         if (isEffectActive) useProcessStore.getState().setProcess({ aiModelDownloadStatus: event.payload });

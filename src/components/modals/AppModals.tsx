@@ -23,7 +23,6 @@ import {
   AlbumItem,
   AlbumGroup,
   CullingPersistenceSummary,
-  CullingSettings,
   CullingSuggestions,
 } from '../ui/AppProperties';
 import { CopyPasteSettings } from '../../utils/adjustments';
@@ -44,10 +43,7 @@ export interface AppModalsProps {
   handleRenameFolder: (newName: string) => Promise<void>;
   handleSaveRename: (nameTemplate: string) => Promise<void>;
   handleStartImport: (settings: any) => Promise<void>;
-  handleApplyCulling: (
-    suggestions: CullingSuggestions,
-    preserveExistingDecisions: boolean,
-  ) => Promise<CullingPersistenceSummary>;
+  handleApplyCulling: (suggestions: CullingSuggestions) => Promise<CullingPersistenceSummary>;
   executeDelete: (paths: string[], options: any) => Promise<void>;
   handleSaveCollage: (base64Data: string, firstPath: string) => Promise<string>;
   handleCreateAlbumItem: (name: string, type: 'album' | 'group') => Promise<void>;
@@ -350,8 +346,8 @@ export default function AppModals(props: AppModalsProps) {
         error={cullingModalState.error}
         imagePaths={cullingModalState.pathsToCull}
         folderPath={cullingModalState.folderPath}
-        onComplete={async (completedSuggestions, settings: CullingSettings) => {
-          const persistence = await props.handleApplyCulling(completedSuggestions, settings.preserveExistingDecisions);
+        onComplete={async (completedSuggestions) => {
+          const persistence = await props.handleApplyCulling(completedSuggestions);
           await props.refreshImageList().catch((refreshError) => {
             console.error('Culling result reconciliation failed:', refreshError);
           });

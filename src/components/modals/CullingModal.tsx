@@ -30,7 +30,6 @@ const DEFAULT_SETTINGS: CullingSettings = {
   detectSubject: true,
   subjectProfile: 'general',
   autoAssignStars: true,
-  preserveExistingDecisions: true,
 };
 
 const amountOptions = [
@@ -348,17 +347,6 @@ export default function CullingModal({
                         defaultValue: 'Assign ratings and color labels',
                       })}
                       onChange={(autoAssignStars) => setSettings((current) => ({ ...current, autoAssignStars }))}
-                    />
-                    <Switch
-                      checked={settings.preserveExistingDecisions}
-                      label={t('modals.culling.preserveExisting', { defaultValue: 'Keep existing ratings and labels' })}
-                      onChange={(preserveExistingDecisions) =>
-                        setSettings((current) => ({ ...current, preserveExistingDecisions }))
-                      }
-                      tooltip={t('modals.culling.preserveExistingHint', {
-                        defaultValue:
-                          'Photos already rated or color-labeled are not overwritten. An explicit manual 0-star clear is indistinguishable from unrated.',
-                      })}
                     />
                   </div>
                 )}

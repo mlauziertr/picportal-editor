@@ -1388,8 +1388,6 @@
       "preservedCount_few": "{{count}} existing decisions were preserved.",
       "preservedCount_many": "{{count}} existing decisions were preserved.",
       "preservedCount_other": "{{count}} existing decisions were preserved.",
-      "preserveExisting": "Keep existing ratings and labels",
-      "preserveExistingHint": "Photos already rated or color-labeled are not overwritten. An explicit manual 0-star clear is indistinguishable from unrated.",
       "profileDance": "Taniec / akcja",
       "profileGeneral": "Ogólne",
       "profilePortrait": "Portret",

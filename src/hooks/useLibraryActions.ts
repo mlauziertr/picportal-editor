@@ -17,7 +17,11 @@ import { globalImageCache } from '../utils/ImageLRUCache';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { computeSortedLibrary } from './useSortedLibrary';
 import { expandGroupedPaths } from '../utils/imageGrouping';
-import { persistColorAssignments, persistRatingAssignments } from '../utils/ratingPersistence';
+import {
+  isRatingProtectedFromCulling,
+  persistColorAssignments,
+  persistRatingAssignments,
+} from '../utils/ratingPersistence';
 import type { FolderTree as FolderTreeNode } from '../components/panel/right/FolderTree';
 
 export function useLibraryActions(handleImageSelect?: (path: string, openInEditor?: boolean) => void) {
@@ -40,28 +44,33 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
       pathsToRate.forEach((p) => {
         newRatings[p] = finalRating;
       });
-      return { imageRatings: newRatings };
+      return {
+        imageRatings: newRatings,
+        imageList: state.imageList.map((image) =>
+          pathsToRate.includes(image.path) ? { ...image, rating: finalRating, rating_is_manual: true } : image,
+        ),
+      };
     });
 
-    invoke(Invokes.SetRatingForPaths, { paths: pathsToRate, rating: finalRating }).catch((err) => {
-      console.error(err);
-      toast.error(`Failed to apply rating: ${err}`);
-    });
+    invoke(Invokes.SetRatingForPaths, { paths: pathsToRate, rating: finalRating, ratingIsManual: true }).catch(
+      (err) => {
+        console.error(err);
+        toast.error(`Failed to apply rating: ${err}`);
+      },
+    );
   }, []);
 
   const handleApplyCulling = useCallback(
-    async (suggestions: CullingSuggestions, preserveExistingDecisions = true): Promise<CullingPersistenceSummary> => {
-      const { imageList, imageRatings, setLibrary } = useLibraryStore.getState();
+    async (suggestions: CullingSuggestions): Promise<CullingPersistenceSummary> => {
+      const { imageList, setLibrary } = useLibraryStore.getState();
       const protectedPaths = new Set(
-        preserveExistingDecisions
-          ? imageList
-              .filter((image) => {
-                const rating = imageRatings[image.path] ?? image.rating ?? 0;
-                const hasColor = (image.tags || []).some((tag) => tag.startsWith('color:'));
-                return rating > 0 || hasColor;
-              })
-              .map((image) => image.path)
-          : [],
+        imageList
+          .filter((image) => {
+            const hasProtectedRating = isRatingProtectedFromCulling(image.rating_is_manual);
+            const hasColor = (image.tags || []).some((tag) => tag.startsWith('color:'));
+            return hasProtectedRating || hasColor;
+          })
+          .map((image) => image.path),
       );
       const skippedPaths = suggestions.results.map((result) => result.path).filter((path) => protectedPaths.has(path));
       const ratings = Object.fromEntries(
@@ -74,7 +83,7 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
       // Ratings and labels share one sidecar file. Keep the two passes ordered so
       // concurrent read/modify/write calls cannot discard the other decision.
       const ratingResult = await persistRatingAssignments(ratings, (paths, rating) =>
-        invoke(Invokes.SetRatingForPaths, { paths, rating }),
+        invoke(Invokes.SetRatingForPaths, { paths, rating, ratingIsManual: false }),
       );
       const colorResult = await persistColorAssignments(colors, (paths, color) =>
         invoke(Invokes.SetColorLabelForPaths, { paths, color }),
@@ -84,12 +93,18 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
         setLibrary((state) => ({
           imageRatings: { ...state.imageRatings, ...ratingResult.succeeded },
           imageList: state.imageList.map((image) => {
-            if (colorResult.succeeded[image.path] === undefined) return image;
+            const rating = ratingResult.succeeded[image.path];
+            const hasRatingUpdate = rating !== undefined;
+            const hasColorUpdate = colorResult.succeeded[image.path] !== undefined;
+            if (!hasRatingUpdate && !hasColorUpdate) return image;
             const color = colorResult.succeeded[image.path];
             const otherTags = (image.tags || []).filter((tag) => !tag.startsWith('color:'));
             return {
               ...image,
-              tags: color ? [...otherTags, `color:${color}`] : otherTags.length > 0 ? otherTags : null,
+              ...(hasRatingUpdate ? { rating, rating_is_manual: false } : {}),
+              ...(hasColorUpdate
+                ? { tags: color ? [...otherTags, `color:${color}`] : otherTags.length > 0 ? otherTags : null }
+                : {}),
             };
           }),
         }));

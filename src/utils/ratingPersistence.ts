@@ -1,3 +1,19 @@
+export function isRatingProtectedFromCulling(ratingIsManual: boolean | null | undefined): boolean {
+  return ratingIsManual !== false;
+}
+
+export function mergeLoadedRating(
+  currentRating: number | undefined,
+  currentIsManual: boolean | null | undefined,
+  loadedRating: number,
+  loadedIsManual: boolean | null,
+): { rating: number; ratingIsManual: boolean | null } {
+  if (currentIsManual === true) {
+    return { rating: currentRating ?? 0, ratingIsManual: true };
+  }
+  return { rating: loadedRating, ratingIsManual: loadedIsManual };
+}
+
 export interface RatingPersistenceFailure {
   rating: number;
   paths: string[];
