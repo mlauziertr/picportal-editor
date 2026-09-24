@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  getCullingProtectedPaths,
   isRatingProtectedFromCulling,
   mergeLoadedRating,
   persistBatchWithReconciliation,
@@ -13,6 +14,32 @@ test('culling preserves manual, unknown, and explicit zero provenance', () => {
   assert.equal(isRatingProtectedFromCulling(null), true);
   assert.equal(isRatingProtectedFromCulling(undefined), true);
   assert.equal(isRatingProtectedFromCulling(false), false);
+});
+
+test('automatic color labels do not block automatic rating revisions', () => {
+  const protectedPaths = getCullingProtectedPaths([
+    {
+      path: 'automatic.jpg',
+      rating_is_manual: false,
+      color_label_is_manual: false,
+    },
+  ]);
+
+  assert.equal(protectedPaths.ratingPaths.has('automatic.jpg'), false);
+  assert.equal(protectedPaths.colorLabelPaths.has('automatic.jpg'), false);
+  assert.equal(protectedPaths.allPaths.has('automatic.jpg'), false);
+});
+
+test('manual and ambiguous color decisions stay protected independently of stars', () => {
+  const protectedPaths = getCullingProtectedPaths([
+    { path: 'manual-clear.jpg', rating_is_manual: false, color_label_is_manual: true },
+    { path: 'legacy.jpg', rating_is_manual: false, color_label_is_manual: null },
+    { path: 'manual-rating.jpg', rating_is_manual: true, color_label_is_manual: false },
+  ]);
+
+  assert.deepEqual([...protectedPaths.ratingPaths], ['manual-rating.jpg']);
+  assert.deepEqual([...protectedPaths.colorLabelPaths], ['manual-clear.jpg', 'legacy.jpg']);
+  assert.deepEqual([...protectedPaths.allPaths], ['manual-rating.jpg', 'manual-clear.jpg', 'legacy.jpg']);
 });
 
 test('stale metadata refresh cannot replace a manually cleared rating', () => {

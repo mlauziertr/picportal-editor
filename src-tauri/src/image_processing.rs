@@ -55,6 +55,8 @@ pub struct ImageMetadata {
     pub rating: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rating_is_manual: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_label_is_manual: Option<bool>,
     pub adjustments: Value,
     #[serde(default)]
     pub tags: Option<Vec<String>>,
@@ -68,6 +70,7 @@ impl Default for ImageMetadata {
             version: 1,
             rating: 0,
             rating_is_manual: Some(false),
+            color_label_is_manual: Some(false),
             adjustments: Value::Null,
             tags: None,
             exif: None,

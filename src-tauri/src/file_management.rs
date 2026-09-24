@@ -86,6 +86,7 @@ struct ImageFileMetadata {
     tags: Option<Vec<String>>,
     rating: u8,
     rating_is_manual: Option<bool>,
+    color_label_is_manual: Option<bool>,
     is_raw: bool,
 }
 
@@ -139,6 +140,7 @@ fn resolve_image_metadata(
         tags: metadata.tags,
         rating: metadata.rating,
         rating_is_manual: metadata.rating_is_manual,
+        color_label_is_manual: metadata.color_label_is_manual,
         is_raw,
     }
 }
@@ -148,12 +150,13 @@ fn emit_image_metadata_loaded(
     path: &str,
     rating: u8,
     rating_is_manual: Option<bool>,
+    color_label_is_manual: Option<bool>,
     is_edited: bool,
     tags: &Option<Vec<String>>,
 ) {
     let _ = app_handle.emit(
         "image-metadata-loaded",
-        serde_json::json!({ "path": path, "rating": rating, "rating_is_manual": rating_is_manual, "is_edited": is_edited, "tags": tags }),
+        serde_json::json!({ "path": path, "rating": rating, "rating_is_manual": rating_is_manual, "color_label_is_manual": color_label_is_manual, "is_edited": is_edited, "tags": tags }),
     );
 }
 
@@ -218,6 +221,7 @@ pub fn start_metadata_workers(app_handle: tauri::AppHandle) {
                     &item.virtual_path,
                     metadata.rating,
                     metadata.rating_is_manual,
+                    metadata.color_label_is_manual,
                     metadata.is_edited,
                     &metadata.tags,
                 );
@@ -316,6 +320,8 @@ pub struct ImageFile {
     rating: u8,
     #[serde(default)]
     rating_is_manual: Option<bool>,
+    #[serde(default)]
+    color_label_is_manual: Option<bool>,
     tags: Option<Vec<String>>,
     exif: Option<HashMap<String, String>>,
     is_virtual_copy: bool,
@@ -706,6 +712,7 @@ pub fn list_images_in_dir(path: String, app_handle: AppHandle) -> Result<Vec<Ima
                         tags: None,
                         rating: 0,
                         rating_is_manual: None,
+                        color_label_is_manual: None,
                         is_raw: crate::formats::is_raw_file(&path_buf),
                     }
                 } else {
@@ -723,6 +730,7 @@ pub fn list_images_in_dir(path: String, app_handle: AppHandle) -> Result<Vec<Ima
                     group_id: None,
                     rating: metadata.rating,
                     rating_is_manual: metadata.rating_is_manual,
+                    color_label_is_manual: metadata.color_label_is_manual,
                     is_cloud_placeholder,
                 });
             }
@@ -841,6 +849,7 @@ pub fn list_images_recursive(
                         tags: None,
                         rating: 0,
                         rating_is_manual: None,
+                        color_label_is_manual: None,
                         is_raw: crate::formats::is_raw_file(&path_buf),
                     }
                 } else {
@@ -858,6 +867,7 @@ pub fn list_images_recursive(
                     group_id: None,
                     rating: metadata.rating,
                     rating_is_manual: metadata.rating_is_manual,
+                    color_label_is_manual: metadata.color_label_is_manual,
                     is_cloud_placeholder,
                 });
             }
@@ -1114,6 +1124,7 @@ pub fn get_album_images(
                     tags: None,
                     rating: 0,
                     rating_is_manual: None,
+                    color_label_is_manual: None,
                     is_raw: crate::formats::is_raw_file(&source_path),
                 }
             } else {
@@ -1131,6 +1142,7 @@ pub fn get_album_images(
                 group_id: None,
                 rating: metadata.rating,
                 rating_is_manual: metadata.rating_is_manual,
+                color_label_is_manual: metadata.color_label_is_manual,
                 is_cloud_placeholder,
             })
         })
@@ -3055,6 +3067,7 @@ pub async fn apply_auto_adjustments_to_paths(
 pub fn set_color_label_for_paths(
     paths: Vec<String>,
     color: Option<String>,
+    color_label_is_manual: bool,
     app_handle: AppHandle,
 ) -> Result<(), String> {
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
@@ -3068,20 +3081,12 @@ pub fn set_color_label_for_paths(
 
             let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
 
-            let mut tags = metadata.tags.unwrap_or_default();
-            tags.retain(|tag| !tag.starts_with(COLOR_TAG_PREFIX));
-
-            if let Some(c) = &color
-                && !c.is_empty()
-            {
-                tags.push(format!("{}{}", COLOR_TAG_PREFIX, c));
+            if !color_label_is_manual && metadata.color_label_is_manual != Some(false) {
+                return Err(format!(
+                    "cannot overwrite a manual or unclassified color label for {path} during automatic culling"
+                ));
             }
-
-            if tags.is_empty() {
-                metadata.tags = None;
-            } else {
-                metadata.tags = Some(tags);
-            }
+            apply_color_label_update(&mut metadata, color.as_deref(), color_label_is_manual);
 
             let json_string = serde_json::to_string_pretty(&metadata)
                 .map_err(|error| format!("cannot serialize metadata for {path}: {error}"))?;
@@ -4216,6 +4221,18 @@ pub fn resolve_xmp_path(image_path: &Path) -> Option<PathBuf> {
     }
 }
 
+fn apply_color_label_update(metadata: &mut ImageMetadata, color: Option<&str>, is_manual: bool) {
+    let mut tags = metadata.tags.take().unwrap_or_default();
+    tags.retain(|tag| !tag.starts_with(COLOR_TAG_PREFIX));
+
+    if let Some(color) = color.filter(|color| !color.is_empty()) {
+        tags.push(format!("{}{}", COLOR_TAG_PREFIX, color));
+    }
+
+    metadata.tags = if tags.is_empty() { None } else { Some(tags) };
+    metadata.color_label_is_manual = Some(is_manual);
+}
+
 pub fn sync_metadata_from_xmp(source_path: &Path, metadata: &mut ImageMetadata) -> bool {
     let actual_xmp = resolve_xmp_path(source_path);
 
@@ -4246,12 +4263,19 @@ pub fn sync_metadata_from_xmp(source_path: &Path, metadata: &mut ImageMetadata) 
         let had_no_tags = metadata.tags.is_none();
 
         for tag in xmp_tags {
+            if metadata.color_label_is_manual == Some(true)
+                && tag.starts_with(COLOR_TAG_PREFIX)
+            {
+                continue;
+            }
             if !current_tags.contains(&tag) {
                 current_tags.push(tag);
             }
         }
 
-        if let Some(label) = xmp_label {
+        if metadata.color_label_is_manual != Some(true)
+            && let Some(label) = xmp_label
+        {
             let label_tag = format!("{}{}", COLOR_TAG_PREFIX, label.to_lowercase());
             if !current_tags.contains(&label_tag) {
                 current_tags.retain(|t| !t.starts_with(COLOR_TAG_PREFIX));
@@ -4447,6 +4471,39 @@ mod file_management_regression_tests {
         let mut unknown_rating = ImageMetadata::default_with_unknown_rating();
         assert!(sync_metadata_from_xmp(&image_path, &mut unknown_rating));
         assert_eq!(unknown_rating.rating, 4);
+    }
+
+    #[test]
+    fn manual_color_clear_survives_reload_and_stale_xmp_label() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let image_path = directory.path().join("image.jpg");
+        let sidecar_path = directory.path().join("image.jpg.rrdata");
+        fs::write(
+            image_path.with_extension("xmp"),
+            concat!(
+                "<xmp:Label>Green</xmp:Label>",
+                "<dc:subject><rdf:Bag><rdf:li>color:green</rdf:li></rdf:Bag></dc:subject>"
+            ),
+        )
+        .expect("write synthetic XMP");
+        let mut metadata = ImageMetadata {
+            tags: Some(vec!["color:green".to_owned()]),
+            color_label_is_manual: Some(false),
+            ..ImageMetadata::default()
+        };
+
+        apply_color_label_update(&mut metadata, None, true);
+        fs::write(
+            &sidecar_path,
+            serde_json::to_vec(&metadata).expect("serialize cleared label"),
+        )
+        .expect("persist cleared label");
+        let mut reloaded = crate::exif_processing::load_sidecar(&sidecar_path);
+
+        assert_eq!(reloaded.color_label_is_manual, Some(true));
+        assert!(!sync_metadata_from_xmp(&image_path, &mut reloaded));
+        assert_eq!(reloaded.tags, None);
+        assert_eq!(reloaded.color_label_is_manual, Some(true));
     }
 
     #[test]

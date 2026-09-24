@@ -297,6 +297,7 @@ export interface ImageFile {
   path: string;
   rating: number;
   rating_is_manual: boolean | null;
+  color_label_is_manual?: boolean | null;
   tags: Array<string> | null;
   exif: { [key: string]: string } | null;
   is_virtual_copy: boolean;

@@ -19,7 +19,7 @@ import { computeSortedLibrary } from './useSortedLibrary';
 import { expandGroupedPaths } from '../utils/imageGrouping';
 import { stripVirtualCopySuffix } from '../utils/virtualCopyPath';
 import {
-  isRatingProtectedFromCulling,
+  getCullingProtectedPaths,
   persistColorAssignments,
   persistRatingAssignments,
 } from '../utils/ratingPersistence';
@@ -64,21 +64,15 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
   const handleApplyCulling = useCallback(
     async (suggestions: CullingSuggestions): Promise<CullingPersistenceSummary> => {
       const { imageList, setLibrary } = useLibraryStore.getState();
-      const protectedPaths = new Set(
-        imageList
-          .filter((image) => {
-            const hasProtectedRating = isRatingProtectedFromCulling(image.rating_is_manual);
-            const hasColor = (image.tags || []).some((tag) => tag.startsWith('color:'));
-            return hasProtectedRating || hasColor;
-          })
-          .map((image) => image.path),
-      );
-      const skippedPaths = suggestions.results.map((result) => result.path).filter((path) => protectedPaths.has(path));
+      const protectedPaths = getCullingProtectedPaths(imageList);
+      const skippedPaths = suggestions.results
+        .map((result) => result.path)
+        .filter((path) => protectedPaths.allPaths.has(path));
       const ratings = Object.fromEntries(
-        Object.entries(suggestions.starAssignments).filter(([path]) => !protectedPaths.has(path)),
+        Object.entries(suggestions.starAssignments).filter(([path]) => !protectedPaths.ratingPaths.has(path)),
       );
       const colors = Object.fromEntries(
-        Object.entries(suggestions.colorAssignments).filter(([path]) => !protectedPaths.has(path)),
+        Object.entries(suggestions.colorAssignments).filter(([path]) => !protectedPaths.colorLabelPaths.has(path)),
       );
 
       // Ratings and labels share one sidecar file. Keep the two passes ordered so
@@ -87,7 +81,7 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
         invoke(Invokes.SetRatingForPaths, { paths, rating, ratingIsManual: false }),
       );
       const colorResult = await persistColorAssignments(colors, (paths, color) =>
-        invoke(Invokes.SetColorLabelForPaths, { paths, color }),
+        invoke(Invokes.SetColorLabelForPaths, { paths, color, colorLabelIsManual: false }),
       );
 
       if (Object.keys(ratingResult.succeeded).length > 0 || Object.keys(colorResult.succeeded).length > 0) {
@@ -104,7 +98,10 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
               ...image,
               ...(hasRatingUpdate ? { rating, rating_is_manual: false } : {}),
               ...(hasColorUpdate
-                ? { tags: color ? [...otherTags, `color:${color}`] : otherTags.length > 0 ? otherTags : null }
+                ? {
+                    tags: color ? [...otherTags, `color:${color}`] : otherTags.length > 0 ? otherTags : null,
+                    color_label_is_manual: false,
+                  }
                 : {}),
             };
           }),
@@ -143,13 +140,17 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
     const finalColor = color !== null && color === currentColor ? null : color;
 
     try {
-      await invoke(Invokes.SetColorLabelForPaths, { paths: pathsToUpdate, color: finalColor });
+      await invoke(Invokes.SetColorLabelForPaths, {
+        paths: pathsToUpdate,
+        color: finalColor,
+        colorLabelIsManual: true,
+      });
       setLibrary((state) => ({
         imageList: state.imageList.map((image: ImageFile) => {
           if (pathsToUpdate.includes(image.path)) {
             const otherTags = (image.tags || []).filter((tag: string) => !tag.startsWith('color:'));
             const newTags = finalColor ? [...otherTags, `color:${finalColor}`] : otherTags;
-            return { ...image, tags: newTags };
+            return { ...image, tags: newTags, color_label_is_manual: true };
           }
           return image;
         }),

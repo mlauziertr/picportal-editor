@@ -129,11 +129,12 @@ export function useTauriListeners({
         path: string;
         rating: number;
         rating_is_manual: boolean | null;
+        color_label_is_manual: boolean | null;
         is_edited: boolean;
         tags: string[] | null;
       }>('image-metadata-loaded', (event) => {
         if (!isEffectActive) return;
-        const { path, rating, rating_is_manual, is_edited, tags } = event.payload;
+        const { path, rating, rating_is_manual, color_label_is_manual, is_edited, tags } = event.payload;
 
         useLibraryStore.getState().setLibrary((state) => {
           const currentImage = state.imageList.find((image) => image.path === path);
@@ -151,6 +152,7 @@ export function useTauriListeners({
                     ...img,
                     rating: loadedRating.rating,
                     rating_is_manual: loadedRating.ratingIsManual,
+                    color_label_is_manual,
                     is_edited,
                     tags: tags ?? img.tags,
                   }

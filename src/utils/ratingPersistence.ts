@@ -2,6 +2,34 @@ export function isRatingProtectedFromCulling(ratingIsManual: boolean | null | un
   return ratingIsManual !== false;
 }
 
+export interface CullingProtectedPathSets {
+  ratingPaths: Set<string>;
+  colorLabelPaths: Set<string>;
+  allPaths: Set<string>;
+}
+
+export function getCullingProtectedPaths(
+  images: readonly {
+    path: string;
+    rating_is_manual: boolean | null | undefined;
+    color_label_is_manual?: boolean | null;
+  }[],
+): CullingProtectedPathSets {
+  const ratingPaths = new Set<string>();
+  const colorLabelPaths = new Set<string>();
+
+  for (const image of images) {
+    if (isRatingProtectedFromCulling(image.rating_is_manual)) ratingPaths.add(image.path);
+    if (image.color_label_is_manual !== false) colorLabelPaths.add(image.path);
+  }
+
+  return {
+    ratingPaths,
+    colorLabelPaths,
+    allPaths: new Set([...ratingPaths, ...colorLabelPaths]),
+  };
+}
+
 export function mergeLoadedRating(
   currentRating: number | undefined,
   currentIsManual: boolean | null | undefined,
