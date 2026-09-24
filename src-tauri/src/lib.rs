@@ -75,8 +75,8 @@ use tempfile::NamedTempFile;
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::cache_utils::{
-    DecodedImageCache, calculate_full_job_hash, calculate_geometry_hash, calculate_transform_hash,
-    calculate_visual_hash,
+    DecodedImageCache, calculate_full_job_hash, calculate_geometry_hash,
+    calculate_image_cache_hash, calculate_transform_hash, calculate_visual_hash,
 };
 use crate::file_management::{parse_virtual_path, read_file_mapped};
 use crate::formats::is_raw_file;
@@ -159,7 +159,8 @@ pub fn generate_transformed_preview(
     adjustments: &serde_json::Value,
     preview_dim: u32,
 ) -> Result<(DynamicImage, f32, (f32, f32)), String> {
-    let transform_hash = calculate_transform_hash(adjustments);
+    let transform_hash =
+        calculate_image_cache_hash(&loaded_image.path, calculate_transform_hash(adjustments));
 
     let (transformed_full_res, unscaled_crop_offset) = {
         let mut cache_lock = state
@@ -204,7 +205,10 @@ fn compute_full_transformed_res(
     loaded_image: &LoadedImage,
     adjustments: &serde_json::Value,
 ) -> Result<(Arc<DynamicImage>, (f32, f32)), String> {
-    let geo_hash = crate::cache_utils::calculate_patched_warped_hash(adjustments);
+    let geo_hash = calculate_image_cache_hash(
+        &loaded_image.path,
+        crate::cache_utils::calculate_patched_warped_hash(adjustments),
+    );
 
     let warped_arc = {
         let mut cache_lock = state
@@ -292,7 +296,14 @@ pub fn get_cached_full_warped_image(
     state: &tauri::State<AppState>,
     js_adjustments: &serde_json::Value,
 ) -> Result<Arc<DynamicImage>, String> {
-    let geo_hash = calculate_geometry_hash(js_adjustments);
+    let loaded_image = state
+        .original_image
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .ok_or("No original image loaded")?;
+    let geo_hash =
+        calculate_image_cache_hash(&loaded_image.path, calculate_geometry_hash(js_adjustments));
 
     {
         let cache_lock = state
@@ -306,10 +317,9 @@ pub fn get_cached_full_warped_image(
         }
     }
 
-    let (base_arc, is_raw) = get_original_image(state)?;
-    let mut cow_image = Cow::Borrowed(base_arc.as_ref());
+    let mut cow_image = Cow::Borrowed(loaded_image.image.as_ref());
 
-    if is_raw {
+    if loaded_image.is_raw {
         apply_cpu_default_raw_processing(cow_image.to_mut());
     }
 
@@ -395,7 +405,10 @@ fn process_preview_job(
         .clone();
     drop(loaded_image_guard);
 
-    let new_transform_hash = calculate_transform_hash(&adjustments_clone);
+    let new_transform_hash = calculate_image_cache_hash(
+        &loaded_image.path,
+        calculate_transform_hash(&adjustments_clone),
+    );
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
     let live_quality = settings.live_preview_quality.as_deref().unwrap_or("high");
 
