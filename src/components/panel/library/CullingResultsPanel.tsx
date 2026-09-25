@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Lock, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'react-toastify';
@@ -137,6 +137,15 @@ export default function CullingResultsPanel({
       },
     });
   }, [showApplyBar, plan.photoCount, onClose, setUI, t]);
+
+  // Escape and Android back go through the same guarded close as the close button.
+  const closeRequest = useUIStore((state) => state.cullingResultsState.closeRequest || 0);
+  const handledCloseRequest = useRef(closeRequest);
+  useEffect(() => {
+    if (closeRequest === handledCloseRequest.current) return;
+    handledCloseRequest.current = closeRequest;
+    requestClose();
+  }, [closeRequest, requestClose]);
 
   useEffect(() => {
     if (initialSelectedPath) {

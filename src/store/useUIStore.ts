@@ -100,6 +100,8 @@ export interface CullingResultsState {
   suggestions: CullingSuggestions | null;
   persistence: CullingPersistenceSummary | null;
   selectedPath: string | null;
+  /** Bumped by Escape / Android back: the panel runs its guarded close (unapplied proposals ask first). */
+  closeRequest?: number;
 }
 
 const ALL_PANELS: Panel[] = [
@@ -281,6 +283,7 @@ export interface UIState {
   collageModalState: CollageModalState;
 
   setUI: (updater: Partial<UIState> | ((state: UIState) => Partial<UIState>)) => void;
+  requestCullingResultsClose: () => void;
   setPanel: (panel: Panel | null) => void;
   customEscapeHandler: (() => void) | null;
   setCustomEscapeHandler: (handler: (() => void) | null) => void;
@@ -406,6 +409,18 @@ export const useUIStore = create<UIState>((set, get) => ({
   collageModalState: { isOpen: false, sourceImages: [] },
 
   setUI: (updater) => set((state) => (typeof updater === 'function' ? updater(state) : updater)),
+
+  requestCullingResultsClose: () =>
+    set((state) =>
+      state.cullingResultsState.isOpen
+        ? {
+            cullingResultsState: {
+              ...state.cullingResultsState,
+              closeRequest: (state.cullingResultsState.closeRequest || 0) + 1,
+            },
+          }
+        : {},
+    ),
 
   setLayoutDragItem: (panel) => set({ activeLayoutDragItem: panel }),
 

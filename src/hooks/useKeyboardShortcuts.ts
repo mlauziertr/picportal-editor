@@ -641,11 +641,10 @@ export const useKeyboardShortcuts = ({
         state.ui.denoiseModalState.isOpen ||
         state.ui.negativeModalState.isOpen;
 
-      if (state.ui.cullingResultsState.isOpen && event.code === 'Escape') {
+      if (state.ui.cullingResultsState.isOpen && !state.ui.confirmModalState.isOpen && event.code === 'Escape') {
         event.preventDefault();
-        state.ui.setUI((currentState) => ({
-          cullingResultsState: { ...currentState.cullingResultsState, isOpen: false },
-        }));
+        // Same guard as the close button: unapplied proposals ask for confirmation.
+        state.ui.requestCullingResultsClose();
         return;
       }
 
