@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { CullingSuggestions } from '../src/components/ui/AppProperties.tsx';
-import { cullingResultsFor, restoreCullingSession } from '../src/utils/cullingSession.ts';
+import {
+  cullingResultsFor,
+  noteCullingEvent,
+  readCullingSession,
+  restoreCullingSession,
+} from '../src/utils/cullingSession.ts';
 
 const suggestions: CullingSuggestions = {
   similarGroups: [],
@@ -69,4 +74,36 @@ test('nothing is restored when idle or when the UI already shows the session', (
 test('culling-complete takes the folder from the payload, not the reset UI store', () => {
   assert.equal(cullingResultsFor(suggestions, null).folderPath, '/shoot');
   assert.equal(cullingResultsFor({ ...suggestions, folderPath: undefined }, '/fallback').folderPath, '/fallback');
+});
+
+test('a committed result wins over running: a missed culling-complete still opens the results', () => {
+  const progress = { current: 120, total: 120, stage: '', stageCode: 'grouping' as const };
+  const restored = restoreCullingSession(
+    { running: true, folderPath: '/shoot', progress, result: suggestions },
+    resetUi,
+  );
+  assert.equal(restored?.cullingResultsState?.isOpen, true);
+  assert.equal(restored?.cullingModalState?.isOpen, false);
+  assert.equal(restored?.cullingModalState?.progress, null);
+});
+
+test('an old running snapshot never reopens the progress over open results', () => {
+  const showingResults = { ...resetUi, cullingResultsState: cullingResultsFor(suggestions, null) };
+  const progress = { current: 40, total: 120, stage: '', stageCode: 'analyzing' as const };
+  assert.equal(
+    restoreCullingSession({ running: true, folderPath: '/shoot', progress, result: null }, showingResults),
+    null,
+  );
+});
+
+test('a snapshot requested before a culling event is discarded as stale', async () => {
+  const running = { running: true, folderPath: '/shoot', progress: null, result: null };
+  // culling-complete arrives while culling_session is in flight.
+  const stale = await readCullingSession(async () => {
+    noteCullingEvent();
+    return running;
+  });
+  assert.equal(stale, null);
+  // No event meanwhile: the snapshot is the latest state.
+  assert.deepEqual(await readCullingSession(async () => running), running);
 });

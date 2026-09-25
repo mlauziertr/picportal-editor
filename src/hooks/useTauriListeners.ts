@@ -6,7 +6,12 @@ import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { Status } from '../components/ui/ExportImportProperties';
 import { Invokes } from '../components/ui/AppProperties';
 import type { CullingSession, CullingSuggestions } from '../components/ui/AppProperties';
-import { cullingResultsFor, restoreCullingSession } from '../utils/cullingSession';
+import {
+  cullingResultsFor,
+  noteCullingEvent,
+  readCullingSession,
+  restoreCullingSession,
+} from '../utils/cullingSession';
 import { useProcessStore } from '../store/useProcessStore';
 import { useEditorStore } from '../store/useEditorStore';
 import { useUIStore } from '../store/useUIStore';
@@ -402,6 +407,7 @@ export function useTauriListeners({
       }),
       listen('culling-start', (event: any) => {
         if (isEffectActive) {
+          noteCullingEvent();
           useUIStore.getState().setUI((state) => ({
             cullingModalState: {
               ...state.cullingModalState,
@@ -416,6 +422,7 @@ export function useTauriListeners({
       }),
       listen('culling-progress', (event: any) => {
         if (isEffectActive) {
+          noteCullingEvent();
           // Also reopens the progress view when the analysis outlived a webview reload.
           useUIStore.getState().setUI((state) => ({
             cullingModalState: { ...state.cullingModalState, isOpen: true, progress: event.payload },
@@ -424,6 +431,7 @@ export function useTauriListeners({
       }),
       listen('culling-cancelled', () => {
         if (isEffectActive) {
+          noteCullingEvent();
           useUIStore.getState().setUI((state) => ({
             cullingModalState: {
               ...state.cullingModalState,
@@ -440,6 +448,7 @@ export function useTauriListeners({
       }),
       listen('culling-complete', (event: any) => {
         if (isEffectActive) {
+          noteCullingEvent();
           // Propose, then apply: results open for review, nothing is written here.
           const suggestions = event.payload as CullingSuggestions;
           useUIStore.getState().setUI((state) => ({
@@ -459,6 +468,7 @@ export function useTauriListeners({
       }),
       listen('culling-error', (event: any) => {
         if (isEffectActive) {
+          noteCullingEvent();
           useUIStore.getState().setUI((state) => ({
             cullingModalState: { ...state.cullingModalState, progress: null, error: String(event.payload) },
           }));
@@ -469,9 +479,9 @@ export function useTauriListeners({
     // Once subscribed, read back an analysis that outlived a webview reload:
     // events emitted before the reload are gone, the backend session is not.
     Promise.all(listeners)
-      .then(() => invoke<CullingSession>(Invokes.CullingSession))
+      .then(() => readCullingSession(() => invoke<CullingSession>(Invokes.CullingSession)))
       .then((session) => {
-        if (!isEffectActive) return;
+        if (!isEffectActive || !session) return;
         const restored = restoreCullingSession(session, useUIStore.getState());
         if (restored) useUIStore.getState().setUI(restored);
       })
