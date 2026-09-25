@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::{PicPortalState, face_processing, image_loader, subject_inference};
@@ -144,13 +144,18 @@ impl CullingProgress {
 pub const CULLING_CANCELLED: &str = "CULLING_CANCELLED";
 pub const CULLING_ALREADY_RUNNING: &str = "CULLING_ALREADY_RUNNING";
 
-static CULLING_RUNNING: AtomicBool = AtomicBool::new(false);
-/// Outcome race between the user and the run: exactly one of cancel or
-/// completion wins, so an accepted cancel never delivers results.
-static CULLING_OUTCOME: AtomicU8 = AtomicU8::new(OUTCOME_OPEN);
-const OUTCOME_OPEN: u8 = 0;
-const OUTCOME_CANCELLED: u8 = 1;
-const OUTCOME_COMMITTED: u8 = 2;
+/// Run lifecycle in one atomic: running and outcome cannot disagree, so a cancel
+/// is either accepted before the result is committed or refused afterwards,
+/// including while the finished run releases its guard.
+static CULLING_STATE: AtomicU8 = AtomicU8::new(STATE_IDLE);
+const STATE_IDLE: u8 = 0;
+const STATE_RUNNING: u8 = 1;
+const STATE_CANCELLED: u8 = 2;
+const STATE_COMMITTED: u8 = 3;
+
+fn culling_running() -> bool {
+    CULLING_STATE.load(Ordering::Acquire) != STATE_IDLE
+}
 
 /// What the UI needs to rebuild itself after a webview reload: events sent
 /// before the reload are lost, this snapshot is not.
@@ -186,24 +191,28 @@ struct CullingRunGuard;
 
 impl CullingRunGuard {
     fn acquire() -> Result<Self, String> {
-        CULLING_RUNNING
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        CULLING_STATE
+            .compare_exchange(
+                STATE_IDLE,
+                STATE_RUNNING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
             .map_err(|_| CULLING_ALREADY_RUNNING.to_owned())?;
-        CULLING_OUTCOME.store(OUTCOME_OPEN, Ordering::Release);
         Ok(Self)
     }
 
     fn is_cancelled(&self) -> bool {
-        CULLING_OUTCOME.load(Ordering::Acquire) == OUTCOME_CANCELLED
+        CULLING_STATE.load(Ordering::Acquire) == STATE_CANCELLED
     }
 
     /// Claims the result for delivery. Fails when a cancel was accepted first;
     /// once it succeeds, `cancel_culling` reports that it is too late.
     fn try_commit(&self) -> bool {
-        CULLING_OUTCOME
+        CULLING_STATE
             .compare_exchange(
-                OUTCOME_OPEN,
-                OUTCOME_COMMITTED,
+                STATE_RUNNING,
+                STATE_COMMITTED,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
@@ -217,8 +226,7 @@ impl Drop for CullingRunGuard {
             session.running = false;
             session.progress = None;
         });
-        CULLING_OUTCOME.store(OUTCOME_OPEN, Ordering::Release);
-        CULLING_RUNNING.store(false, Ordering::Release);
+        CULLING_STATE.store(STATE_IDLE, Ordering::Release);
     }
 }
 
@@ -228,17 +236,14 @@ impl Drop for CullingRunGuard {
 /// runs, or when the results are already being delivered.
 #[tauri::command]
 pub fn cancel_culling() -> bool {
-    if !CULLING_RUNNING.load(Ordering::Acquire) {
-        return false;
-    }
-    match CULLING_OUTCOME.compare_exchange(
-        OUTCOME_OPEN,
-        OUTCOME_CANCELLED,
+    match CULLING_STATE.compare_exchange(
+        STATE_RUNNING,
+        STATE_CANCELLED,
         Ordering::AcqRel,
         Ordering::Acquire,
     ) {
         Ok(_) => true,
-        Err(current) => current == OUTCOME_CANCELLED,
+        Err(current) => current == STATE_CANCELLED,
     }
 }
 
@@ -313,7 +318,7 @@ pub async fn culling_capabilities(
             .or_else(|| subject_reason_code.clone()),
         faces_reason_code,
         subject_reason_code,
-        running: CULLING_RUNNING.load(Ordering::Acquire),
+        running: culling_running(),
     })
 }
 
@@ -1182,7 +1187,13 @@ pub async fn cull_images(
     if !run.try_commit() {
         return cancelled(&app_handle);
     }
-    update_session(|session| session.result = Some(suggestions.clone()));
+    // Committed result and "not running" land in one snapshot: a reload never
+    // sees a finished analysis as still in progress.
+    update_session(|session| {
+        session.running = false;
+        session.progress = None;
+        session.result = Some(suggestions.clone());
+    });
     let _ = app_handle.emit("culling-complete", &suggestions);
     Ok(suggestions)
 }
@@ -1396,6 +1407,30 @@ mod tests {
         );
         dismiss_culling_result();
         assert!(culling_session().result.is_none());
+        *CULLING_SESSION.lock().unwrap() = None;
+
+        // Cancel racing the commit and the guard release on another thread:
+        // an accepted cancel and a delivered result are mutually exclusive.
+        for _ in 0..2_000 {
+            let run = CullingRunGuard::acquire().expect("run starts");
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let canceller = {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    (0..64).fold(false, |accepted, _| cancel_culling() || accepted)
+                })
+            };
+            barrier.wait();
+            let committed = run.try_commit();
+            drop(run);
+            let accepted = canceller.join().unwrap();
+            assert_ne!(
+                committed, accepted,
+                "exactly one of commit and cancel wins (committed={committed})"
+            );
+            assert!(!culling_running());
+        }
         *CULLING_SESSION.lock().unwrap() = None;
     }
 
