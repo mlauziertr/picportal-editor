@@ -4,3 +4,5 @@ src-tauri/target
 src-tauri/gen
 src-tauri/rawler
 data
+# Byte-exact fixtures pinned by SHA-256 in models/*/manifest.json
+models/face/fixtures
