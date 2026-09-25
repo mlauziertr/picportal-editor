@@ -13,6 +13,17 @@ import {
 let nextApplicationId = 1;
 const latestWriterByPath = new Map<string, number>();
 
+// Applications and undos run one at a time, each deciding from the values the
+// previous one left: an undo checks "still this application's value" right
+// before its own write, so a newer application can no longer slip in between.
+let cullingWrites: Promise<unknown> = Promise.resolve();
+
+function serializeCullingWrite<T>(write: () => Promise<T>): Promise<T> {
+  const run = cullingWrites.then(write, write);
+  cullingWrites = run.catch(() => undefined);
+  return run;
+}
+
 function recordWriter(paths: Iterable<string>, applicationId: number | null) {
   for (const path of paths) {
     if (applicationId === null) latestWriterByPath.delete(path);
@@ -68,45 +79,48 @@ async function persistAutomaticAssignments(ratings: Record<string, number>, colo
 }
 
 /** Writes the culling proposals the user chose to apply; nothing is written before this call. */
-export async function applyCullingSuggestions(suggestions: CullingSuggestions): Promise<CullingPersistenceSummary> {
-  const plan = planCullingApplication(suggestions, useLibraryStore.getState().imageList);
-  const applicationId = nextApplicationId++;
-  // Claimed before writing: an older undo started meanwhile must already see this application.
-  recordWriter(new Set([...Object.keys(plan.ratings), ...Object.keys(plan.colors)]), applicationId);
-  const { ratingResult, colorResult } = await persistAutomaticAssignments(plan.ratings, plan.colors);
-  return {
-    applicationId,
-    succeededRatings: ratingResult.succeeded,
-    succeededColors: colorResult.succeeded,
-    failedRatings: ratingResult.failures,
-    failedColors: colorResult.failures,
-    skippedPaths: plan.protectedPaths,
-    undo: plan.undo,
-  };
+export function applyCullingSuggestions(suggestions: CullingSuggestions): Promise<CullingPersistenceSummary> {
+  return serializeCullingWrite(async () => {
+    const plan = planCullingApplication(suggestions, useLibraryStore.getState().imageList);
+    const applicationId = nextApplicationId++;
+    recordWriter(new Set([...Object.keys(plan.ratings), ...Object.keys(plan.colors)]), applicationId);
+    const { ratingResult, colorResult } = await persistAutomaticAssignments(plan.ratings, plan.colors);
+    return {
+      applicationId,
+      succeededRatings: ratingResult.succeeded,
+      succeededColors: colorResult.succeeded,
+      failedRatings: ratingResult.failures,
+      failedColors: colorResult.failures,
+      skippedPaths: plan.protectedPaths,
+      undo: plan.undo,
+    };
+  });
 }
 
 /**
  * Restores the rating and color label each photo had before `applyCullingSuggestions`,
  * only where this application's value is still in place (see `buildCullingUndoAssignments`).
  */
-export async function undoCullingApplication(
+export function undoCullingApplication(
   summary: CullingPersistenceSummary,
 ): Promise<{ restored: number; skipped: number }> {
-  const { ratings, colors, skippedPaths } = buildCullingUndoAssignments(
-    summary.undo,
-    summary.succeededRatings,
-    summary.succeededColors,
-    useLibraryStore.getState().imageList,
-    (path) => latestWriterByPath.get(path) === summary.applicationId,
-  );
-  const restoredPaths = new Set([...Object.keys(ratings), ...Object.keys(colors)]);
-  recordWriter(restoredPaths, null);
-  const { ratingResult, colorResult } = await persistAutomaticAssignments(ratings, colors);
-  const failures = ratingResult.failures.length + colorResult.failures.length;
-  if (failures > 0) {
-    throw new Error(
-      [...ratingResult.failures, ...colorResult.failures].map((failure) => String(failure.error)).join('; '),
+  return serializeCullingWrite(async () => {
+    const { ratings, colors, skippedPaths } = buildCullingUndoAssignments(
+      summary.undo,
+      summary.succeededRatings,
+      summary.succeededColors,
+      useLibraryStore.getState().imageList,
+      (path) => latestWriterByPath.get(path) === summary.applicationId,
     );
-  }
-  return { restored: restoredPaths.size, skipped: skippedPaths.length };
+    const restoredPaths = new Set([...Object.keys(ratings), ...Object.keys(colors)]);
+    recordWriter(restoredPaths, null);
+    const { ratingResult, colorResult } = await persistAutomaticAssignments(ratings, colors);
+    const failures = ratingResult.failures.length + colorResult.failures.length;
+    if (failures > 0) {
+      throw new Error(
+        [...ratingResult.failures, ...colorResult.failures].map((failure) => String(failure.error)).join('; '),
+      );
+    }
+    return { restored: restoredPaths.size, skipped: skippedPaths.length };
+  });
 }
