@@ -1,6 +1,7 @@
 import { ExportPreset } from './ExportImportProperties';
 import { Adjustments, CopyPasteSettings } from '../../utils/adjustments';
 import { ToolType } from '../panel/right/Masks';
+import type { CullingUndoEntry } from '../../utils/cullingApplication';
 
 export const GLOBAL_KEYS = [
   ' ',
@@ -46,6 +47,8 @@ export enum Invokes {
   CreateFolder = 'create_folder',
   CreateVirtualCopy = 'create_virtual_copy',
   CullImages = 'cull_images',
+  CancelCulling = 'cancel_culling',
+  CullingCapabilities = 'culling_capabilities',
   PicPortalLogin = 'picportal_login',
   PicPortalRestoreSession = 'picportal_restore_session',
   PicPortalLogout = 'picportal_logout',
@@ -337,8 +340,24 @@ export interface Progress {
   completed?: number;
   current?: number;
   stage?: string;
+  stageCode?: CullingStageCode;
   total: number;
 }
+
+export type CullingStageCode = 'preparing' | 'analyzing' | 'subject' | 'grouping';
+
+export interface CullingCapabilities {
+  sharpness: 'ready';
+  faces: 'ready' | 'unavailable';
+  subject: 'ready' | 'unavailable';
+  reasonCode: string | null;
+  facesReasonCode: string | null;
+  subjectReasonCode: string | null;
+  running: boolean;
+}
+
+export const CULLING_CANCELLED = 'CULLING_CANCELLED';
+export const CULLING_ALREADY_RUNNING = 'CULLING_ALREADY_RUNNING';
 
 export interface SelectedImage {
   exif: any;
@@ -474,6 +493,8 @@ export interface CullingPersistenceSummary {
   failedRatings: Array<{ rating: number; paths: string[]; error: unknown }>;
   failedColors: Array<{ color: string | null; paths: string[]; error: unknown }>;
   skippedPaths: string[];
+  /** Pre-application values of the written photos, for "Undo" (kept in memory only). */
+  undo: CullingUndoEntry[];
 }
 
 interface KeybindHandler {

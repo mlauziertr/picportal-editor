@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Check, X } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Check, Lock, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { toast } from 'react-toastify';
 import {
   CullingCategory,
   CullingPersistenceSummary,
@@ -8,6 +9,9 @@ import {
   ImageAnalysisResult,
 } from '../../ui/AppProperties';
 import { useLibraryStore } from '../../../store/useLibraryStore';
+import { useUIStore } from '../../../store/useUIStore';
+import { planCullingApplication } from '../../../utils/cullingApplication';
+import { applyCullingSuggestions, undoCullingApplication } from '../../../utils/cullingActions';
 import Button from '../../ui/Button';
 import Text from '../../ui/Text';
 import { TextColors, TextVariants } from '../../../types/typography';
@@ -29,6 +33,34 @@ interface CullingResultsPanelProps {
   onClose(): void;
 }
 
+function AppliedToast({ count, persistence }: { count: number; persistence: CullingPersistenceSummary }) {
+  const { t } = useTranslation();
+  const [isUndoing, setIsUndoing] = useState(false);
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <span>{t('modals.culling.applied', { count })}</span>
+      <button
+        type="button"
+        className="rounded px-2 py-1 font-semibold text-accent hover:bg-bg-primary disabled:opacity-50"
+        disabled={isUndoing}
+        onClick={async () => {
+          setIsUndoing(true);
+          try {
+            await undoCullingApplication(persistence);
+            toast.dismiss();
+            toast.info(t('modals.culling.undone'));
+          } catch (undoError) {
+            setIsUndoing(false);
+            toast.error(String(undoError));
+          }
+        }}
+      >
+        {t('modals.culling.undoApply')}
+      </button>
+    </div>
+  );
+}
+
 function categoryResults(suggestions: CullingSuggestions, category: CullingCategory): ImageAnalysisResult[] {
   return suggestions.results.filter((result) => result.category === category);
 }
@@ -44,12 +76,67 @@ export default function CullingResultsPanel({
   const [activeCategory, setActiveCategory] = useState<CullingCategory>('selected');
   const [selectedPath, setSelectedPath] = useState<string | null>(initialSelectedPath);
   const setLibrary = useLibraryStore((state) => state.setLibrary);
+  const imageList = useLibraryStore((state) => state.imageList);
+  const setUI = useUIStore((state) => state.setUI);
+  const [isApplying, setIsApplying] = useState(false);
+  const [applyFailure, setApplyFailure] = useState<CullingPersistenceSummary | null>(null);
+  const plan = useMemo(() => planCullingApplication(suggestions, imageList), [suggestions, imageList]);
+  const protectedPaths = useMemo(() => new Set(plan.protectedPaths), [plan.protectedPaths]);
+  const hasProposals =
+    Object.keys(suggestions.starAssignments).length > 0 || Object.keys(suggestions.colorAssignments).length > 0;
+  const showApplyBar = hasProposals && !persistence;
+  const shownPersistence = persistence || applyFailure;
   const selectedResult = useMemo(
     () => suggestions.results.find((result) => result.path === selectedPath) || null,
     [selectedPath, suggestions.results],
   );
   const activeResults = categoryResults(suggestions, activeCategory);
-  const failedCount = (persistence?.failedRatings.length || 0) + (persistence?.failedColors.length || 0);
+  const failedCount = new Set(
+    [...(shownPersistence?.failedRatings || []), ...(shownPersistence?.failedColors || [])].flatMap(
+      (failure) => failure.paths,
+    ),
+  ).size;
+
+  const handleApply = useCallback(async () => {
+    setIsApplying(true);
+    try {
+      const summary = await applyCullingSuggestions(suggestions);
+      const written = new Set([...Object.keys(summary.succeededRatings), ...Object.keys(summary.succeededColors)]).size;
+      if (summary.failedRatings.length > 0 || summary.failedColors.length > 0) {
+        // Partial failure: stay open so the remaining photos can be retried.
+        setApplyFailure(summary);
+      } else {
+        onClose();
+      }
+      if (written > 0) {
+        toast.success(<AppliedToast count={written} persistence={summary} />, {
+          autoClose: 8000,
+          pauseOnHover: true,
+          closeOnClick: false,
+        });
+      }
+    } catch (applyError) {
+      toast.error(String(applyError));
+    } finally {
+      setIsApplying(false);
+    }
+  }, [suggestions, onClose]);
+
+  const requestClose = useCallback(() => {
+    if (!showApplyBar || plan.photoCount === 0) {
+      onClose();
+      return;
+    }
+    setUI({
+      confirmModalState: {
+        isOpen: true,
+        title: t('modals.culling.discardConfirmTitle'),
+        message: t('modals.culling.discardConfirmBody'),
+        confirmText: t('modals.culling.discardConfirmAction'),
+        onConfirm: onClose,
+      },
+    });
+  }, [showApplyBar, plan.photoCount, onClose, setUI, t]);
 
   useEffect(() => {
     if (initialSelectedPath) {
@@ -82,7 +169,7 @@ export default function CullingResultsPanel({
             })}
           </Text>
         </div>
-        <Button variant="ghost" onClick={onClose} aria-label={t('modals.culling.close')}>
+        <Button variant="ghost" onClick={requestClose} aria-label={t('modals.culling.close')}>
           <X size={18} />
         </Button>
       </div>
@@ -135,8 +222,13 @@ export default function CullingResultsPanel({
                   onClick={() => handleResultClick(result)}
                   title={result.path}
                 >
-                  <div className="flex aspect-square items-center justify-center rounded bg-bg-primary text-xs text-text-secondary">
+                  <div className="relative flex aspect-square items-center justify-center rounded bg-bg-primary text-xs text-text-secondary">
                     {result.faceCount > 0 ? `${result.faceCount} face${result.faceCount === 1 ? '' : 's'}` : 'Photo'}
+                    {protectedPaths.has(result.path) && (
+                      <span className="absolute right-1 top-1" title={t('modals.culling.manualBadgeHint')}>
+                        <Lock size={14} aria-label={t('modals.culling.manualBadge')} />
+                      </span>
+                    )}
                   </div>
                   <Text variant={TextVariants.small} className="mt-2 truncate">
                     {result.path.split(/[\\/]/).pop()}
@@ -156,6 +248,12 @@ export default function CullingResultsPanel({
               <Text variant={TextVariants.heading} className="break-all">
                 {selectedResult.path.split(/[\\/]/).pop()}
               </Text>
+              {protectedPaths.has(selectedResult.path) && (
+                <div className="mt-2 flex items-center gap-2 rounded bg-bg-primary p-2 text-sm text-text-secondary">
+                  <Lock size={14} className="shrink-0" />
+                  {t('modals.culling.manualBadge')}
+                </div>
+              )}
               <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
                 <div className="rounded bg-bg-primary p-2">
                   <Text color={TextColors.secondary} variant={TextVariants.small}>
@@ -190,7 +288,9 @@ export default function CullingResultsPanel({
                   <Text color={TextColors.secondary} variant={TextVariants.small}>
                     {t('modals.culling.detailEyes', { defaultValue: 'Eyes' })}
                   </Text>
-                  <div>{selectedResult.eyeState}</div>
+                  <div>
+                    {t(`modals.culling.eyes.${selectedResult.eyeState}`, { defaultValue: selectedResult.eyeState })}
+                  </div>
                 </div>
                 <div className="rounded bg-bg-primary p-2">
                   <Text color={TextColors.secondary} variant={TextVariants.small}>
@@ -282,7 +382,7 @@ export default function CullingResultsPanel({
         </div>
       </div>
 
-      {(failedCount > 0 || (persistence?.skippedPaths.length || 0) > 0 || suggestions.failedPaths.length > 0) && (
+      {(failedCount > 0 || (shownPersistence?.skippedPaths.length || 0) > 0 || suggestions.failedPaths.length > 0) && (
         <div className="mt-3 rounded-lg border border-yellow-500/40 bg-yellow-500/10 p-3 text-sm text-text-secondary">
           {failedCount > 0 && (
             <div>
@@ -292,10 +392,10 @@ export default function CullingResultsPanel({
               })}
             </div>
           )}
-          {(persistence?.skippedPaths.length || 0) > 0 && (
+          {(shownPersistence?.skippedPaths.length || 0) > 0 && (
             <div>
               {t('modals.culling.preservedCount', {
-                count: persistence?.skippedPaths.length,
+                count: shownPersistence?.skippedPaths.length,
                 defaultValue: '{{count}} existing decisions were preserved.',
               })}
             </div>
@@ -308,6 +408,30 @@ export default function CullingResultsPanel({
               })}
             </div>
           )}
+        </div>
+      )}
+
+      {showApplyBar && (
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-border-color/40 pt-3">
+          <Text color={TextColors.secondary}>
+            {t('modals.culling.applySummary', {
+              ratings: Object.keys(plan.ratings).length,
+              labels: Object.keys(plan.colors).length,
+              preserved: plan.protectedPaths.length,
+            })}
+          </Text>
+          <div className="flex gap-3">
+            <button
+              type="button"
+              className="rounded-md px-4 py-2 text-text-secondary hover:bg-bg-primary"
+              onClick={requestClose}
+            >
+              {t('modals.culling.close')}
+            </button>
+            <Button disabled={isApplying || plan.photoCount === 0} onClick={handleApply}>
+              {isApplying ? t('modals.culling.applying') : t('modals.culling.applyButton', { count: plan.photoCount })}
+            </Button>
+          </div>
         </div>
       )}
     </div>

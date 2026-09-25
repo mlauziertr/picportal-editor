@@ -5,6 +5,7 @@ import {
   UiVisibility,
   CullingSuggestions,
   CullingPersistenceSummary,
+  CullingStageCode,
   PanelRegion,
   WorkspaceState,
 } from '../components/ui/AppProperties';
@@ -86,10 +87,11 @@ interface NegativeConversionModalState {
 interface CullingModalState {
   isOpen: boolean;
   suggestions: CullingSuggestions | null;
-  progress: { current: number; total: number; stage: string } | null;
+  progress: { current: number; total: number; stage: string; stageCode?: CullingStageCode } | null;
   error: string | null;
   pathsToCull: Array<string>;
   folderPath: string | null;
+  isCancelling?: boolean;
 }
 
 export interface CullingResultsState {

@@ -1,7 +1,10 @@
 import { useEffect, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
+import i18n from 'i18next';
+import { toast } from 'react-toastify';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { Status } from '../components/ui/ExportImportProperties';
+import type { CullingSuggestions } from '../components/ui/AppProperties';
 import { useProcessStore } from '../store/useProcessStore';
 import { useEditorStore } from '../store/useEditorStore';
 import { useUIStore } from '../store/useUIStore';
@@ -401,24 +404,59 @@ export function useTauriListeners({
             cullingModalState: {
               ...state.cullingModalState,
               isOpen: true,
-              progress: { current: 0, total: event.payload, stage: 'Initializing...' },
+              progress: { current: 0, total: event.payload, stage: '', stageCode: 'preparing' },
               suggestions: null,
               error: null,
+              isCancelling: false,
             },
           }));
         }
       }),
       listen('culling-progress', (event: any) => {
         if (isEffectActive) {
-          useUIStore
-            .getState()
-            .setUI((state) => ({ cullingModalState: { ...state.cullingModalState, progress: event.payload } }));
+          // Also reopens the progress view when the analysis outlived a webview reload.
+          useUIStore.getState().setUI((state) => ({
+            cullingModalState: { ...state.cullingModalState, isOpen: true, progress: event.payload },
+          }));
+        }
+      }),
+      listen('culling-cancelled', () => {
+        if (isEffectActive) {
+          useUIStore.getState().setUI((state) => ({
+            cullingModalState: {
+              ...state.cullingModalState,
+              isOpen: false,
+              progress: null,
+              suggestions: null,
+              error: null,
+              pathsToCull: [],
+              isCancelling: false,
+            },
+          }));
+          toast.info(i18n.t('modals.culling.cancelled'));
         }
       }),
       listen('culling-complete', (event: any) => {
         if (isEffectActive) {
+          // Propose, then apply: results open for review, nothing is written here.
+          const suggestions = event.payload as CullingSuggestions;
           useUIStore.getState().setUI((state) => ({
-            cullingModalState: { ...state.cullingModalState, progress: null, suggestions: event.payload },
+            cullingModalState: {
+              isOpen: false,
+              progress: null,
+              suggestions: null,
+              error: null,
+              pathsToCull: [],
+              folderPath: null,
+              isCancelling: false,
+            },
+            cullingResultsState: {
+              isOpen: true,
+              folderPath: state.cullingModalState.folderPath,
+              suggestions,
+              persistence: null,
+              selectedPath: suggestions.results[0]?.path || null,
+            },
           }));
         }
       }),

@@ -4,27 +4,13 @@ import { toast } from 'react-toastify';
 import { useLibraryStore } from '../store/useLibraryStore';
 import { useEditorStore } from '../store/useEditorStore';
 import { useUIStore } from '../store/useUIStore';
-import {
-  Invokes,
-  ImageFile,
-  AlbumItem,
-  Album,
-  AlbumGroup,
-  CullingPersistenceSummary,
-  CullingSuggestions,
-} from '../components/ui/AppProperties';
+import { Invokes, ImageFile, AlbumItem, Album, AlbumGroup } from '../components/ui/AppProperties';
 import { globalImageCache } from '../utils/ImageLRUCache';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { computeSortedLibrary } from './useSortedLibrary';
 import { expandGroupedPaths } from '../utils/imageGrouping';
 import { stripVirtualCopySuffix } from '../utils/virtualCopyPath';
-import {
-  filterCullingAssignmentsForCurrentImages,
-  getCullingProtectedPaths,
-  getNextManualRating,
-  persistColorAssignments,
-  persistRatingAssignments,
-} from '../utils/ratingPersistence';
+import { getNextManualRating } from '../utils/ratingPersistence';
 import type { FolderTree as FolderTreeNode } from '../components/panel/right/FolderTree';
 
 export function useLibraryActions(handleImageSelect?: (path: string, openInEditor?: boolean) => void) {
@@ -62,78 +48,6 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
       },
     );
   }, []);
-
-  const handleApplyCulling = useCallback(
-    async (suggestions: CullingSuggestions): Promise<CullingPersistenceSummary> => {
-      const { imageList, setLibrary } = useLibraryStore.getState();
-      const protectedPaths = getCullingProtectedPaths(imageList);
-      const skippedPaths = suggestions.results
-        .map((result) => result.path)
-        .filter((path) => protectedPaths.allPaths.has(path));
-      const ratings = Object.fromEntries(
-        Object.entries(suggestions.starAssignments).filter(([path]) => !protectedPaths.ratingPaths.has(path)),
-      );
-      const colors = Object.fromEntries(
-        Object.entries(suggestions.colorAssignments).filter(([path]) => !protectedPaths.colorLabelPaths.has(path)),
-      );
-
-      // Ratings and labels share one sidecar file. Keep the two passes ordered so
-      // concurrent read/modify/write calls cannot discard the other decision.
-      const ratingResult = await persistRatingAssignments(ratings, (paths, rating) =>
-        invoke(Invokes.SetRatingForPaths, { paths, rating, ratingIsManual: false }),
-      );
-      const colorResult = await persistColorAssignments(colors, (paths, color) =>
-        invoke(Invokes.SetColorLabelForPaths, { paths, color, colorLabelIsManual: false }),
-      );
-
-      if (Object.keys(ratingResult.succeeded).length > 0 || Object.keys(colorResult.succeeded).length > 0) {
-        setLibrary((state) => {
-          const currentAssignments = filterCullingAssignmentsForCurrentImages(
-            state.imageList,
-            ratingResult.succeeded,
-            colorResult.succeeded,
-          );
-          if (
-            Object.keys(currentAssignments.ratings).length === 0 &&
-            Object.keys(currentAssignments.colors).length === 0
-          ) {
-            return state;
-          }
-
-          return {
-            imageRatings: { ...state.imageRatings, ...currentAssignments.ratings },
-            imageList: state.imageList.map((image) => {
-              const rating = currentAssignments.ratings[image.path];
-              const hasRatingUpdate = rating !== undefined;
-              const hasColorUpdate = currentAssignments.colors[image.path] !== undefined;
-              if (!hasRatingUpdate && !hasColorUpdate) return image;
-              const color = currentAssignments.colors[image.path];
-              const otherTags = (image.tags || []).filter((tag) => !tag.startsWith('color:'));
-              return {
-                ...image,
-                ...(hasRatingUpdate ? { rating, rating_is_manual: false } : {}),
-                ...(hasColorUpdate
-                  ? {
-                      tags: color ? [...otherTags, `color:${color}`] : otherTags.length > 0 ? otherTags : null,
-                      color_label_is_manual: false,
-                    }
-                  : {}),
-              };
-            }),
-          };
-        });
-      }
-
-      return {
-        succeededRatings: ratingResult.succeeded,
-        succeededColors: colorResult.succeeded,
-        failedRatings: ratingResult.failures,
-        failedColors: colorResult.failures,
-        skippedPaths,
-      };
-    },
-    [],
-  );
 
   const handleSetColorLabel = useCallback(async (color: string | null, paths?: string[]) => {
     const { multiSelectedPaths, libraryActivePath, imageList, setLibrary } = useLibraryStore.getState();
@@ -537,7 +451,6 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
 
   return {
     handleRate,
-    handleApplyCulling,
     handleSetColorLabel,
     handleTagsChanged,
     handleUpdateExif,
