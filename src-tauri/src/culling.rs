@@ -32,8 +32,10 @@ impl Default for CullingSettings {
             selection_amount: "standard".to_owned(),
             blur_severity: "moderate".to_owned(),
             detect_duplicates: true,
-            detect_blurry: true,
-            detect_closed_eyes: true,
+            // Off by default for v1: both detectors were measured unreliable on
+            // real photos (MAX-21); they stay available as opt-in experiments.
+            detect_blurry: false,
+            detect_closed_eyes: false,
             detect_highlights: true,
             detect_subject: true,
             subject_profile: "general".to_owned(),
@@ -1363,7 +1365,10 @@ mod tests {
         let app_settings = crate::app_settings::AppSettings::default();
         let settings = CullingSettings {
             detect_subject: false,
+            // The harness measures the opt-in detectors, so both stay on unless disabled.
             detect_closed_eyes: std::env::var("PICPORTAL_CULLING_EYES")
+                .map_or(true, |value| value != "0"),
+            detect_blurry: std::env::var("PICPORTAL_CULLING_BLUR")
                 .map_or(true, |value| value != "0"),
             ..Default::default()
         };
@@ -1763,7 +1768,12 @@ mod tests {
 
     #[test]
     fn overlap_priority_is_deterministic_and_reasons_are_retained() {
-        let settings = CullingSettings::default();
+        // Opt-in detectors: this checks their priority when the user enables them.
+        let settings = CullingSettings {
+            detect_blurry: true,
+            detect_closed_eyes: true,
+            ..Default::default()
+        };
         let mut result = analysis_result("overlap.jpg", 0.9);
         result.sharpness_metric = 0.0;
         result.eye_state = "closed".to_owned();
@@ -1785,6 +1795,16 @@ mod tests {
         assert_eq!(selected_limit(20, "few"), 2);
         assert_eq!(selected_limit(20, "standard"), 4);
         assert_eq!(selected_limit(20, "more"), 7);
+    }
+
+    #[test]
+    fn detectors_measured_unreliable_are_off_by_default() {
+        // MAX-21 corpus: 88/120 "closed eyes" and 59/120 "blurry" on sharp, open-eyed photos.
+        let settings = CullingSettings::default();
+        assert!(!settings.detect_blurry);
+        assert!(!settings.detect_closed_eyes);
+        let from_partial: CullingSettings = serde_json::from_str("{}").unwrap();
+        assert!(!from_partial.detect_blurry && !from_partial.detect_closed_eyes);
     }
 
     #[test]

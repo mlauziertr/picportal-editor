@@ -30,8 +30,9 @@ const DEFAULT_SETTINGS: CullingSettings = {
   selectionAmount: 'standard',
   blurSeverity: 'moderate',
   detectDuplicates: true,
-  detectBlurry: true,
-  detectClosedEyes: true,
+  // Off by default for v1: measured unreliable on real photos (MAX-21), kept as opt-in experiments.
+  detectBlurry: false,
+  detectClosedEyes: false,
   detectHighlights: true,
   detectSubject: true,
   subjectProfile: 'general',
@@ -397,7 +398,8 @@ export default function CullingModal({
                     <button
                       key={option.value}
                       type="button"
-                      className={`rounded-md px-2 py-2 text-sm transition-colors ${
+                      disabled={!settings.detectBlurry}
+                      className={`rounded-md px-2 py-2 text-sm transition-colors disabled:opacity-50 ${
                         settings.blurSeverity === option.value
                           ? 'bg-card-active text-text-primary shadow-sm'
                           : 'text-text-secondary hover:text-text-primary'
@@ -483,14 +485,16 @@ export default function CullingModal({
                     />
                     <Switch
                       checked={settings.detectBlurry}
-                      label={t('modals.culling.detectBlurry', { defaultValue: 'Blurry photos' })}
+                      label={t('modals.culling.detectBlurry', { defaultValue: 'Blurry photos (experimental)' })}
                       onChange={(detectBlurry) => setSettings((current) => ({ ...current, detectBlurry }))}
+                      tooltip={t('modals.culling.detectBlurryHint')}
                     />
                     <Switch
                       checked={settings.detectClosedEyes}
                       disabled={capabilities?.faces === 'unavailable'}
-                      label={t('modals.culling.detectClosedEyes', { defaultValue: 'Closed eyes (local heuristic)' })}
+                      label={t('modals.culling.detectClosedEyes', { defaultValue: 'Closed eyes (experimental)' })}
                       onChange={(detectClosedEyes) => setSettings((current) => ({ ...current, detectClosedEyes }))}
+                      tooltip={t('modals.culling.detectClosedEyesHint')}
                     />
                     <Switch
                       checked={settings.autoAssignStars}
