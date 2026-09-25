@@ -1,0 +1,6 @@
+# Style model v1 training dependencies (CPU only, no model weights downloaded).
+numpy>=2.0
+pillow>=11.0
+onnx>=1.17
+# Optional: only used by the tests to cross-check the exported graph.
+onnxruntime>=1.20

@@ -36,10 +36,11 @@ use crate::lut_processing::{
 };
 use crate::mask_generation::{MaskDefinition, generate_mask_bitmap};
 
-use crate::cache_utils::{calculate_full_job_hash, calculate_transform_hash};
+use crate::cache_utils::{
+    calculate_full_job_hash, calculate_image_cache_hash, calculate_transform_hash,
+};
 use crate::{
-    apply_all_transformations, generate_transformed_preview, get_cached_or_generate_mask,
-    hydrate_adjustments, load_settings, resolve_warped_image_for_masks,
+    apply_all_transformations, generate_transformed_preview, hydrate_adjustments, load_settings,
 };
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -118,6 +119,28 @@ pub(crate) enum ExportAdjustmentsMode {
         active_adjustments: Option<Value>,
     },
     GlobalOverride(Value),
+}
+
+fn is_active_export_path(image_path: &str, active_path: Option<&str>) -> bool {
+    active_path == Some(image_path)
+}
+
+fn matching_loaded_image(
+    loaded_image: Option<crate::app_state::LoadedImage>,
+    requested_path: &str,
+) -> Option<crate::app_state::LoadedImage> {
+    loaded_image.filter(|image| image.path == requested_path)
+}
+
+fn estimate_preview_cache_matches(
+    cached: &crate::app_state::CachedPreview,
+    image_path: &str,
+    adjustments: &Value,
+    preview_dim: u32,
+) -> bool {
+    cached.transform_hash
+        == calculate_image_cache_hash(image_path, calculate_transform_hash(adjustments))
+        && cached.preview_dim == preview_dim
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -303,7 +326,7 @@ fn strip_prefix_preserving_source_case(source_path: &Path, base_path: &Path) -> 
     Some(source_components[base_components.len()..].iter().collect())
 }
 
-fn relative_export_dir_for_preserved_folders(
+pub(crate) fn relative_export_dir_for_preserved_folders(
     source_path: &Path,
     base_origin_folders: &[String],
 ) -> Option<PathBuf> {
@@ -484,7 +507,8 @@ fn process_image_for_export_pipeline(
         .and_then(|m| serde_json::from_value(m.clone()).ok())
         .unwrap_or_default();
 
-    let warped_image = resolve_warped_image_for_masks(state, js_adjustments, &mask_definitions);
+    let warped_mask_source =
+        export_mask_source(base_image, js_adjustments, is_raw, &mask_definitions);
     let mask_bitmaps: Vec<ImageBuffer<Luma<u8>, Vec<u8>>> = mask_definitions
         .iter()
         .filter_map(|def| {
@@ -494,7 +518,7 @@ fn process_image_for_export_pipeline(
                 img_h,
                 1.0,
                 unscaled_crop_offset,
-                warped_image.as_deref(),
+                warped_mask_source.as_ref(),
             )
         })
         .collect();
@@ -522,6 +546,26 @@ fn process_image_for_export_pipeline(
         debug_tag,
         output_precision,
     )
+}
+
+fn export_mask_source(
+    base_image: &DynamicImage,
+    js_adjustments: &Value,
+    is_raw: bool,
+    mask_definitions: &[MaskDefinition],
+) -> Option<DynamicImage> {
+    if !mask_definitions
+        .iter()
+        .any(MaskDefinition::requires_warped_image)
+    {
+        return None;
+    }
+
+    let mut source_image = Cow::Borrowed(base_image);
+    if is_raw {
+        crate::apply_cpu_default_raw_processing(source_image.to_mut());
+    }
+    Some(crate::apply_geometry_warp(source_image, js_adjustments).into_owned())
 }
 
 fn render_output_precision(
@@ -765,6 +809,7 @@ fn export_masks_for_image(
     export_settings: &ExportSettings,
     output_path_obj: &std::path::Path,
     source_path_str: &str,
+    image_identity_path: &str,
     context: &Arc<GpuContext>,
     state: &tauri::State<AppState>,
     is_raw: bool,
@@ -781,7 +826,8 @@ fn export_masks_for_image(
         .and_then(|m| serde_json::from_value(m.clone()).ok())
         .unwrap_or_default();
 
-    let warped_image = resolve_warped_image_for_masks(state, js_adjustments, &mask_definitions);
+    let warped_mask_source =
+        export_mask_source(base_image, js_adjustments, is_raw, &mask_definitions);
     let mut mask_bitmaps = Vec::with_capacity(mask_definitions.len());
     for definition in &mask_definitions {
         ensure_export_not_cancelled(cancellation_token)?;
@@ -791,7 +837,7 @@ fn export_masks_for_image(
             img_h,
             1.0,
             unscaled_crop_offset,
-            warped_image.as_deref(),
+            warped_mask_source.as_ref(),
         ) {
             mask_bitmaps.push(bitmap);
         }
@@ -803,7 +849,7 @@ fn export_masks_for_image(
         let all_adjustments = get_all_adjustments_from_json(js_adjustments, is_raw, tm_override);
         let lut_path = js_adjustments["lutPath"].as_str();
         let lut = lut_path.and_then(|p| get_or_load_lut(state, p).ok());
-        let unique_hash = calculate_full_job_hash(source_path_str, js_adjustments);
+        let unique_hash = calculate_full_job_hash(image_identity_path, js_adjustments);
         let output_dir = output_path_obj.parent().unwrap_or(output_path_obj);
         let stem = output_path_obj
             .file_stem()
@@ -953,13 +999,21 @@ pub(crate) async fn export_images_impl(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
     completion_tx: Option<tokio::sync::oneshot::Sender<Result<(), usize>>>,
+    emit_events: bool,
 ) -> Result<(), String> {
     let cancellation_token = register_export_task(&state.export_task_token)?;
-    let task_guard = ExportTaskGuard::with_app_handle(
-        Arc::clone(&state.export_task_token),
-        Arc::clone(&cancellation_token),
-        app_handle.clone(),
-    );
+    let task_guard = if emit_events {
+        ExportTaskGuard::with_app_handle(
+            Arc::clone(&state.export_task_token),
+            Arc::clone(&cancellation_token),
+            app_handle.clone(),
+        )
+    } else {
+        ExportTaskGuard::new(
+            Arc::clone(&state.export_task_token),
+            Arc::clone(&cancellation_token),
+        )
+    };
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
     if cancellation_token.load(Ordering::SeqCst) {
@@ -1074,7 +1128,7 @@ pub(crate) async fn export_images_impl(
 
                 let is_current_edit = match &adjustments_mode {
                     ExportAdjustmentsMode::UseSidecars { active_path, .. } => {
-                        Some(&source_path_str) == active_path.as_ref()
+                        is_active_export_path(&image_path_str, active_path.as_deref())
                     }
                     ExportAdjustmentsMode::GlobalOverride(_) => false,
                 };
@@ -1221,24 +1275,24 @@ pub(crate) async fn export_images_impl(
                     }
 
                     let base_image = if is_current_edit {
-                        match crate::get_original_image(&state) {
-                            Ok((orig_data_arc, _)) => {
-                                composite_patches_on_image(&orig_data_arc, &js_adjustments)
-                                    .map_err(|e| format!("Failed to composite AI patches: {}", e))?
-                            }
-                            Err(_) => {
-                                let bytes =
-                                    fs::read(&source_path_str).map_err(|e| e.to_string())?;
-                                load_and_composite(
-                                    &bytes,
-                                    &source_path_str,
-                                    &js_adjustments,
-                                    false,
-                                    &settings,
-                                    None,
-                                )
-                                .map_err(|e| format!("Failed to load fallback image: {}", e))?
-                            }
+                        let cached_original = matching_loaded_image(
+                            state.original_image.lock().unwrap().clone(),
+                            &image_path_str,
+                        );
+                        if let Some(original) = cached_original {
+                            composite_patches_on_image(&original.image, &js_adjustments)
+                                .map_err(|e| format!("Failed to composite AI patches: {}", e))?
+                        } else {
+                            let bytes = fs::read(&source_path_str).map_err(|e| e.to_string())?;
+                            load_and_composite(
+                                &bytes,
+                                &source_path_str,
+                                &js_adjustments,
+                                false,
+                                &settings,
+                                None,
+                            )
+                            .map_err(|e| format!("Failed to load fallback image: {}", e))?
                         }
                     } else {
                         match read_file_mapped(Path::new(&source_path_str)) {
@@ -1281,7 +1335,7 @@ pub(crate) async fn export_images_impl(
                         .unwrap_or(output_format.as_str());
 
                     let final_image = process_image_for_export(
-                        &source_path_str,
+                        &image_path_str,
                         &base_image,
                         &main_export_adjustments,
                         &export_settings,
@@ -1312,6 +1366,7 @@ pub(crate) async fn export_images_impl(
                             &export_settings,
                             &output_path,
                             &source_path_str,
+                            &image_path_str,
                             &context_clone,
                             &state,
                             is_raw,
@@ -1364,23 +1419,25 @@ pub(crate) async fn export_images_impl(
             |cancelled| {
                 if cancelled {
                     log::info!("Batch export cancelled and worker cleanup completed");
-                    let _ = app_handle.emit("export-cancelled", ());
+                    if emit_events {
+                        let _ = app_handle.emit("export-cancelled", ());
+                    }
                     return;
                 }
 
                 for error in &errors {
                     log::error!("Export error: {}", error);
-                    if total_paths == 1 {
+                    if emit_events && total_paths == 1 {
                         let _ = app_handle.emit("export-error", error.clone());
                     }
                 }
 
-                if error_count > 0 && total_paths > 1 {
+                if emit_events && error_count > 0 && total_paths > 1 {
                     let _ = app_handle.emit(
                         "export-error",
                         format!("{error_count} of {total_paths} exports failed"),
                     );
-                } else if error_count == 0 {
+                } else if emit_events && error_count == 0 {
                     let _ = app_handle.emit(
                         "batch-export-progress",
                         serde_json::json!({ "current": total_paths, "total": total_paths, "path": "" }),
@@ -1434,6 +1491,7 @@ pub async fn export_images(
         state,
         app_handle,
         None,
+        true,
     )
     .await
 }
@@ -1531,6 +1589,7 @@ pub async fn run_headless_export(
         state.clone(),
         app_handle.clone(),
         Some(tx),
+        true,
     )
     .await?;
 
@@ -1546,6 +1605,7 @@ pub fn cancel_export(
     state: tauri::State<AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
+    let picportal_requested = crate::picportal::request_picportal_cancellation(&app_handle);
     match request_export_cancellation(&state.export_task_token, || {
         let _ = app_handle.emit("export-cancelling", ());
     }) {
@@ -1556,7 +1616,10 @@ pub fn cancel_export(
             log::info!("Export cancellation was already requested");
         }
         ExportCancellationRequest::NoActiveTask => {
-            return Err("No export task is currently running.".to_string());
+            if !picportal_requested {
+                return Err("No export task is currently running.".to_string());
+            }
+            let _ = app_handle.emit("export-cancelling", ());
         }
     }
     Ok(())
@@ -1585,30 +1648,61 @@ pub async fn estimate_export_sizes(
     let source_path_str = source_path.to_string_lossy().to_string();
 
     let context = get_or_init_gpu_context(&state, &app_handle)?;
-    let is_current_edit = Some(&source_path_str) == current_edit_path.as_ref();
+    let is_current_edit = is_active_export_path(first_path, current_edit_path.as_deref());
     let is_raw = is_raw_file(&source_path_str);
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
 
     let single_image_extrapolated_size: usize = if is_current_edit
         && current_edit_adjustments.is_some()
     {
-        let loaded_image = state
-            .original_image
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or("No original image loaded")?;
+        let loaded_image = match matching_loaded_image(
+            state.original_image.lock().unwrap().clone(),
+            first_path,
+        ) {
+            Some(image) => image,
+            None => {
+                let file_slice: Vec<u8>;
+                let mmap_guard;
+                let file_data: &[u8] = match read_file_mapped(Path::new(&source_path_str)) {
+                    Ok(mmap) => {
+                        mmap_guard = Some(mmap);
+                        mmap_guard.as_ref().unwrap()
+                    }
+                    Err(_) => {
+                        file_slice = fs::read(&source_path_str).map_err(|error| error.to_string())?;
+                        &file_slice
+                    }
+                };
+                let image = load_base_image_from_bytes(
+                    file_data,
+                    &source_path_str,
+                    false,
+                    &settings,
+                    None,
+                )
+                .map_err(|error| error.to_string())?;
+                crate::app_state::LoadedImage {
+                    path: first_path.to_string(),
+                    image: Arc::new(image),
+                    is_raw,
+                }
+            }
+        };
         let mut adjustments_clone = current_edit_adjustments.clone().unwrap();
         hydrate_adjustments(&state, &mut adjustments_clone);
 
-        let new_transform_hash = calculate_transform_hash(&adjustments_clone);
         let cached_preview_lock = state.cached_preview.lock().unwrap();
         let preview_dim = settings.editor_preview_resolution.unwrap_or(1920);
 
         let (preview_image, scale, unscaled_crop_offset) = if let Some(cached) =
             &*cached_preview_lock
         {
-            if cached.transform_hash == new_transform_hash && cached.preview_dim == preview_dim {
+            if estimate_preview_cache_matches(
+                cached,
+                &loaded_image.path,
+                &adjustments_clone,
+                preview_dim,
+            ) {
                 let img = Arc::clone(&cached.image);
                 let s = cached.scale;
                 let offset = cached.unscaled_crop_offset;
@@ -1640,17 +1734,32 @@ pub async fn estimate_export_sizes(
             unscaled_crop_offset.1 * scale,
         );
 
+        let warped_mask_source = if mask_definitions
+            .iter()
+            .any(MaskDefinition::requires_warped_image)
+        {
+            let mask_source_image =
+                composite_patches_on_image(&loaded_image.image, &adjustments_clone)
+                    .map_err(|error| format!("Failed to composite estimate mask patches: {error}"))?;
+            export_mask_source(
+                &mask_source_image,
+                &adjustments_clone,
+                loaded_image.is_raw,
+                &mask_definitions,
+            )
+        } else {
+            None
+        };
         let mask_bitmaps: Vec<ImageBuffer<Luma<u8>, Vec<u8>>> = mask_definitions
             .iter()
             .filter_map(|def| {
-                get_cached_or_generate_mask(
-                    &state,
+                generate_mask_bitmap(
                     def,
                     img_w,
                     img_h,
                     scale,
                     scaled_crop_offset,
-                    &adjustments_clone,
+                    warped_mask_source.as_ref(),
                 )
             })
             .collect();
@@ -1780,17 +1889,26 @@ pub async fn estimate_export_sizes(
             unscaled_crop_offset.1 * gpu_scale,
         );
 
+        let warped_mask_source = if mask_definitions
+            .iter()
+            .any(MaskDefinition::requires_warped_image)
+        {
+            let mask_source_image = composite_patches_on_image(&original_image, &js_adjustments)
+                .map_err(|error| format!("Failed to composite estimate mask patches: {error}"))?;
+            export_mask_source(&mask_source_image, &js_adjustments, is_raw, &mask_definitions)
+        } else {
+            None
+        };
         let mask_bitmaps: Vec<ImageBuffer<Luma<u8>, Vec<u8>>> = mask_definitions
             .iter()
             .filter_map(|def| {
-                get_cached_or_generate_mask(
-                    &state,
+                generate_mask_bitmap(
                     def,
                     preview_w,
                     preview_h,
                     total_scale,
                     scaled_crop_offset,
-                    &js_adjustments,
+                    warped_mask_source.as_ref(),
                 )
             })
             .collect();
@@ -1803,8 +1921,7 @@ pub async fn estimate_export_sizes(
         let lut = js_adjustments["lutPath"]
             .as_str()
             .and_then(|p| get_or_load_lut(&state, p).ok());
-        let unique_hash =
-            calculate_full_job_hash(&source_path_str, &js_adjustments).wrapping_add(1);
+        let unique_hash = calculate_full_job_hash(first_path, &js_adjustments).wrapping_add(1);
 
         let processed_preview = process_and_get_dynamic_image_with_precision(
             &context,
@@ -1850,4 +1967,168 @@ pub async fn estimate_export_sizes(
     };
 
     Ok(single_image_extrapolated_size * paths.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_export_adjustments_match_the_full_virtual_copy_identity() {
+        let first_copy = "/synthetic/image.jpg?vc=abcdef";
+
+        assert!(is_active_export_path(first_copy, Some(first_copy)));
+        assert!(!is_active_export_path(
+            first_copy,
+            Some("/synthetic/image.jpg")
+        ));
+        assert!(!is_active_export_path(
+            first_copy,
+            Some("/synthetic/image.jpg?vc=123abc")
+        ));
+    }
+
+    #[test]
+    fn cached_source_image_must_match_the_selected_virtual_copy() {
+        let first_copy = "/synthetic/image.jpg?vc=123abc";
+        let second_copy = "/synthetic/image.jpg?vc=abcdef";
+        let cached_first = crate::app_state::LoadedImage {
+            path: first_copy.to_owned(),
+            image: Arc::new(DynamicImage::new_rgb8(1, 1)),
+            is_raw: false,
+        };
+
+        assert!(matching_loaded_image(Some(cached_first.clone()), second_copy).is_none());
+        assert_eq!(
+            matching_loaded_image(Some(cached_first), first_copy)
+                .expect("matching image")
+                .path,
+            first_copy
+        );
+    }
+
+    #[test]
+    fn estimate_preview_cache_uses_renderer_path_bound_hashes() {
+        let image_path = "/synthetic/image.jpg?vc=123abc";
+        let adjustments = serde_json::json!({ "orientationSteps": 0, "rotation": 0.0 });
+        let transform_hash = calculate_transform_hash(&adjustments);
+        let cached = crate::app_state::CachedPreview {
+            image: Arc::new(DynamicImage::new_rgb8(1, 1)),
+            small_image: Arc::new(DynamicImage::new_rgb8(1, 1)),
+            transform_hash: calculate_image_cache_hash(image_path, transform_hash),
+            scale: 1.0,
+            unscaled_crop_offset: (0.0, 0.0),
+            preview_dim: 1920,
+            interactive_divisor: 1.0,
+        };
+
+        assert!(estimate_preview_cache_matches(
+            &cached,
+            image_path,
+            &adjustments,
+            1920
+        ));
+        assert!(!estimate_preview_cache_matches(
+            &cached,
+            "/synthetic/image.jpg?vc=abcdef",
+            &adjustments,
+            1920
+        ));
+        assert!(!estimate_preview_cache_matches(
+            &cached,
+            image_path,
+            &adjustments,
+            1280
+        ));
+    }
+
+    #[test]
+    fn exported_masks_use_effective_pixels_after_ai_patches() {
+        let image_path = "/synthetic/image.jpg";
+        let pristine = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            2,
+            1,
+            image::Rgb([0, 0, 255]),
+        ));
+        let patched_once = DynamicImage::ImageRgb8(image::RgbImage::from_fn(2, 1, |x, _| {
+            if x == 0 {
+                image::Rgb([255, 0, 0])
+            } else {
+                image::Rgb([0, 0, 255])
+            }
+        }));
+        let patched_again = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            2,
+            1,
+            image::Rgb([255, 0, 0]),
+        ));
+        let definition = MaskDefinition {
+            id: "color-mask".to_owned(),
+            name: "Color mask".to_owned(),
+            visible: true,
+            invert: false,
+            opacity: 100.0,
+            adjustments: Value::Null,
+            sub_masks: vec![crate::mask_generation::SubMask {
+                id: "color-sub-mask".to_owned(),
+                mask_type: "color".to_owned(),
+                visible: true,
+                invert: false,
+                opacity: 100.0,
+                mode: crate::mask_generation::SubMaskMode::Additive,
+                parameters: serde_json::json!({
+                    "targetX": 0.0,
+                    "targetY": 0.0,
+                    "tolerance": 0.0
+                }),
+            }],
+        };
+        let adjustments = serde_json::json!({ "aiPatches": [{ "id": "patch" }] });
+        let mask_cache = Mutex::new(HashMap::new());
+        let warped_cache = Mutex::new(None);
+        let pristine_mask = crate::get_cached_or_generate_mask_for_image(
+            &mask_cache,
+            &warped_cache,
+            Some(image_path),
+            Some(&pristine),
+            false,
+            &definition,
+            2,
+            1,
+            1.0,
+            (0.0, 0.0),
+            &adjustments,
+        )
+        .expect("generate pristine source mask");
+        assert_eq!(pristine_mask.get_pixel(1, 0)[0], 255);
+
+        let masks = [definition];
+        let first_warped = export_mask_source(&patched_once, &adjustments, false, &masks)
+            .expect("warp first patched source");
+        let first_export_mask = generate_mask_bitmap(
+            &masks[0],
+            2,
+            1,
+            1.0,
+            (0.0, 0.0),
+            Some(&first_warped),
+        )
+        .expect("generate first export mask");
+        let second_warped = export_mask_source(&patched_again, &adjustments, false, &masks)
+            .expect("warp changed patched source");
+        let second_export_mask = generate_mask_bitmap(
+            &masks[0],
+            2,
+            1,
+            1.0,
+            (0.0, 0.0),
+            Some(&second_warped),
+        )
+        .expect("generate changed export mask");
+
+        assert_eq!(first_export_mask.get_pixel(0, 0)[0], 255);
+        assert_eq!(first_export_mask.get_pixel(1, 0)[0], 0);
+        assert_eq!(second_export_mask.get_pixel(0, 0)[0], 255);
+        assert_eq!(second_export_mask.get_pixel(1, 0)[0], 255);
+    }
 }

@@ -1,0 +1,243 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import {
+  filterCullingAssignmentsForCurrentImages,
+  getCullingProtectedPaths,
+  getNextManualRating,
+  isRatingProtectedFromCulling,
+  mergeLoadedColorLabel,
+  mergeLoadedRating,
+  mergeThumbnailRatings,
+  persistBatchWithReconciliation,
+  persistColorAssignments,
+  persistRatingAssignments,
+} from '../src/utils/ratingPersistence.ts';
+
+test('culling preserves manual, unknown, and explicit zero provenance', () => {
+  assert.equal(isRatingProtectedFromCulling(true), true);
+  assert.equal(isRatingProtectedFromCulling(null), true);
+  assert.equal(isRatingProtectedFromCulling(undefined), true);
+  assert.equal(isRatingProtectedFromCulling(false), false);
+});
+
+test('late culling results preserve current manual rating and color decisions', () => {
+  const updates = filterCullingAssignmentsForCurrentImages(
+    [
+      { path: 'manual-zero.jpg', rating_is_manual: true, color_label_is_manual: false },
+      { path: 'manual-clear.jpg', rating_is_manual: false, color_label_is_manual: true },
+      { path: 'unknown-rating.jpg', rating_is_manual: null, color_label_is_manual: false },
+      { path: 'unknown-color.jpg', rating_is_manual: false, color_label_is_manual: null },
+      { path: 'automatic.jpg', rating_is_manual: false, color_label_is_manual: false },
+    ],
+    { 'manual-zero.jpg': 5, 'unknown-rating.jpg': 3, 'automatic.jpg': 2 },
+    {
+      'manual-clear.jpg': 'green',
+      'unknown-color.jpg': 'red',
+      'automatic.jpg': 'blue',
+    },
+  );
+
+  assert.deepEqual(updates, {
+    ratings: { 'automatic.jpg': 2 },
+    colors: { 'automatic.jpg': 'blue' },
+  });
+});
+
+test('delayed thumbnail ratings retain manual zero for the library and rating toggles', () => {
+  const imageList = [
+    {
+      is_edited: false,
+      modified: 0,
+      path: 'manual-zero.jpg',
+      rating: 0,
+      rating_is_manual: true,
+      tags: null,
+      exif: null,
+      is_virtual_copy: false,
+      is_cloud_placeholder: false,
+      is_raw: false,
+      group_id: null,
+    },
+    {
+      is_edited: false,
+      modified: 0,
+      path: 'automatic.jpg',
+      rating: 2,
+      rating_is_manual: false,
+      tags: null,
+      exif: null,
+      is_virtual_copy: false,
+      is_cloud_placeholder: false,
+      is_raw: false,
+      group_id: null,
+    },
+  ];
+  const imageRatings = mergeThumbnailRatings(
+    { 'manual-zero.jpg': 0, 'automatic.jpg': 2 },
+    { 'manual-zero.jpg': 5, 'automatic.jpg': 1 },
+    imageList,
+  );
+
+  assert.deepEqual(imageRatings, { 'manual-zero.jpg': 0, 'automatic.jpg': 1 });
+  assert.equal(getNextManualRating(imageRatings['manual-zero.jpg'] ?? 0, 5), 5);
+  assert.equal(getNextManualRating(5, 5), 0);
+});
+
+test('automatic color labels do not block automatic rating revisions', () => {
+  const protectedPaths = getCullingProtectedPaths([
+    {
+      path: 'automatic.jpg',
+      rating_is_manual: false,
+      color_label_is_manual: false,
+    },
+  ]);
+
+  assert.equal(protectedPaths.ratingPaths.has('automatic.jpg'), false);
+  assert.equal(protectedPaths.colorLabelPaths.has('automatic.jpg'), false);
+  assert.equal(protectedPaths.allPaths.has('automatic.jpg'), false);
+});
+
+test('manual and ambiguous color decisions stay protected independently of stars', () => {
+  const protectedPaths = getCullingProtectedPaths([
+    { path: 'manual-clear.jpg', rating_is_manual: false, color_label_is_manual: true },
+    { path: 'legacy.jpg', rating_is_manual: false, color_label_is_manual: null },
+    { path: 'manual-rating.jpg', rating_is_manual: true, color_label_is_manual: false },
+  ]);
+
+  assert.deepEqual([...protectedPaths.ratingPaths], ['manual-rating.jpg']);
+  assert.deepEqual([...protectedPaths.colorLabelPaths], ['manual-clear.jpg', 'legacy.jpg']);
+  assert.deepEqual([...protectedPaths.allPaths], ['manual-rating.jpg', 'manual-clear.jpg', 'legacy.jpg']);
+});
+
+test('stale metadata refresh cannot replace a manually cleared rating', () => {
+  assert.deepEqual(mergeLoadedRating(0, true, 4, false), { rating: 0, ratingIsManual: true });
+  assert.deepEqual(mergeLoadedRating(undefined, null, 4, null), { rating: 4, ratingIsManual: null });
+});
+
+test('stale metadata events preserve an explicit manual color clear', () => {
+  assert.deepEqual(
+    mergeLoadedColorLabel(null, true, ['color:green'], false),
+    { tags: null, colorLabelIsManual: true },
+  );
+  assert.deepEqual(
+    mergeLoadedColorLabel(
+      ['color:blue', 'user:current'],
+      true,
+      ['color:green', 'user:loaded'],
+      false,
+    ),
+    { tags: ['user:loaded', 'color:blue'], colorLabelIsManual: true },
+  );
+  assert.deepEqual(mergeLoadedColorLabel(null, null, null, true), {
+    tags: null,
+    colorLabelIsManual: true,
+  });
+});
+
+test('partial rating failures retain only durable successful groups', async () => {
+  const calls: Array<{ paths: string[]; rating: number }> = [];
+  const result = await persistRatingAssignments(
+    { 'retained.jpg': 5, 'review.jpg': 3, 'second-retained.jpg': 5 },
+    async (paths, rating) => {
+      calls.push({ paths, rating });
+      if (rating === 3) throw new Error('write failed');
+    },
+  );
+
+  assert.deepEqual(calls, [
+    { paths: ['retained.jpg', 'second-retained.jpg'], rating: 5 },
+    { paths: ['review.jpg'], rating: 3 },
+  ]);
+  assert.deepEqual(result.succeeded, { 'retained.jpg': 5, 'second-retained.jpg': 5 });
+  assert.equal(result.failures.length, 1);
+  assert.deepEqual(result.failures[0]?.paths, ['review.jpg']);
+  assert.equal(result.failures[0]?.rating, 3);
+});
+
+test('a partial batch write is reconciled with idempotent individual retries', async () => {
+  const calls: string[][] = [];
+  let batchAttempt = true;
+  const result = await persistBatchWithReconciliation(
+    ['first.jpg', 'second.jpg'],
+    async () => {
+      calls.push(['batch']);
+      if (batchAttempt) {
+        batchAttempt = false;
+        throw new Error('partial batch failure');
+      }
+    },
+    async (path) => {
+      calls.push([path]);
+    },
+  );
+
+  assert.deepEqual(calls, [['batch'], ['first.jpg'], ['second.jpg']]);
+  assert.deepEqual(result, { succeeded: ['first.jpg', 'second.jpg'], failures: [] });
+});
+
+test('mixed individual retries keep successful sidecar writes', async () => {
+  const result = await persistBatchWithReconciliation(
+    ['saved.jpg', 'failed.jpg'],
+    async () => {
+      throw new Error('partial batch failure');
+    },
+    async (path) => {
+      if (path === 'failed.jpg') throw new Error('sidecar write failed');
+    },
+  );
+
+  assert.deepEqual(result.succeeded, ['saved.jpg']);
+  assert.equal(result.failures.length, 1);
+  assert.equal(result.failures[0]?.path, 'failed.jpg');
+});
+
+test('mixed rating retries keep successful writes in the same group', async () => {
+  const result = await persistRatingAssignments(
+    { 'saved.jpg': 4, 'failed.jpg': 4, 'other-group.jpg': 2 },
+    async (paths) => {
+      if (paths.length > 1) throw new Error('batch failed');
+      if (paths[0] === 'failed.jpg') throw new Error('sidecar write failed');
+    },
+  );
+
+  assert.deepEqual(result.succeeded, { 'saved.jpg': 4, 'other-group.jpg': 2 });
+  assert.equal(result.failures.length, 1);
+  assert.deepEqual(result.failures[0]?.paths, ['failed.jpg']);
+  assert.equal(result.failures[0]?.rating, 4);
+});
+
+test('color assignments group writes and retain partial failures', async () => {
+  const calls: Array<{ paths: string[]; color: string | null }> = [];
+  const result = await persistColorAssignments(
+    { 'selected.jpg': 'green', 'highlight.jpg': 'blue', 'clear.jpg': null, 'second-selected.jpg': 'green' },
+    async (paths, color) => {
+      calls.push({ paths, color });
+      if (color === 'blue') throw new Error('label write failed');
+    },
+  );
+
+  assert.equal(calls.length, 3);
+  assert.deepEqual(result.succeeded, {
+    'selected.jpg': 'green',
+    'second-selected.jpg': 'green',
+    'clear.jpg': null,
+  });
+  assert.equal(result.failures.length, 1);
+  assert.deepEqual(result.failures[0]?.paths, ['highlight.jpg']);
+  assert.equal(result.failures[0]?.color, 'blue');
+});
+
+test('mixed color retries keep successful writes in the same group', async () => {
+  const result = await persistColorAssignments(
+    { 'saved.jpg': 'green', 'failed.jpg': 'green', 'other.jpg': 'red' },
+    async (paths) => {
+      if (paths.length > 1) throw new Error('batch failed');
+      if (paths[0] === 'failed.jpg') throw new Error('sidecar write failed');
+    },
+  );
+
+  assert.deepEqual(result.succeeded, { 'saved.jpg': 'green', 'other.jpg': 'red' });
+  assert.equal(result.failures.length, 1);
+  assert.deepEqual(result.failures[0]?.paths, ['failed.jpg']);
+  assert.equal(result.failures[0]?.color, 'green');
+});

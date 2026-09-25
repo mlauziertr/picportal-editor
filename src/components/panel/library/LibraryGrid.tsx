@@ -6,12 +6,21 @@ import { useTranslation } from 'react-i18next';
 import { Row } from './LibraryItems';
 import { useShallow } from 'zustand/react/shallow';
 import { useLibraryStore } from '../../../store/useLibraryStore';
-import { LibraryViewMode, SortDirection, LibraryDisplayMode, ThumbnailAspectRatio } from '../../ui/AppProperties';
+import {
+  LibraryViewMode,
+  SortDirection,
+  LibraryDisplayMode,
+  ThumbnailAspectRatio,
+  type ImageFile,
+} from '../../ui/AppProperties';
 import Text from '../../ui/Text';
 import { TextColors, TextVariants, TextWeights, TEXT_COLOR_KEYS } from '../../../types/typography';
 import { useProcessStore } from '../../../store/useProcessStore';
 import { ExifOverlay } from '../../ui/AppProperties';
 import { useSettingsStore } from '../../../store/useSettingsStore';
+import { stripVirtualCopySuffix } from '../../../utils/virtualCopyPath';
+
+const LibraryListRow = (props: React.ComponentProps<typeof Row>): React.ReactElement | null => <Row {...props} />;
 
 function ListHeader({ widths, setWidths, containerRef, sortCriteria, onSortChange }: any) {
   const { t } = useTranslation();
@@ -133,7 +142,7 @@ const groupImagesByFolder = (images: any[], baseFolderPath: string | null) => {
   const groups: Record<string, any[]> = {};
 
   images.forEach((img) => {
-    const physicalPath = img.path.split('?vc=')[0];
+    const physicalPath = stripVirtualCopySuffix(img.path);
     const separator = physicalPath.includes('/') ? '/' : '\\';
     const lastSep = physicalPath.lastIndexOf(separator);
     const dir = lastSep > -1 ? physicalPath.substring(0, lastSep) : physicalPath;
@@ -517,7 +526,7 @@ export default function LibraryGrid(props: any) {
 
         targetTop += headerHeight;
 
-        const imageIndex = group.images.findIndex((img) => img.path === activePath);
+        const imageIndex = group.images.findIndex((img: ImageFile) => img.path === activePath);
         if (imageIndex !== -1) {
           const rowIndex = Math.floor(imageIndex / columnCount);
           targetTop += rowIndex * rowHeight;
@@ -529,7 +538,7 @@ export default function LibraryGrid(props: any) {
         targetTop += rowsInGroup * rowHeight;
       }
     } else {
-      const index = imageList.findIndex((img) => img.path === activePath);
+      const index = imageList.findIndex((img: ImageFile) => img.path === activePath);
       if (index !== -1) {
         const rowIndex = Math.floor(index / columnCount);
         targetTop = rowIndex * rowHeight;
@@ -674,7 +683,7 @@ export default function LibraryGrid(props: any) {
             rowHeight={getItemSize}
             onScroll={(e: React.UIEvent<HTMLElement>) => handleScroll(e.currentTarget.scrollTop)}
             className="custom-scrollbar"
-            rowComponent={Row}
+            rowComponent={LibraryListRow}
             rowProps={memoizedRowProps}
           />
         </div>

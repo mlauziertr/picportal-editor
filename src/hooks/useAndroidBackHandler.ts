@@ -82,8 +82,19 @@ export function useAndroidBackHandler() {
       }
       if (ui.cullingModalState.isOpen) {
         ui.setUI({
-          cullingModalState: { isOpen: false, progress: null, suggestions: null, error: null, pathsToCull: [] },
+          cullingModalState: {
+            isOpen: false,
+            progress: null,
+            suggestions: null,
+            error: null,
+            pathsToCull: [],
+            folderPath: null,
+          },
         });
+        return;
+      }
+      if (ui.cullingResultsState.isOpen) {
+        ui.requestCullingResultsClose();
         return;
       }
       if (ui.collageModalState.isOpen) {
@@ -91,7 +102,9 @@ export function useAndroidBackHandler() {
         return;
       }
 
-      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true }));
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true }),
+      );
     };
 
     return () => {

@@ -12,6 +12,7 @@ import { Invokes, LibraryViewMode, ImageFile } from '../components/ui/AppPropert
 import { INITIAL_ADJUSTMENTS, normalizeLoadedAdjustments } from '../utils/adjustments';
 import { globalImageCache } from '../utils/ImageLRUCache';
 import { debouncedSave, debouncedSetHistory } from './useEditorActions';
+import type { FolderTree as FolderTreeNode } from '../components/panel/right/FolderTree';
 
 export interface AppNavigationProps {
   clearThumbnailQueue: () => void;
@@ -170,7 +171,7 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
       const cachedMedium = useProcessStore.getState().mediumThumbnails[path] || cachedThumb;
 
       const cached = globalImageCache.get(path);
-      const isFrontendCached = Boolean(cached && cached.selectedImage?.isReady);
+      const isFrontendCached = cached?.selectedImage?.isReady === true;
       const isCachedInBackend = isFrontendCached
         ? await invoke<boolean>('is_image_cached', { path }).catch(() => false)
         : false;
@@ -209,7 +210,7 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
         compactEditorPanelHeightOverride: null,
       });
 
-      if (isFrontendCached) {
+      if (isFrontendCached && cached) {
         setEditor({
           selectedImage: {
             ...cached.selectedImage,
@@ -591,7 +592,7 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
           const expandedArr = folderState?.expandedFolders
             ? Array.from(new Set(folderState.expandedFolders))
             : rootFolders;
-          treesData = await invoke(Invokes.GetPinnedFolderTrees, {
+          treesData = await invoke<FolderTreeNode[]>(Invokes.GetPinnedFolderTrees, {
             paths: rootFolders,
             expandedFolders: expandedArr,
             showImageCounts: appSettings?.enableFolderImageCounts || appSettings?.folderTreeSort?.key === 'imageCount',

@@ -1,6 +1,6 @@
 {
-  "name": "rapidraw",
-  "author": "Timon Käch",
+  "name": "picportal-editor",
+  "author": "PicPortal contributors (RapidRAW attribution retained)",
   "private": true,
   "scripts": {
     "dev": "vite",
@@ -8,6 +8,7 @@
     "tauri": "tauri",
     "start": "tauri dev",
     "start:tethering": "tauri dev -- --features tethering",
+    "test": "node scripts/run-frontend-tests.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",

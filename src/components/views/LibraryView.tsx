@@ -12,6 +12,7 @@ import { useSettingsStore } from '../../store/useSettingsStore';
 
 import { ImageFile, LibraryViewMode, ThumbnailAspectRatio, ThumbnailSize } from '../ui/AppProperties';
 import { GroupBadgeInfo, GroupId } from '../../utils/imageGrouping';
+import { getDirectFolderImagePaths } from '../../utils/cullingPaths';
 
 interface LibraryViewProps {
   sortedImageList: ImageFile[];
@@ -80,6 +81,7 @@ export default function LibraryView({
     currentFolderPath,
     libraryActivePath,
     multiSelectedPaths,
+    activeAlbumId,
     imageList,
     imageRatings,
     isViewLoading,
@@ -90,6 +92,7 @@ export default function LibraryView({
       currentFolderPath: state.currentFolderPath,
       libraryActivePath: state.libraryActivePath,
       multiSelectedPaths: state.multiSelectedPaths,
+      activeAlbumId: state.activeAlbumId,
       imageList: state.imageList,
       imageRatings: state.imageRatings,
       isViewLoading: state.isViewLoading,
@@ -135,8 +138,17 @@ export default function LibraryView({
             aiModelDownloadStatus={aiModelDownloadStatus}
             appSettings={appSettings}
             currentFolderPath={currentFolderPath}
+            isAlbumView={Boolean(activeAlbumId)}
             groupBadgeInfo={groupBadgeInfo}
             imageList={sortedImageList}
+            folderPaths={
+              currentFolderPath && !activeAlbumId
+                ? getDirectFolderImagePaths(
+                    imageList.map((image) => image.path),
+                    currentFolderPath,
+                  )
+                : []
+            }
             imageRatings={imageRatings}
             importState={importState}
             indexingProgress={indexingProgress}

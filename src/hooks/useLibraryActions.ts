@@ -9,6 +9,9 @@ import { globalImageCache } from '../utils/ImageLRUCache';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { computeSortedLibrary } from './useSortedLibrary';
 import { expandGroupedPaths } from '../utils/imageGrouping';
+import { stripVirtualCopySuffix } from '../utils/virtualCopyPath';
+import { getNextManualRating } from '../utils/ratingPersistence';
+import type { FolderTree as FolderTreeNode } from '../components/panel/right/FolderTree';
 
 export function useLibraryActions(handleImageSelect?: (path: string, openInEditor?: boolean) => void) {
   const handleRate = useCallback((newRating: number, paths?: string[]) => {
@@ -23,20 +26,27 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
     const pathsToRate = expandGroupedPaths(imageList, selectedPaths, groupingMode);
 
     const currentRating = imageRatings[selectedPaths[0]] || 0;
-    const finalRating = newRating === currentRating ? 0 : newRating;
+    const finalRating = getNextManualRating(currentRating, newRating);
 
     setLibrary((state) => {
       const newRatings = { ...state.imageRatings };
       pathsToRate.forEach((p) => {
         newRatings[p] = finalRating;
       });
-      return { imageRatings: newRatings };
+      return {
+        imageRatings: newRatings,
+        imageList: state.imageList.map((image) =>
+          pathsToRate.includes(image.path) ? { ...image, rating: finalRating, rating_is_manual: true } : image,
+        ),
+      };
     });
 
-    invoke(Invokes.SetRatingForPaths, { paths: pathsToRate, rating: finalRating }).catch((err) => {
-      console.error(err);
-      toast.error(`Failed to apply rating: ${err}`);
-    });
+    invoke(Invokes.SetRatingForPaths, { paths: pathsToRate, rating: finalRating, ratingIsManual: true }).catch(
+      (err) => {
+        console.error(err);
+        toast.error(`Failed to apply rating: ${err}`);
+      },
+    );
   }, []);
 
   const handleSetColorLabel = useCallback(async (color: string | null, paths?: string[]) => {
@@ -60,13 +70,17 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
     const finalColor = color !== null && color === currentColor ? null : color;
 
     try {
-      await invoke(Invokes.SetColorLabelForPaths, { paths: pathsToUpdate, color: finalColor });
+      await invoke(Invokes.SetColorLabelForPaths, {
+        paths: pathsToUpdate,
+        color: finalColor,
+        colorLabelIsManual: true,
+      });
       setLibrary((state) => ({
         imageList: state.imageList.map((image: ImageFile) => {
           if (pathsToUpdate.includes(image.path)) {
             const otherTags = (image.tags || []).filter((tag: string) => !tag.startsWith('color:'));
             const newTags = finalColor ? [...otherTags, `color:${finalColor}`] : otherTags;
-            return { ...image, tags: newTags };
+            return { ...image, tags: newTags, color_label_is_manual: true };
           }
           return image;
         }),
@@ -108,20 +122,21 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
             : [];
     if (pathsToUpdate.length === 0) return;
 
-    const physicalPathsSet = new Set(pathsToUpdate.map((p) => p.split('?vc=')[0]));
+    const physicalPathsSet = new Set(pathsToUpdate.map(stripVirtualCopySuffix));
     const physicalPathsArray = Array.from(physicalPathsSet);
 
     try {
       await invoke(Invokes.UpdateExifFields, { paths: physicalPathsArray, updates });
 
       setEditor((state) => {
-        if (!state.selectedImage || !physicalPathsSet.has(state.selectedImage.path.split('?vc=')[0])) return state;
+        if (!state.selectedImage || !physicalPathsSet.has(stripVirtualCopySuffix(state.selectedImage.path)))
+          return state;
         return { selectedImage: { ...state.selectedImage, exif: { ...(state.selectedImage.exif || {}), ...updates } } };
       });
 
       setLibrary((state) => ({
         imageList: state.imageList.map((img) => {
-          if (physicalPathsSet.has(img.path.split('?vc=')[0])) {
+          if (physicalPathsSet.has(stripVirtualCopySuffix(img.path))) {
             return { ...img, exif: { ...(img.exif || {}), ...updates } };
           }
           return img;
@@ -325,7 +340,7 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
     handleSettingsChange({ ...appSettings, pinnedFolders: newPins });
 
     try {
-      const trees = await invoke(Invokes.GetPinnedFolderTrees, {
+      const trees = await invoke<FolderTreeNode[]>(Invokes.GetPinnedFolderTrees, {
         paths: newPins,
         expandedFolders: Array.from(expandedFolders),
         showImageCounts: appSettings.enableFolderImageCounts ?? false,

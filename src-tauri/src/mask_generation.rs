@@ -6,14 +6,15 @@ use image::{DynamicImage, GenericImageView, GrayImage, ImageFormat, Luma, Rgba, 
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::hash_map::DefaultHasher;
+use std::borrow::Cow;
+use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::f32::consts::PI;
 use std::hash::{Hash, Hasher};
 use std::io::Cursor;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::app_state::AppState;
-use crate::get_cached_full_warped_image;
+use crate::cache_utils::{calculate_geometry_hash, calculate_image_cache_hash};
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(crate = "serde")]
@@ -60,9 +61,11 @@ pub struct MaskDefinition {
 
 impl MaskDefinition {
     pub fn requires_warped_image(&self) -> bool {
-        self.sub_masks
-            .iter()
-            .any(|sm| sm.mask_type == "color" || sm.mask_type == "luminance")
+        self.visible
+            && self.sub_masks.iter().any(|sub_mask| {
+                sub_mask.visible
+                    && (sub_mask.mask_type == "color" || sub_mask.mask_type == "luminance")
+            })
     }
 }
 
@@ -1444,16 +1447,80 @@ pub fn generate_mask_overlay(
     }
 }
 
-pub fn resolve_warped_image_for_masks(
-    state: &tauri::State<AppState>,
-    adjustments: &serde_json::Value,
+pub(crate) fn get_cached_full_warped_image_for_image(
+    full_warped_cache: &Mutex<Option<(u64, Arc<DynamicImage>)>>,
+    image_path: &str,
+    image: &DynamicImage,
+    is_raw: bool,
+    adjustments: &Value,
+) -> Arc<DynamicImage> {
+    let cache_key = calculate_image_cache_hash(image_path, calculate_geometry_hash(adjustments));
+
+    {
+        let cache = full_warped_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some((hash, warped_image)) = cache.as_ref()
+            && *hash == cache_key
+        {
+            return Arc::clone(warped_image);
+        }
+    }
+
+    let mut source_image = Cow::Borrowed(image);
+    if is_raw {
+        crate::apply_cpu_default_raw_processing(source_image.to_mut());
+    }
+    let warped_image = Arc::new(crate::apply_geometry_warp(source_image, adjustments).into_owned());
+
+    let mut cache = full_warped_cache
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    *cache = Some((cache_key, Arc::clone(&warped_image)));
+    warped_image
+}
+
+pub fn resolve_warped_image_for_masks_for_image(
+    full_warped_cache: &Mutex<Option<(u64, Arc<DynamicImage>)>>,
+    image_path: &str,
+    image: &DynamicImage,
+    is_raw: bool,
+    adjustments: &Value,
     masks: &[MaskDefinition],
 ) -> Option<Arc<DynamicImage>> {
-    if masks.iter().any(|m| m.requires_warped_image()) {
-        get_cached_full_warped_image(state, adjustments).ok()
-    } else {
-        None
-    }
+    masks
+        .iter()
+        .any(MaskDefinition::requires_warped_image)
+        .then(|| {
+            get_cached_full_warped_image_for_image(
+                full_warped_cache,
+                image_path,
+                image,
+                is_raw,
+                adjustments,
+            )
+        })
+}
+
+pub fn resolve_warped_image_for_masks(
+    state: &tauri::State<AppState>,
+    adjustments: &Value,
+    masks: &[MaskDefinition],
+) -> Option<Arc<DynamicImage>> {
+    let loaded_image = state
+        .original_image
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()?;
+
+    resolve_warped_image_for_masks_for_image(
+        &state.full_warped_cache,
+        &loaded_image.path,
+        &loaded_image.image,
+        loaded_image.is_raw,
+        adjustments,
+        masks,
+    )
 }
 
 pub fn get_cached_or_generate_mask(
@@ -1463,15 +1530,51 @@ pub fn get_cached_or_generate_mask(
     height: u32,
     scale: f32,
     crop_offset: (f32, f32),
-    adjustments: &serde_json::Value,
+    adjustments: &Value,
+) -> Option<GrayImage> {
+    let loaded_image = state
+        .original_image
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+
+    get_cached_or_generate_mask_for_image(
+        &state.mask_cache,
+        &state.full_warped_cache,
+        loaded_image.as_ref().map(|image| image.path.as_str()),
+        loaded_image.as_ref().map(|image| image.image.as_ref()),
+        loaded_image.as_ref().is_some_and(|image| image.is_raw),
+        def,
+        width,
+        height,
+        scale,
+        crop_offset,
+        adjustments,
+    )
+}
+
+pub fn get_cached_or_generate_mask_for_image(
+    mask_cache: &Mutex<HashMap<u64, GrayImage>>,
+    full_warped_cache: &Mutex<Option<(u64, Arc<DynamicImage>)>>,
+    image_path: Option<&str>,
+    image: Option<&DynamicImage>,
+    is_raw: bool,
+    def: &MaskDefinition,
+    width: u32,
+    height: u32,
+    scale: f32,
+    crop_offset: (f32, f32),
+    adjustments: &Value,
 ) -> Option<GrayImage> {
     let mut hasher = DefaultHasher::new();
 
     let mut def_for_hash = def.clone();
-    def_for_hash.adjustments = serde_json::Value::Null;
+    def_for_hash.adjustments = Value::Null;
     let def_json = serde_json::to_string(&def_for_hash).unwrap_or_default();
     def_json.hash(&mut hasher);
 
+    image_path.hash(&mut hasher);
+    calculate_geometry_hash(adjustments).hash(&mut hasher);
     width.hash(&mut hasher);
     height.hash(&mut hasher);
     scale.to_bits().hash(&mut hasher);
@@ -1481,14 +1584,22 @@ pub fn get_cached_or_generate_mask(
     let key = hasher.finish();
 
     {
-        let cache = state.mask_cache.lock().unwrap();
+        let cache = mask_cache.lock().unwrap_or_else(|error| error.into_inner());
         if let Some(img) = cache.get(&key) {
             return Some(img.clone());
         }
     }
 
-    let warped_image =
-        resolve_warped_image_for_masks(state, adjustments, std::slice::from_ref(def));
+    let warped_image = image_path.zip(image).and_then(|(path, image)| {
+        resolve_warped_image_for_masks_for_image(
+            full_warped_cache,
+            path,
+            image,
+            is_raw,
+            adjustments,
+            std::slice::from_ref(def),
+        )
+    });
 
     let generated = generate_mask_bitmap(
         def,
@@ -1500,7 +1611,7 @@ pub fn get_cached_or_generate_mask(
     );
 
     if let Some(img) = &generated {
-        let mut cache = state.mask_cache.lock().unwrap();
+        let mut cache = mask_cache.lock().unwrap_or_else(|error| error.into_inner());
         if cache.len() > 50 {
             cache.clear();
         }
@@ -1508,4 +1619,79 @@ pub fn get_cached_or_generate_mask(
     }
 
     generated
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{Rgb, RgbImage};
+
+    #[test]
+    fn cached_color_masks_are_bound_to_the_image_identity() {
+        let first_image = DynamicImage::ImageRgb8(RgbImage::from_pixel(2, 1, Rgb([0, 0, 255])));
+        let second_image = DynamicImage::ImageRgb8(RgbImage::from_fn(2, 1, |x, _| {
+            if x == 0 {
+                Rgb([255, 0, 0])
+            } else {
+                Rgb([0, 0, 255])
+            }
+        }));
+        let definition = MaskDefinition {
+            id: "color-mask".to_owned(),
+            name: "Color mask".to_owned(),
+            visible: true,
+            invert: false,
+            opacity: 100.0,
+            adjustments: Value::Null,
+            sub_masks: vec![SubMask {
+                id: "color-sub-mask".to_owned(),
+                mask_type: "color".to_owned(),
+                visible: true,
+                invert: false,
+                opacity: 100.0,
+                mode: SubMaskMode::Additive,
+                parameters: serde_json::json!({
+                    "targetX": 0.0,
+                    "targetY": 0.0,
+                    "tolerance": 0.0
+                }),
+            }],
+        };
+        let mask_cache = Mutex::new(HashMap::new());
+        let full_warped_cache = Mutex::new(None);
+        let adjustments = Value::Null;
+
+        let first_mask = get_cached_or_generate_mask_for_image(
+            &mask_cache,
+            &full_warped_cache,
+            Some("/synthetic/first.jpg"),
+            Some(&first_image),
+            false,
+            &definition,
+            2,
+            1,
+            1.0,
+            (0.0, 0.0),
+            &adjustments,
+        )
+        .expect("generate first image mask");
+        let second_mask = get_cached_or_generate_mask_for_image(
+            &mask_cache,
+            &full_warped_cache,
+            Some("/synthetic/second.jpg"),
+            Some(&second_image),
+            false,
+            &definition,
+            2,
+            1,
+            1.0,
+            (0.0, 0.0),
+            &adjustments,
+        )
+        .expect("generate second image mask");
+
+        assert_eq!(first_mask.get_pixel(1, 0)[0], 255);
+        assert_eq!(second_mask.get_pixel(0, 0)[0], 255);
+        assert_eq!(second_mask.get_pixel(1, 0)[0], 0);
+    }
 }

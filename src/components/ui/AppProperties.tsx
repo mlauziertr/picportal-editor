@@ -1,6 +1,7 @@
 import { ExportPreset } from './ExportImportProperties';
 import { Adjustments, CopyPasteSettings } from '../../utils/adjustments';
 import { ToolType } from '../panel/right/Masks';
+import type { CullingUndoEntry } from '../../utils/cullingApplication';
 
 export const GLOBAL_KEYS = [
   ' ',
@@ -35,7 +36,9 @@ export enum Invokes {
   ApplyAdjustmentsToPaths = 'apply_adjustments_to_paths',
   ApplyAutoAdjustmentsToPaths = 'apply_auto_adjustments_to_paths',
   ApplyDenoising = 'apply_denoising',
+  ApplyStyleToPaths = 'apply_style_to_paths',
   CalculateAutoAdjustments = 'calculate_auto_adjustments',
+  CalculateStyleAdjustments = 'calculate_style_adjustments',
   CancelExport = 'cancel_export',
   CheckAIConnectorStatus = 'check_ai_connector_status',
   ClearAllSidecars = 'clear_all_sidecars',
@@ -46,6 +49,16 @@ export enum Invokes {
   CreateFolder = 'create_folder',
   CreateVirtualCopy = 'create_virtual_copy',
   CullImages = 'cull_images',
+  CancelCulling = 'cancel_culling',
+  CullingCapabilities = 'culling_capabilities',
+  CullingSession = 'culling_session',
+  DismissCullingResult = 'dismiss_culling_result',
+  PicPortalLogin = 'picportal_login',
+  PicPortalRestoreSession = 'picportal_restore_session',
+  PicPortalLogout = 'picportal_logout',
+  PicPortalGalleries = 'picportal_galleries',
+  PicPortalCreateGallery = 'picportal_create_gallery',
+  PicPortalExport = 'picportal_export',
   DeleteFolder = 'delete_folder',
   DuplicateFile = 'duplicate_file',
   EstimateExportSizes = 'estimate_export_sizes',
@@ -290,6 +303,8 @@ export interface ImageFile {
   modified: number;
   path: string;
   rating: number;
+  rating_is_manual: boolean | null;
+  color_label_is_manual?: boolean | null;
   tags: Array<string> | null;
   exif: { [key: string]: string } | null;
   is_virtual_copy: boolean;
@@ -328,8 +343,25 @@ export interface Preset {
 export interface Progress {
   completed?: number;
   current?: number;
+  stage?: string;
+  stageCode?: CullingStageCode;
   total: number;
 }
+
+export type CullingStageCode = 'preparing' | 'analyzing' | 'subject' | 'grouping';
+
+export interface CullingCapabilities {
+  sharpness: 'ready';
+  faces: 'ready' | 'unavailable';
+  subject: 'ready' | 'unavailable';
+  reasonCode: string | null;
+  facesReasonCode: string | null;
+  subjectReasonCode: string | null;
+  running: boolean;
+}
+
+export const CULLING_CANCELLED = 'CULLING_CANCELLED';
+export const CULLING_ALREADY_RUNNING = 'CULLING_ALREADY_RUNNING';
 
 export interface SelectedImage {
   exif: any;
@@ -393,13 +425,20 @@ export interface WaveformData {
 }
 
 export interface CullingSettings {
-  similarityThreshold: number;
-  blurThreshold: number;
-  groupSimilar: boolean;
-  filterBlurry: boolean;
+  selectionAmount: 'extreme' | 'few' | 'standard' | 'more';
+  blurSeverity: 'lenient' | 'moderate' | 'strict';
+  detectDuplicates: boolean;
+  detectBlurry: boolean;
+  detectClosedEyes: boolean;
+  detectHighlights: boolean;
+  detectSubject: boolean;
+  subjectProfile: 'general' | 'portrait' | 'wedding' | 'sports' | 'dance';
+  autoAssignStars: boolean;
 }
 
-interface ImageAnalysisResult {
+export type CullingCategory = 'selected' | 'highlights' | 'duplicate' | 'blurred' | 'closedEyes' | 'unrated';
+
+export interface ImageAnalysisResult {
   path: string;
   qualityScore: number;
   sharpnessMetric: number;
@@ -407,17 +446,72 @@ interface ImageAnalysisResult {
   exposureMetric: number;
   width: number;
   height: number;
+  eyeState: 'open' | 'closed' | 'notApplicable' | 'unknown';
+  eyeConfidence: number;
+  eyeMethod: string;
+  faceCount: number;
+  faceThumbnails: string[];
+  qualityMethod: string;
+  reasons: string[];
+  category: CullingCategory | string;
+  suggestedRating: number;
+  subjectStatus: string;
+  subjectMethod: string;
+  subjectBoxes: Array<{ x: number; y: number; width: number; height: number; score: number; label: string }>;
+  attributedFaces: Array<{
+    role: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    confidence: number;
+    eyeState: string;
+    eyeConfidence: number;
+  }>;
 }
 
-interface CullGroup {
+export interface CullGroup {
   representative: ImageAnalysisResult;
   duplicates: ImageAnalysisResult[];
 }
 
 export interface CullingSuggestions {
   similarGroups: CullGroup[];
+  selectedImages: ImageAnalysisResult[];
+  highlightImages: ImageAnalysisResult[];
+  duplicateImages: ImageAnalysisResult[];
   blurryImages: ImageAnalysisResult[];
+  closedEyeImages: ImageAnalysisResult[];
+  unratedImages: ImageAnalysisResult[];
+  results: ImageAnalysisResult[];
   failedPaths: string[];
+  starAssignments: Record<string, number>;
+  colorAssignments: Record<string, string | null>;
+  eyeAnalysisStatus: string;
+  subjectAnalysisStatus: string;
+  /** Folder the analysis was started for; survives a webview reload. */
+  folderPath?: string | null;
+}
+
+/** Backend view of the current analysis, read back after a webview reload. */
+export interface CullingSession {
+  running: boolean;
+  folderPath: string | null;
+  progress: { current: number; total: number; stage: string; stageCode: CullingStageCode } | null;
+  /** Finished analysis not yet dismissed by the user. */
+  result: CullingSuggestions | null;
+}
+
+export interface CullingPersistenceSummary {
+  /** Identifies the application, so an older undo cannot overwrite a newer one. */
+  applicationId: number;
+  succeededRatings: Record<string, number>;
+  succeededColors: Record<string, string | null>;
+  failedRatings: Array<{ rating: number; paths: string[]; error: unknown }>;
+  failedColors: Array<{ color: string | null; paths: string[]; error: unknown }>;
+  skippedPaths: string[];
+  /** Pre-application values of the written photos, for "Undo" (kept in memory only). */
+  undo: CullingUndoEntry[];
 }
 
 interface KeybindHandler {

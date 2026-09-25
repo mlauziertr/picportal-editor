@@ -53,6 +53,10 @@ impl<'a> IntoCowImage<'a> for &'a std::sync::Arc<DynamicImage> {
 pub struct ImageMetadata {
     pub version: u32,
     pub rating: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rating_is_manual: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_label_is_manual: Option<bool>,
     pub adjustments: Value,
     #[serde(default)]
     pub tags: Option<Vec<String>>,
@@ -65,9 +69,28 @@ impl Default for ImageMetadata {
         ImageMetadata {
             version: 1,
             rating: 0,
+            rating_is_manual: Some(false),
+            color_label_is_manual: Some(false),
             adjustments: Value::Null,
             tags: None,
             exif: None,
+        }
+    }
+}
+
+impl ImageMetadata {
+    pub fn default_with_unknown_rating() -> Self {
+        Self {
+            rating_is_manual: None,
+            ..Self::default()
+        }
+    }
+
+    pub fn default_with_unknown_provenance() -> Self {
+        Self {
+            rating_is_manual: None,
+            color_label_is_manual: None,
+            ..Self::default()
         }
     }
 }
@@ -1400,8 +1423,6 @@ pub struct AutoAdjustmentResults {
     pub shadows: f64,
     pub vibrancy: f64,
     pub vignette_amount: f64,
-    pub temperature: f64,
-    pub tint: f64,
     pub dehaze: f64,
     pub clarity: f64,
     pub centre: f64,
@@ -3435,8 +3456,6 @@ pub fn perform_auto_analysis(image: &DynamicImage) -> AutoAdjustmentResults {
         shadows: shadows.clamp(-100.0, 100.0),
         vibrancy: vibrancy.clamp(-100.0, 100.0),
         vignette_amount: vignette_amount.clamp(-100.0, 100.0),
-        temperature: 0.0,
-        tint: 0.0,
         dehaze: dehaze.clamp(-100.0, 100.0),
         clarity: clarity.clamp(-100.0, 100.0),
         centre: centre.clamp(-100.0, 100.0),
@@ -3484,4 +3503,21 @@ pub fn calculate_auto_adjustments(
     let results = perform_auto_analysis(&original_image);
 
     Ok(auto_results_to_json(&results))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{ImageBuffer, Rgb};
+
+    #[test]
+    fn auto_adjustments_do_not_apply_gray_world_white_balance() {
+        let blue_cast = DynamicImage::ImageRgb8(ImageBuffer::from_pixel(8, 8, Rgb([50, 50, 100])));
+        let result = perform_auto_analysis(&blue_cast);
+        let json = auto_results_to_json(&result);
+
+        assert!(json.get("temperature").is_none());
+        assert!(json.get("tint").is_none());
+        assert_ne!(json["exposure"], serde_json::json!(0.0));
+    }
 }

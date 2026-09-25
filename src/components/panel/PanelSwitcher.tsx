@@ -30,7 +30,18 @@ export const PANEL_ICONS: Record<Panel, LucideIcon> = {
   [Panel.Tethering]: Camera,
 };
 
-const PANEL_TITLES: Record<Panel, string> = {
+type PanelTitleKey =
+  | 'editor.switcher.tooltips.info'
+  | 'editor.switcher.tooltips.adjust'
+  | 'editor.switcher.tooltips.crop'
+  | 'editor.switcher.tooltips.masks'
+  | 'editor.switcher.tooltips.inpaint'
+  | 'editor.switcher.tooltips.presets'
+  | 'editor.switcher.tooltips.export'
+  | 'library.folders.sourcesTitle'
+  | 'editor.switcher.tooltips.tethering';
+
+const PANEL_TITLES: Record<Panel, PanelTitleKey> = {
   [Panel.Metadata]: 'editor.switcher.tooltips.info',
   [Panel.Adjustments]: 'editor.switcher.tooltips.adjust',
   [Panel.Crop]: 'editor.switcher.tooltips.crop',
@@ -262,10 +273,14 @@ export function MobilePanelSwitcher({
   const isVertical = placement === 'right';
 
   return (
-    <div className={clsx(
-      'flex items-center p-1.5 gap-1 shrink-0 custom-scrollbar',
-      isVertical ? 'flex-col overflow-y-auto h-full border-l border-surface' : 'flex-row overflow-x-auto w-full border-t border-surface',
-    )}>
+    <div
+      className={clsx(
+        'flex items-center p-1.5 gap-1 shrink-0 custom-scrollbar',
+        isVertical
+          ? 'flex-col overflow-y-auto h-full border-l border-surface'
+          : 'flex-row overflow-x-auto w-full border-t border-surface',
+      )}
+    >
       {MOBILE_PANELS.map((id) => {
         const Icon = PANEL_ICONS[id];
         const isActive = activePanel === id;

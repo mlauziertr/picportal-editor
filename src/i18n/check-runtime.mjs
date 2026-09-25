@@ -17,6 +17,7 @@ const countCandidates = [
   1_000,
   1_000_000,
 ];
+const attributionKey = 'settings.thanks.attribution';
 
 const flatten = (object, prefix = '', leaves = new Map()) => {
   for (const [key, value] of Object.entries(object)) {
@@ -69,6 +70,7 @@ await i18n.init({
 });
 
 let checkedResolutions = 0;
+let checkedAttributions = 0;
 
 for (const filename of localeFiles) {
   const locale = path.basename(filename, '.json');
@@ -105,6 +107,24 @@ for (const filename of localeFiles) {
       }
     }
   }
+
+  if (locale !== 'en') {
+    for (const key of Object.keys(resources.en.translation.settings.thanks.attribution)) {
+      const fullKey = `${attributionKey}.${key}`;
+      const details = i18n.t(fullKey, { lng: locale, returnDetails: true });
+      checkedAttributions += 1;
+
+      if (details.usedLng !== locale) {
+        failures.push(`${locale}:${fullKey} resolved through ${details.usedLng}`);
+      }
+      if (details.exactUsedKey !== fullKey) {
+        failures.push(`${locale}:${fullKey} resolved as ${details.exactUsedKey}`);
+      }
+      if (typeof details.res !== 'string' || details.res.trim() === '') {
+        failures.push(`${locale}:${fullKey} resolved to an empty value`);
+      }
+    }
+  }
 }
 
 if (failures.length > 0) {
@@ -112,5 +132,7 @@ if (failures.length > 0) {
   failures.forEach((failure) => console.error(`- ${failure}`));
   process.exitCode = 1;
 } else {
-  console.log(`Validated ${checkedResolutions} plural resolutions across ${localeFiles.length} locales.`);
+  console.log(
+    `Validated ${checkedResolutions} plural resolutions and ${checkedAttributions} attribution resolutions across ${localeFiles.length} locales.`,
+  );
 }

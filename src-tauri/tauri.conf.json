@@ -1,6 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "identifier": "io.github.CyberTimon.RapidRAW",
+  "productName": "PicPortal Editor",
+  "identifier": "com.getpicportal.PicPortalEditor",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +13,7 @@
       {
         "label": "main",
         "create": false,
-        "title": "RapidRAW",
+        "title": "PicPortal Editor",
         "width": 1280,
         "height": 720,
         "minWidth": 800,
@@ -35,7 +36,13 @@
     "active": true,
     "targets": "all",
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
-    "resources": ["resources", "lensfun_db"],
+    "resources": {
+      "../models/face": "models/face",
+      "../models/culling": "models/culling",
+      "../scripts/culling_worker.py": "scripts/culling_worker.py",
+      "lensfun_db": "lensfun_db",
+      "resources": "resources"
+    },
     "category": "Photography",
     "fileAssociations": [
       {

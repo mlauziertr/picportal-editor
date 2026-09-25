@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
 import { open } from '@tauri-apps/plugin-shell';
 import {
@@ -32,6 +33,7 @@ import {
   RawStatus,
   EditedStatus,
   LibraryDisplayMode,
+  Invokes,
 } from '../ui/AppProperties';
 import { GroupBadgeInfo, GroupId } from '../../utils/imageGrouping';
 import { ImportState, Status } from '../ui/ExportImportProperties';
@@ -43,6 +45,8 @@ import SettingsPanel from './SettingsPanel';
 
 import LibraryGrid from './library/LibraryGrid';
 import { SearchInput, ViewOptionsDropdown } from './library/LibraryHeader';
+import AutomaticCullingButton from './library/AutomaticCullingButton';
+import CullingResultsPanel from './library/CullingResultsPanel';
 
 export interface ColumnWidths {
   thumbnail: number;
@@ -61,8 +65,10 @@ interface MainLibraryProps {
   aiModelDownloadStatus: string | null;
   appSettings: AppSettings | null;
   currentFolderPath: string | null;
+  isAlbumView: boolean;
   groupBadgeInfo: Map<GroupId, GroupBadgeInfo> | null;
   imageList: Array<ImageFile>;
+  folderPaths: Array<string>;
   imageRatings: Record<string, number>;
   importState: ImportState;
   indexingProgress: Progress;
@@ -163,6 +169,7 @@ function DisplayModeSwitch({ displayMode, setDisplayMode, t }: DisplayModeSwitch
 export default function MainLibrary(props: MainLibraryProps) {
   const { t } = useTranslation();
   const setUI = useUIStore((state) => state.setUI);
+  const cullingResultsState = useUIStore((state) => state.cullingResultsState);
   const [appVersion, setAppVersion] = useState('');
   const [isUpdateAvailable, setIsUpdateAvailable] = useState(false);
   const [latestVersion, setLatestVersion] = useState('');
@@ -270,6 +277,23 @@ export default function MainLibrary(props: MainLibraryProps) {
       setIsBusyLoaderMounted(true);
     }
   }, [isBusyDelayed]);
+
+  const closeCullingResults = useCallback(() => {
+    setUI((state) => ({ cullingResultsState: { ...state.cullingResultsState, isOpen: false } }));
+    // Closed on purpose: a later reload must not bring these proposals back.
+    invoke(Invokes.DismissCullingResult).catch((error) => console.error('Failed to dismiss culling result:', error));
+  }, [setUI]);
+
+  useEffect(() => {
+    // No folder yet (e.g. still restoring after a reload) is not a folder change.
+    if (
+      cullingResultsState.isOpen &&
+      props.currentFolderPath !== null &&
+      cullingResultsState.folderPath !== props.currentFolderPath
+    ) {
+      closeCullingResults();
+    }
+  }, [cullingResultsState.folderPath, cullingResultsState.isOpen, props.currentFolderPath, closeCullingResults]);
 
   useEffect(() => {
     const compareVersions = (v1: string, v2: string) => {
@@ -427,17 +451,6 @@ export default function MainLibrary(props: MainLibraryProps) {
                     as="div"
                     className="absolute bottom-8 left-8 lg:left-16 space-y-1 z-10 drop-shadow-sm"
                   >
-                    <p>
-                      {t('library.splash.imagesBy')}{' '}
-                      <a
-                        href="https://instagram.com/timonkaech.photography"
-                        className="hover:underline"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                      >
-                        Timon Käch
-                      </a>
-                    </p>
                     {appVersion && (
                       <div className="flex items-center space-x-2">
                         <p>
@@ -467,26 +480,6 @@ export default function MainLibrary(props: MainLibraryProps) {
                               </span>
                             )}
                           </span>
-                        </p>
-                        <span>-</span>
-                        <p>
-                          <a
-                            href="https://ko-fi.com/cybertimon"
-                            className="hover:underline"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                          >
-                            {t('library.splash.donate')}
-                          </a>
-                          <span className="mx-1">{t('library.splash.or')}</span>
-                          <a
-                            href="https://github.com/CyberTimon/RapidRAW"
-                            className="hover:underline"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                          >
-                            {t('library.splash.contribute')}
-                          </a>
                         </p>
                       </div>
                     )}
@@ -566,6 +559,18 @@ export default function MainLibrary(props: MainLibraryProps) {
               <span>{t('library.import.failed')}</span>
             </Text>
           )}
+          <AutomaticCullingButton
+            label={t('library.culling.automaticCulling')}
+            unavailableLabel={t('library.culling.automaticCullingUnavailable')}
+            folderPath={props.isAlbumView ? null : props.currentFolderPath}
+            folderPaths={props.folderPaths}
+            onOpen={(cullingModalState) =>
+              setUI((state) => ({
+                cullingModalState,
+                cullingResultsState: { ...state.cullingResultsState, isOpen: false },
+              }))
+            }
+          />
           <DisplayModeSwitch displayMode={libraryDisplayMode} setDisplayMode={setLibraryDisplayMode} t={t} />
 
           <div className="flex items-center bg-surface p-1 rounded-lg gap-1 border border-border-color/20">
@@ -656,6 +661,15 @@ export default function MainLibrary(props: MainLibraryProps) {
           <SlidersHorizontal className="h-12 w-12 mb-4 text-text-secondary" />
           <Text>{t('library.filters.noMatch')}</Text>
         </div>
+      )}
+      {cullingResultsState.isOpen && cullingResultsState.suggestions && (
+        <CullingResultsPanel
+          suggestions={cullingResultsState.suggestions}
+          persistence={cullingResultsState.persistence}
+          folderPath={cullingResultsState.folderPath}
+          initialSelectedPath={cullingResultsState.selectedPath}
+          onClose={closeCullingResults}
+        />
       )}
       {props.isAndroid && (
         <Button

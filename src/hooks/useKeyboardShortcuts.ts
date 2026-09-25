@@ -9,6 +9,7 @@ import { useUIStore } from '../store/useUIStore';
 import { useProcessStore } from '../store/useProcessStore';
 import { useEditorActions } from './useEditorActions';
 import { useLibraryActions } from './useLibraryActions';
+import { stripVirtualCopySuffix } from '../utils/virtualCopyPath';
 
 interface KeyboardShortcutsProps {
   sortedImageList: Array<ImageFile>;
@@ -38,7 +39,7 @@ export const useKeyboardShortcuts = ({
   }, [sortedImageList]);
 
   const handleCopyImagePaths = useCallback(async (paths: Array<string>) => {
-    const physicalPaths = [...new Set(paths.map((path) => path.split('?vc=')[0]))];
+    const physicalPaths = [...new Set(paths.map(stripVirtualCopySuffix))];
     if (physicalPaths.length === 0) {
       return;
     }
@@ -639,6 +640,13 @@ export const useKeyboardShortcuts = ({
         state.ui.collageModalState.isOpen ||
         state.ui.denoiseModalState.isOpen ||
         state.ui.negativeModalState.isOpen;
+
+      if (state.ui.cullingResultsState.isOpen && !state.ui.confirmModalState.isOpen && event.code === 'Escape') {
+        event.preventDefault();
+        // Same guard as the close button: unapplied proposals ask for confirmation.
+        state.ui.requestCullingResultsClose();
+        return;
+      }
 
       if (isModalOpen) return;
 

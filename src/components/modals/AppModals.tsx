@@ -18,7 +18,7 @@ import ConfirmModal from './ConfirmModal';
 import ImportSettingsModal from './ImportSettingsModal';
 import CullingModal from './CullingModal';
 import CollageModal from './CollageModal';
-import { AppSettings, Invokes, AlbumItem, Album, AlbumGroup } from '../ui/AppProperties';
+import { AppSettings, AlbumItem, AlbumGroup } from '../ui/AppProperties';
 import { CopyPasteSettings } from '../../utils/adjustments';
 
 export interface AppModalsProps {
@@ -37,8 +37,6 @@ export interface AppModalsProps {
   handleRenameFolder: (newName: string) => Promise<void>;
   handleSaveRename: (nameTemplate: string) => Promise<void>;
   handleStartImport: (settings: any) => Promise<void>;
-  handleSetColorLabel: (color: string | null, paths?: string[]) => Promise<void>;
-  handleRate: (rating: number, paths?: string[]) => void;
   executeDelete: (paths: string[], options: any) => Promise<void>;
   handleSaveCollage: (base64Data: string, firstPath: string) => Promise<string>;
   handleCreateAlbumItem: (name: string, type: 'album' | 'group') => Promise<void>;
@@ -326,26 +324,20 @@ export default function AppModals(props: AppModalsProps) {
         isOpen={cullingModalState.isOpen}
         onClose={() =>
           setUI({
-            cullingModalState: { isOpen: false, progress: null, suggestions: null, error: null, pathsToCull: [] },
+            cullingModalState: {
+              isOpen: false,
+              progress: null,
+              suggestions: null,
+              error: null,
+              pathsToCull: [],
+              folderPath: null,
+            },
           })
         }
         progress={cullingModalState.progress}
-        suggestions={cullingModalState.suggestions}
         error={cullingModalState.error}
         imagePaths={cullingModalState.pathsToCull}
-        thumbnails={thumbnails}
-        onApply={(action, paths) => {
-          if (action === 'reject') {
-            props.handleSetColorLabel('red', paths);
-          } else if (action === 'rate_zero') {
-            props.handleRate(1, paths);
-          } else if (action === 'delete') {
-            props.executeDelete(paths, { includeAssociated: false });
-          }
-          setUI({
-            cullingModalState: { isOpen: false, progress: null, suggestions: null, error: null, pathsToCull: [] },
-          });
-        }}
+        folderPath={cullingModalState.folderPath}
         onError={(err) => {
           setUI((state) => ({ cullingModalState: { ...state.cullingModalState, error: err, progress: null } }));
         }}

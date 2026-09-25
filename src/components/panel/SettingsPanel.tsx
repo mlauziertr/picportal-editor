@@ -32,7 +32,7 @@ import Switch from '../ui/Switch';
 import Input from '../ui/Input';
 import Slider from '../ui/Slider';
 import { ThemeProps, THEMES, DEFAULT_THEME_ID } from '../../utils/themes';
-import { useTranslation } from 'react-i18next';
+import { Trans, useTranslation } from 'react-i18next';
 import { Invokes } from '../ui/AppProperties';
 import {
   formatKeyCode,
@@ -909,7 +909,7 @@ export default function SettingsPanel({
   };
 
   const shortcutTagVariants = {
-    visible: { opacity: 1, scale: 1, transition: { type: 'spring', stiffness: 500, damping: 30 } },
+    visible: { opacity: 1, scale: 1, transition: { type: 'spring' as const, stiffness: 500, damping: 30 } },
     exit: { opacity: 0, scale: 0.8, transition: { duration: 0.15 } },
   };
 
@@ -1753,6 +1753,68 @@ export default function SettingsPanel({
                         {t('settings.thanks.list.you')}
                       </li>
                     </Text>
+
+                    <div className="mt-8 pt-6 border-t border-border-color">
+                      <Text variant={TextVariants.heading} className="mb-3">
+                        {t('settings.thanks.attribution.title')}
+                      </Text>
+                      <Text className="mb-4">
+                        <Trans
+                          i18nKey="settings.thanks.attribution.basedOnDescription"
+                          values={{
+                            project: t('settings.thanks.attribution.originalProject'),
+                            author: t('settings.thanks.attribution.originalAuthor'),
+                          }}
+                          components={[
+                            <a
+                              key="0"
+                              href="https://github.com/CyberTimon/RapidRAW"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="font-semibold text-accent hover:underline"
+                            />,
+                          ]}
+                        />
+                      </Text>
+                      <Text className="mb-4">
+                        {t('settings.thanks.attribution.splashImages')}{' '}
+                        <a
+                          href="https://instagram.com/timonkaech.photography"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="font-semibold text-accent hover:underline"
+                        >
+                          {t('settings.thanks.attribution.originalAuthor')}
+                        </a>
+                        .
+                      </Text>
+                      <div className="flex flex-wrap gap-x-4 gap-y-2">
+                        <a
+                          href="https://github.com/CyberTimon/RapidRAW"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-accent hover:underline"
+                        >
+                          {t('settings.thanks.attribution.source')}
+                        </a>
+                        <a
+                          href="https://github.com/CyberTimon/RapidRAW/blob/main/LICENSE"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-accent hover:underline"
+                        >
+                          {t('settings.thanks.attribution.license')}
+                        </a>
+                        <a
+                          href="https://ko-fi.com/cybertimon"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-accent hover:underline"
+                        >
+                          {t('settings.thanks.attribution.support')}
+                        </a>
+                      </div>
+                    </div>
                   </div>
                 </motion.div>
               )}

@@ -1,11 +1,26 @@
 import { useEffect, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { convertFileSrc } from '@tauri-apps/api/core';
+import i18n from 'i18next';
+import { toast } from 'react-toastify';
+import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { Status } from '../components/ui/ExportImportProperties';
+import { Invokes } from '../components/ui/AppProperties';
+import type { CullingSession, CullingSuggestions } from '../components/ui/AppProperties';
+import {
+  cullingResultsFor,
+  noteCullingEvent,
+  readCullingSession,
+  restoreCullingSession,
+} from '../utils/cullingSession';
 import { useProcessStore } from '../store/useProcessStore';
 import { useEditorStore } from '../store/useEditorStore';
 import { useUIStore } from '../store/useUIStore';
 import { useLibraryStore } from '../store/useLibraryStore';
+import {
+  mergeLoadedColorLabel,
+  mergeLoadedRating,
+  mergeThumbnailRatings,
+} from '../utils/ratingPersistence';
 
 interface TauriListenerProps {
   refreshAllFolderTrees: () => void;
@@ -58,7 +73,7 @@ export function useTauriListeners({
 
       if (Object.keys(pendingRatings).length > 0 || Object.keys(pendingEdits).length > 0) {
         useLibraryStore.getState().setLibrary((state) => ({
-          imageRatings: { ...state.imageRatings, ...pendingRatings },
+          imageRatings: mergeThumbnailRatings(state.imageRatings, pendingRatings, state.imageList),
           imageList:
             Object.keys(pendingEdits).length > 0
               ? state.imageList.map((img) =>
@@ -124,16 +139,50 @@ export function useTauriListeners({
           scheduleFlush();
         }
       }),
-      listen('image-metadata-loaded', (event: any) => {
+      listen<{
+        path: string;
+        rating: number;
+        rating_is_manual: boolean | null;
+        color_label_is_manual: boolean | null;
+        is_edited: boolean;
+        tags: string[] | null;
+      }>('image-metadata-loaded', (event) => {
         if (!isEffectActive) return;
-        const { path, rating, is_edited, tags } = event.payload;
+        const { path, rating, rating_is_manual, color_label_is_manual, is_edited, tags } = event.payload;
 
-        useLibraryStore.getState().setLibrary((state) => ({
-          imageRatings: { ...state.imageRatings, [path]: rating },
-          imageList: state.imageList.map((img) =>
-            img.path === path ? { ...img, is_edited, tags: tags ?? img.tags } : img,
-          ),
-        }));
+        useLibraryStore.getState().setLibrary((state) => {
+          const currentImage = state.imageList.find((image) => image.path === path);
+          const loadedRating = mergeLoadedRating(
+            state.imageRatings[path] ?? currentImage?.rating,
+            currentImage?.rating_is_manual,
+            rating,
+            rating_is_manual,
+          );
+          const loadedColorLabel = mergeLoadedColorLabel(
+            currentImage?.tags,
+            currentImage?.color_label_is_manual,
+            tags,
+            color_label_is_manual,
+          );
+          return {
+            imageRatings: { ...state.imageRatings, [path]: loadedRating.rating },
+            imageList: state.imageList.map((img) =>
+              img.path === path
+                ? {
+                    ...img,
+                    rating: loadedRating.rating,
+                    rating_is_manual: loadedRating.ratingIsManual,
+                    color_label_is_manual: loadedColorLabel.colorLabelIsManual,
+                    is_edited,
+                    tags:
+                      loadedColorLabel.colorLabelIsManual === true
+                        ? loadedColorLabel.tags
+                        : tags ?? img.tags,
+                  }
+                : img,
+            ),
+          };
+        });
       }),
       listen('ai-model-download-start', (event: any) => {
         if (isEffectActive) useProcessStore.getState().setProcess({ aiModelDownloadStatus: event.payload });
@@ -358,39 +407,85 @@ export function useTauriListeners({
       }),
       listen('culling-start', (event: any) => {
         if (isEffectActive) {
+          noteCullingEvent();
           useUIStore.getState().setUI((state) => ({
             cullingModalState: {
               ...state.cullingModalState,
               isOpen: true,
-              progress: { current: 0, total: event.payload, stage: 'Initializing...' },
+              progress: { current: 0, total: event.payload, stage: '', stageCode: 'preparing' },
               suggestions: null,
               error: null,
+              isCancelling: false,
             },
           }));
         }
       }),
       listen('culling-progress', (event: any) => {
         if (isEffectActive) {
-          useUIStore
-            .getState()
-            .setUI((state) => ({ cullingModalState: { ...state.cullingModalState, progress: event.payload } }));
+          noteCullingEvent();
+          // Also reopens the progress view when the analysis outlived a webview reload.
+          useUIStore.getState().setUI((state) => ({
+            cullingModalState: { ...state.cullingModalState, isOpen: true, progress: event.payload },
+          }));
+        }
+      }),
+      listen('culling-cancelled', () => {
+        if (isEffectActive) {
+          noteCullingEvent();
+          useUIStore.getState().setUI((state) => ({
+            cullingModalState: {
+              ...state.cullingModalState,
+              isOpen: false,
+              progress: null,
+              suggestions: null,
+              error: null,
+              pathsToCull: [],
+              isCancelling: false,
+            },
+          }));
+          toast.info(i18n.t('modals.culling.cancelled'));
         }
       }),
       listen('culling-complete', (event: any) => {
         if (isEffectActive) {
+          noteCullingEvent();
+          // Propose, then apply: results open for review, nothing is written here.
+          const suggestions = event.payload as CullingSuggestions;
           useUIStore.getState().setUI((state) => ({
-            cullingModalState: { ...state.cullingModalState, progress: null, suggestions: event.payload },
+            cullingModalState: {
+              isOpen: false,
+              progress: null,
+              suggestions: null,
+              error: null,
+              pathsToCull: [],
+              folderPath: null,
+              isCancelling: false,
+            },
+            // The payload names its folder: after a reload the UI store no longer knows it.
+            cullingResultsState: cullingResultsFor(suggestions, state.cullingModalState.folderPath),
           }));
         }
       }),
       listen('culling-error', (event: any) => {
         if (isEffectActive) {
+          noteCullingEvent();
           useUIStore.getState().setUI((state) => ({
             cullingModalState: { ...state.cullingModalState, progress: null, error: String(event.payload) },
           }));
         }
       }),
     ];
+
+    // Once subscribed, read back an analysis that outlived a webview reload:
+    // events emitted before the reload are gone, the backend session is not.
+    Promise.all(listeners)
+      .then(() => readCullingSession(() => invoke<CullingSession>(Invokes.CullingSession)))
+      .then((session) => {
+        if (!isEffectActive || !session) return;
+        const restored = restoreCullingSession(session, useUIStore.getState());
+        if (restored) useUIStore.getState().setUI(restored);
+      })
+      .catch((error) => console.error('Failed to restore the culling session:', error));
 
     return () => {
       isEffectActive = false;

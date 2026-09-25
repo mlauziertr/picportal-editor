@@ -94,7 +94,24 @@ const PLACEHOLDER_PATCH: AiPatch = {
   patchData: null,
 };
 
-const SUB_MASK_CONFIG: any = {
+type AiMaskParameterKey = 'feather' | 'grow' | 'pressure' | 'intensity';
+
+interface AiMaskParameterConfig {
+  key: AiMaskParameterKey;
+  min: number;
+  max: number;
+  step: number;
+  multiplier?: number;
+  defaultValue: number;
+}
+
+interface AiSubMaskConfig {
+  parameters?: AiMaskParameterConfig[];
+  showBrushTools?: boolean;
+  showFlowControl?: boolean;
+}
+
+const SUB_MASK_CONFIG: Partial<Record<Mask, AiSubMaskConfig>> = {
   [Mask.Radial]: {
     parameters: [{ key: 'feather', min: 0, max: 100, step: 1, multiplier: 100, defaultValue: 50 }],
   },
@@ -524,7 +541,7 @@ export default function AIPanel() {
   };
 
   const createMaskLogic = (type: Mask, mode: SubMaskMode = SubMaskMode.Additive) => {
-    if (!selectedImage) return createSubMask(type, {} as any, mode);
+    if (!selectedImage) return createSubMask(type, { width: 1000, height: 1000 }, mode);
     const subMask = createSubMask(type, selectedImage, mode);
 
     const steps = adjustments?.orientationSteps || 0;
@@ -533,8 +550,8 @@ export default function AIPanel() {
     const imgH = isRotated ? selectedImage.width || 1000 : selectedImage.height || 1000;
 
     const config = SUB_MASK_CONFIG[type];
-    if (config && config.parameters) {
-      config.parameters.forEach((param: any) => {
+    if (config?.parameters) {
+      config.parameters.forEach((param) => {
         if (param.defaultValue !== undefined) {
           subMask.parameters[param.key] = param.defaultValue / (param.multiplier || 1);
         }
@@ -1559,7 +1576,7 @@ function ContainerRow({
         >
           {isStandalone ? (
             (() => {
-              const StandaloneIcon = MASK_ICON_MAP[firstSubMask.type] || Circle;
+              const StandaloneIcon = MASK_ICON_MAP[firstSubMask.type as Mask] || Circle;
               return <StandaloneIcon size={18} />;
             })()
           ) : isExpanded ? (
@@ -1728,7 +1745,7 @@ function SubMaskRow({
     setNodeRef(node);
     setDroppableRef(node);
   };
-  const MaskIcon = MASK_ICON_MAP[subMask.type] || Circle;
+  const MaskIcon = MASK_ICON_MAP[subMask.type as Mask] || Circle;
   const { showContextMenu } = useContextMenu();
   const [isHovered, setIsHovered] = useState(false);
   const hoverTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1960,7 +1977,7 @@ function SettingsPanel({
     }
   }, [isGenerativeAvailable, container, isQuickErasePatch]);
 
-  const subMaskConfig = activeSubMask ? SUB_MASK_CONFIG[activeSubMask.type] || {} : {};
+  const subMaskConfig = activeSubMask ? SUB_MASK_CONFIG[activeSubMask.type as Mask] || {} : {};
   const isAiMask =
     activeSubMask &&
     (activeSubMask.type === Mask.AiSubject ||

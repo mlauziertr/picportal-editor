@@ -4,6 +4,8 @@ import {
   Panel,
   UiVisibility,
   CullingSuggestions,
+  CullingPersistenceSummary,
+  CullingStageCode,
   PanelRegion,
   WorkspaceState,
 } from '../components/ui/AppProperties';
@@ -85,9 +87,21 @@ interface NegativeConversionModalState {
 interface CullingModalState {
   isOpen: boolean;
   suggestions: CullingSuggestions | null;
-  progress: { current: number; total: number; stage: string } | null;
+  progress: { current: number; total: number; stage: string; stageCode?: CullingStageCode } | null;
   error: string | null;
   pathsToCull: Array<string>;
+  folderPath: string | null;
+  isCancelling?: boolean;
+}
+
+export interface CullingResultsState {
+  isOpen: boolean;
+  folderPath: string | null;
+  suggestions: CullingSuggestions | null;
+  persistence: CullingPersistenceSummary | null;
+  selectedPath: string | null;
+  /** Bumped by Escape / Android back: the panel runs its guarded close (unapplied proposals ask first). */
+  closeRequest?: number;
 }
 
 const ALL_PANELS: Panel[] = [
@@ -265,9 +279,11 @@ export interface UIState {
   negativeModalState: NegativeConversionModalState;
   denoiseModalState: DenoiseModalState;
   cullingModalState: CullingModalState;
+  cullingResultsState: CullingResultsState;
   collageModalState: CollageModalState;
 
   setUI: (updater: Partial<UIState> | ((state: UIState) => Partial<UIState>)) => void;
+  requestCullingResultsClose: () => void;
   setPanel: (panel: Panel | null) => void;
   customEscapeHandler: (() => void) | null;
   setCustomEscapeHandler: (handler: (() => void) | null) => void;
@@ -375,10 +391,36 @@ export const useUIStore = create<UIState>((set, get) => ({
     progressMessage: null,
     isRaw: false,
   },
-  cullingModalState: { isOpen: false, suggestions: null, progress: null, error: null, pathsToCull: [] },
+  cullingModalState: {
+    isOpen: false,
+    suggestions: null,
+    progress: null,
+    error: null,
+    pathsToCull: [],
+    folderPath: null,
+  },
+  cullingResultsState: {
+    isOpen: false,
+    folderPath: null,
+    suggestions: null,
+    persistence: null,
+    selectedPath: null,
+  },
   collageModalState: { isOpen: false, sourceImages: [] },
 
   setUI: (updater) => set((state) => (typeof updater === 'function' ? updater(state) : updater)),
+
+  requestCullingResultsClose: () =>
+    set((state) =>
+      state.cullingResultsState.isOpen
+        ? {
+            cullingResultsState: {
+              ...state.cullingResultsState,
+              closeRequest: (state.cullingResultsState.closeRequest || 0) + 1,
+            },
+          }
+        : {},
+    ),
 
   setLayoutDragItem: (panel) => set({ activeLayoutDragItem: panel }),
 
@@ -393,12 +435,12 @@ export const useUIStore = create<UIState>((set, get) => ({
       const active = { ...state.activePanels };
 
       let fromRegion: PanelRegion | null = null;
-      (Object.keys(layout) as PanelRegion[]).forEach((r) => {
-        if (layout[r].includes(panel)) {
-          fromRegion = r;
-          layout[r] = layout[r].filter((p) => p !== panel);
+      for (const regionKey of Object.keys(layout) as PanelRegion[]) {
+        if (layout[regionKey].includes(panel)) {
+          fromRegion = regionKey;
+          layout[regionKey] = layout[regionKey].filter((item) => item !== panel);
         }
-      });
+      }
 
       if (!layout[toRegion].includes(panel)) layout[toRegion].push(panel);
 
@@ -428,12 +470,12 @@ export const useUIStore = create<UIState>((set, get) => ({
       const active = { ...state.activePanels };
 
       let fromRegion: PanelRegion | null = null;
-      (Object.keys(layout) as PanelRegion[]).forEach((r) => {
-        if (layout[r].includes(panel)) {
-          fromRegion = r;
-          layout[r] = layout[r].filter((p) => p !== panel);
+      for (const regionKey of Object.keys(layout) as PanelRegion[]) {
+        if (layout[regionKey].includes(panel)) {
+          fromRegion = regionKey;
+          layout[regionKey] = layout[regionKey].filter((item) => item !== panel);
         }
-      });
+      }
 
       const clampedIndex = Math.max(0, Math.min(index, layout[toRegion].length));
       layout[toRegion].splice(clampedIndex, 0, panel);

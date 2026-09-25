@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/CyberTimon/RapidRAW/assets/.github/assets/editor.jpg" alt="RapidRAW Editor">
+  <img src="https://raw.githubusercontent.com/CyberTimon/RapidRAW/assets/.github/assets/editor.jpg" alt="PicPortal Editor">
 </p>
 
 <div align="center">
@@ -17,13 +17,19 @@
 
 </div>
 
-# RapidRAW
+# PicPortal Editor
 
 > A beautiful, non-destructive, and GPU-accelerated RAW image editor built with performance in mind.
 
-RapidRAW is a modern, high-performance alternative to Adobe Lightroom®. It delivers a simple, beautiful editing experience in a lightweight package (under 20MB) for Windows, macOS, Linux, and Android.
+PicPortal Editor is an independent fork of [RapidRAW](https://github.com/CyberTimon/RapidRAW), a modern,
+high-performance alternative to Adobe Lightroom®. It delivers a simple, beautiful editing experience in a lightweight
+package for Windows, macOS, Linux, and Android.
 
-I started developing this project as a personal challenge when I was 18. My goal was to create a high-performance tool for my own photography workflow while deepening my understanding of React, WGSL and Rust.
+The release and automatic-update migration is separate from the PicPortal presentation branding. The download and
+documentation links below continue to point to the upstream RapidRAW project.
+
+RapidRAW was originally created by Timon Käch as a high-performance tool for his photography workflow and as a way to
+deepen his understanding of React, WGSL, and Rust.
 
 <table width="100%">
   <tr>
@@ -889,6 +895,10 @@ sudo dnf install libgphoto2-devel pkgconf-pkg-config
 </details>
 
 After installing the system dependencies, download the corresponding `_tethering` build from the [Releases](https://github.com/CyberTimon/RapidRAW/releases) page, or run/build from source using the `tethering` feature flag.
+
+## PicPortal Publishing
+
+PicPortal publishing starts only when you explicitly select exported JPEG, PNG, or WebP files and choose a destination gallery. Face and eye analysis stays local. Face embeddings and 220×220 face thumbnails are included only when the selected gallery has face filtering enabled; galleries without that setting never receive face-derived data.
 
 ## Command Line Interface (CLI)
 

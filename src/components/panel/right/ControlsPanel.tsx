@@ -1,5 +1,5 @@
-import React, { useCallback } from 'react';
-import { RotateCcw, Copy, ClipboardPaste, PencilSparkles, ChartArea } from 'lucide-react';
+import React, { useCallback, useState } from 'react';
+import { RotateCcw, Copy, ClipboardPaste, PencilSparkles, ChartArea, Palette, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
@@ -11,7 +11,13 @@ import EffectsPanel from '../../adjustments/Effects';
 import CollapsibleSection from '../../ui/CollapsibleSection';
 import Waveform from '../editor/Waveform';
 import Resizer from '../../ui/Resizer';
-import { Adjustments, SectionVisibility, INITIAL_ADJUSTMENTS, ADJUSTMENT_SECTIONS } from '../../../utils/adjustments';
+import {
+  AdjustmentSection,
+  Adjustments,
+  SectionVisibility,
+  INITIAL_ADJUSTMENTS,
+  ADJUSTMENT_SECTIONS,
+} from '../../../utils/adjustments';
 import { useContextMenu } from '../../../context/ContextMenuContext';
 import { OPTION_SEPARATOR, Orientation } from '../../ui/AppProperties';
 import Text from '../../ui/Text';
@@ -28,7 +34,18 @@ export default function Controls() {
   const { showContextMenu } = useContextMenu();
   const { isResizingWaveform, onToggleWaveform, setActiveWaveformChannel, handleWaveformResize } =
     useWaveformControls();
-  const { setAdjustments, handleAutoAdjustments, handleLutSelect, setLutPreviewOverride } = useEditorActions();
+  const { setAdjustments, handleAutoAdjustments, handleApplyStyle, handleLutSelect, setLutPreviewOverride } =
+    useEditorActions();
+  const [isApplyingStyle, setIsApplyingStyle] = useState(false);
+
+  const onApplyStyle = async () => {
+    setIsApplyingStyle(true);
+    try {
+      await handleApplyStyle();
+    } finally {
+      setIsApplyingStyle(false);
+    }
+  };
 
   const { appSettings, theme } = useSettingsStore(
     useShallow((state) => ({
@@ -93,7 +110,7 @@ export default function Controls() {
     [setUI],
   );
 
-  const handleToggleVisibility = (sectionName: string) => {
+  const handleToggleVisibility = (sectionName: AdjustmentSection) => {
     setAdjustments((prev: Adjustments) => {
       const currentVisibility: SectionVisibility = prev.sectionVisibility || INITIAL_ADJUSTMENTS.sectionVisibility;
       return {
@@ -109,8 +126,8 @@ export default function Controls() {
   const handleResetAdjustments = () => {
     setAdjustments((prev: Adjustments) => ({
       ...prev,
-      ...Object.keys(ADJUSTMENT_SECTIONS)
-        .flatMap((s) => ADJUSTMENT_SECTIONS[s])
+      ...(Object.keys(ADJUSTMENT_SECTIONS) as AdjustmentSection[])
+        .flatMap((section) => ADJUSTMENT_SECTIONS[section])
         .reduce((acc: any, key: string) => {
           acc[key] = INITIAL_ADJUSTMENTS[key as keyof Adjustments];
           return acc;
@@ -119,7 +136,7 @@ export default function Controls() {
     }));
   };
 
-  const handleToggleSection = (section: string) => {
+  const handleToggleSection = (section: AdjustmentSection) => {
     setCollapsibleState((prev: any) => {
       const isOpening = !prev[section];
       if (appSettings?.enableFocusMode && isOpening) {
@@ -134,7 +151,7 @@ export default function Controls() {
     });
   };
 
-  const handleSectionContextMenu = (event: any, sectionName: string) => {
+  const handleSectionContextMenu = (event: React.MouseEvent<HTMLDivElement>, sectionName: AdjustmentSection) => {
     event.preventDefault();
     event.stopPropagation();
 
@@ -221,6 +238,15 @@ export default function Controls() {
             <PencilSparkles size={18} />
           </button>
           <button
+            className="p-2 rounded-full hover:bg-surface disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            disabled={!selectedImage || isApplyingStyle}
+            onClick={onApplyStyle}
+            aria-label={t('style.apply')}
+            data-tooltip={t('style.applyTooltip')}
+          >
+            {isApplyingStyle ? <Loader2 size={18} className="animate-spin" /> : <Palette size={18} />}
+          </button>
+          <button
             className={clsx(
               'p-2 rounded-full transition-colors',
               isWaveformVisible ? 'bg-surface hover:bg-card-active' : 'hover:bg-surface',
@@ -273,7 +299,7 @@ export default function Controls() {
 
       <div className="grow overflow-y-scroll p-3 flex flex-col gap-2">
         {selectedImage ? (
-          Object.keys(ADJUSTMENT_SECTIONS).map((sectionName: string) => {
+          (Object.keys(ADJUSTMENT_SECTIONS) as AdjustmentSection[]).map((sectionName) => {
             const SectionComponent: any = {
               basic: BasicAdjustments,
               curves: CurveGraph,
@@ -288,9 +314,11 @@ export default function Controls() {
             return (
               <div className="shrink-0 group" key={sectionName}>
                 <CollapsibleSection
-                  isContentVisible={sectionVisibility[sectionName as keyof SectionVisibility]}
-                  isOpen={collapsibleSectionsState[sectionName as keyof typeof collapsibleSectionsState]}
-                  onContextMenu={(e: any) => handleSectionContextMenu(e, sectionName)}
+                  isContentVisible={sectionVisibility[sectionName]}
+                  isOpen={collapsibleSectionsState[sectionName]}
+                  onContextMenu={(event: React.MouseEvent<HTMLDivElement>) =>
+                    handleSectionContextMenu(event, sectionName)
+                  }
                   onToggle={() => handleToggleSection(sectionName)}
                   onToggleVisibility={() => handleToggleVisibility(sectionName)}
                   title={title}

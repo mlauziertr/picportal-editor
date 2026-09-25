@@ -28,6 +28,7 @@ import { useLibraryStore } from '../../../store/useLibraryStore';
 import { useSettingsStore } from '../../../store/useSettingsStore';
 import { useLibraryActions } from '../../../hooks/useLibraryActions';
 import { COLOR_LABELS, Color } from '../../../utils/adjustments';
+import { splitVirtualCopyPath } from '../../../utils/virtualCopyPath';
 import { expandGroupedPaths } from '../../../utils/imageGrouping';
 import { IconAperture, IconFocalLength, IconIso, IconShutter } from '../editor/ExifIcons';
 
@@ -205,10 +206,9 @@ function CullingPreview({
     panRef.current = pan;
   }, [zoom, pan]);
 
-  const fullFileName = image.path.split(/[\\/]/).pop() || '';
-  const parts = fullFileName.split('?vc=');
-  const baseName = parts[0];
-  const isVirtualCopy = parts.length > 1;
+  const virtualCopy = splitVirtualCopyPath(image.path);
+  const baseName = (virtualCopy?.sourcePath ?? image.path).split(/[\\/]/).pop() || '';
+  const isVirtualCopy = virtualCopy !== null;
 
   const updateFitScale = useCallback(() => {
     if (!containerRef.current || !imageRef.current) return;
@@ -990,6 +990,8 @@ const Row = React.memo(
   },
 );
 
+const CullingListRow = (props: React.ComponentProps<typeof Row>): React.ReactElement | null => <Row {...props} />;
+
 export default function CullingView(props: any) {
   const { t } = useTranslation();
   const {
@@ -1246,7 +1248,7 @@ export default function CullingView(props: any) {
             listRef={setListHandle}
             rowCount={imageList.length}
             rowHeight={sidebarWidth - 16}
-            rowComponent={Row}
+            rowComponent={CullingListRow}
             rowProps={rowProps}
             className="custom-scrollbar"
           />

@@ -18,6 +18,7 @@ mod culling;
 mod denoising;
 mod exif_processing;
 mod export_processing;
+mod face_processing;
 mod file_management;
 mod focus_stacking;
 mod formats;
@@ -30,14 +31,18 @@ mod inpainting;
 mod launch_request;
 mod lens_blur;
 mod lens_correction;
+mod local_derivatives;
 mod lut_processing;
 mod mask_generation;
 mod multi_exposure;
 mod negative_conversion;
 mod panorama_stitching;
 mod panorama_utils;
+mod picportal;
 mod preset_converter;
 mod raw_processing;
+mod style_model;
+mod subject_inference;
 mod tagging;
 mod tagging_utils;
 mod window_customizer;
@@ -71,8 +76,8 @@ use tempfile::NamedTempFile;
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::cache_utils::{
-    DecodedImageCache, calculate_full_job_hash, calculate_geometry_hash, calculate_transform_hash,
-    calculate_visual_hash,
+    DecodedImageCache, calculate_full_job_hash, calculate_image_cache_hash,
+    calculate_transform_hash, calculate_visual_hash,
 };
 use crate::file_management::{parse_virtual_path, read_file_mapped};
 use crate::formats::is_raw_file;
@@ -85,7 +90,8 @@ use crate::image_processing::{
     resolve_tonemapper_override_from_handle, warp_image_geometry,
 };
 use crate::mask_generation::{
-    MaskDefinition, generate_mask_bitmap, get_cached_or_generate_mask,
+    MaskDefinition, generate_mask_bitmap, get_cached_full_warped_image_for_image,
+    get_cached_or_generate_mask, get_cached_or_generate_mask_for_image,
     resolve_warped_image_for_masks,
 };
 use crate::window_customizer::PinchZoomDisablePlugin;
@@ -94,6 +100,7 @@ pub use android_integration::*;
 pub use app_settings::*;
 pub use app_state::*;
 pub use launch_request::*;
+pub use picportal::PicPortalState;
 use tagging_utils::{candidates, hierarchy};
 
 #[cfg(target_os = "macos")]
@@ -154,7 +161,8 @@ pub fn generate_transformed_preview(
     adjustments: &serde_json::Value,
     preview_dim: u32,
 ) -> Result<(DynamicImage, f32, (f32, f32)), String> {
-    let transform_hash = calculate_transform_hash(adjustments);
+    let transform_hash =
+        calculate_image_cache_hash(&loaded_image.path, calculate_transform_hash(adjustments));
 
     let (transformed_full_res, unscaled_crop_offset) = {
         let mut cache_lock = state
@@ -199,7 +207,10 @@ fn compute_full_transformed_res(
     loaded_image: &LoadedImage,
     adjustments: &serde_json::Value,
 ) -> Result<(Arc<DynamicImage>, (f32, f32)), String> {
-    let geo_hash = crate::cache_utils::calculate_patched_warped_hash(adjustments);
+    let geo_hash = calculate_image_cache_hash(
+        &loaded_image.path,
+        crate::cache_utils::calculate_patched_warped_hash(adjustments),
+    );
 
     let warped_arc = {
         let mut cache_lock = state
@@ -285,41 +296,22 @@ fn cancel_thumbnail_generation(
 
 pub fn get_cached_full_warped_image(
     state: &tauri::State<AppState>,
-    js_adjustments: &serde_json::Value,
+    adjustments: &serde_json::Value,
 ) -> Result<Arc<DynamicImage>, String> {
-    let geo_hash = calculate_geometry_hash(js_adjustments);
+    let loaded_image = state
+        .original_image
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+        .ok_or("No original image loaded")?;
 
-    {
-        let cache_lock = state
-            .full_warped_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some((hash, img)) = cache_lock.as_ref()
-            && *hash == geo_hash
-        {
-            return Ok(Arc::clone(img));
-        }
-    }
-
-    let (base_arc, is_raw) = get_original_image(state)?;
-    let mut cow_image = Cow::Borrowed(base_arc.as_ref());
-
-    if is_raw {
-        apply_cpu_default_raw_processing(cow_image.to_mut());
-    }
-
-    let warped_image = apply_geometry_warp(cow_image, js_adjustments).into_owned();
-    let warped_arc = Arc::new(warped_image);
-
-    {
-        let mut cache_lock = state
-            .full_warped_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        *cache_lock = Some((geo_hash, Arc::clone(&warped_arc)));
-    }
-
-    Ok(warped_arc)
+    Ok(get_cached_full_warped_image_for_image(
+        &state.full_warped_cache,
+        &loaded_image.path,
+        &loaded_image.image,
+        loaded_image.is_raw,
+        adjustments,
+    ))
 }
 
 #[tauri::command]
@@ -390,7 +382,10 @@ fn process_preview_job(
         .clone();
     drop(loaded_image_guard);
 
-    let new_transform_hash = calculate_transform_hash(&adjustments_clone);
+    let new_transform_hash = calculate_image_cache_hash(
+        &loaded_image.path,
+        calculate_transform_hash(&adjustments_clone),
+    );
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
     let live_quality = settings.live_preview_quality.as_deref().unwrap_or("high");
 
@@ -2139,6 +2134,7 @@ pub fn run() {
             disks_cache_refreshing: AtomicBool::new(false),
             camera_session: Mutex::new(camera_tethering::CameraSession::new()),
         })
+        .manage(PicPortalState::default())
         .invoke_handler(tauri::generate_handler![
             apply_adjustments,
             generate_preview_for_path,
@@ -2221,6 +2217,8 @@ pub fn run() {
             file_management::reset_adjustments_for_paths,
             file_management::apply_auto_lens_correction_to_paths,
             file_management::apply_auto_adjustments_to_paths,
+            style_model::apply_style_to_paths,
+            style_model::calculate_style_adjustments,
             file_management::handle_import_presets_from_file,
             file_management::handle_import_legacy_presets_from_file,
             file_management::handle_import_presets_from_files,
@@ -2242,6 +2240,16 @@ pub fn run() {
             tagging::add_tag_for_paths,
             tagging::remove_tag_for_paths,
             culling::cull_images,
+            culling::cancel_culling,
+            culling::culling_capabilities,
+            culling::culling_session,
+            culling::dismiss_culling_result,
+            picportal::picportal_login,
+            picportal::picportal_restore_session,
+            picportal::picportal_logout,
+            picportal::picportal_galleries,
+            picportal::picportal_create_gallery,
+            picportal::picportal_export,
             lens_correction::get_lensfun_makers,
             lens_correction::get_lensfun_lenses_for_maker,
             lens_correction::autodetect_lens,

@@ -2,7 +2,8 @@ import { useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import debounce from 'lodash.debounce';
 import { toast } from 'react-toastify';
-import { useEditorStore } from '../store/useEditorStore';
+import { useTranslation } from 'react-i18next';
+import { editorPhotoRevision, useEditorStore } from '../store/useEditorStore';
 import { useLibraryStore } from '../store/useLibraryStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { useProcessStore } from '../store/useProcessStore';
@@ -17,6 +18,12 @@ import {
 import { calculateCenteredCrop } from '../utils/cropUtils';
 import { Invokes } from '../components/ui/AppProperties';
 import { globalImageCache } from '../utils/ImageLRUCache';
+import {
+  StyleEditorProposal,
+  applyStyleToActivePhoto,
+  styleErrorMessage,
+  styleFallbackNotice,
+} from '../utils/styleModel';
 
 export const debouncedSetHistory = debounce((newAdj: Adjustments) => {
   useEditorStore.getState().pushHistory(newAdj);
@@ -30,6 +37,7 @@ export const debouncedSave = debounce((path: string, adjustmentsToSave: Adjustme
 }, 300);
 
 export function useEditorActions() {
+  const { t } = useTranslation();
   const setEditor = useEditorStore((s) => s.setEditor);
 
   const setAdjustments = useCallback(
@@ -84,6 +92,33 @@ export function useEditorActions() {
       toast.error(`Failed to apply auto adjustments: ${err}`);
     }
   }, [setAdjustments]);
+
+  const handleApplyStyle = useCallback(async () => {
+    if (!useEditorStore.getState().selectedImage?.isReady) return;
+    try {
+      const result = await applyStyleToActivePhoto<Adjustments>(
+        {
+          current: () => {
+            const { selectedImage, adjustments } = useEditorStore.getState();
+            return { path: selectedImage?.path ?? null, adjustments, revision: editorPhotoRevision() };
+          },
+          apply: (adjustments) => setAdjustments(() => adjustments),
+        },
+        ({ path, adjustments }) =>
+          invoke<StyleEditorProposal>(Invokes.CalculateStyleAdjustments, { path, currentAdjustments: adjustments }),
+      );
+      if (result.status === 'stale') {
+        toast.info(t('style.errors.stale'));
+        return;
+      }
+      if (result.status !== 'applied') return;
+      const notice = styleFallbackNotice(t, result.proposal.model);
+      if (notice) toast.info(notice);
+    } catch (err) {
+      console.error('Failed to apply style:', err);
+      toast.error(styleErrorMessage(t, err));
+    }
+  }, [setAdjustments, t]);
 
   const toggleShowOriginal = useCallback(() => {
     setEditor((state) => {
@@ -289,7 +324,10 @@ export function useEditorActions() {
 
       if (!copiedAdjustments || !appSettings) return;
 
-      const { mode, includedAdjustments } = appSettings.copyPasteSettings;
+      const { mode, includedAdjustments } = appSettings.copyPasteSettings ?? {
+        mode: PasteMode.Merge,
+        includedAdjustments: COPYABLE_ADJUSTMENT_KEYS,
+      };
       const adjustmentsToApply: Partial<Adjustments> = {};
 
       for (const key of includedAdjustments) {
@@ -402,6 +440,7 @@ export function useEditorActions() {
     setAdjustments,
     handleRotate,
     handleAutoAdjustments,
+    handleApplyStyle,
     handleLutSelect,
     setLutPreviewOverride,
     handleResetAdjustments,
