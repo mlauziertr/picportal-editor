@@ -488,6 +488,8 @@ export interface CullingSuggestions {
 }
 
 export interface CullingPersistenceSummary {
+  /** Identifies the application, so an older undo cannot overwrite a newer one. */
+  applicationId: number;
   succeededRatings: Record<string, number>;
   succeededColors: Record<string, string | null>;
   failedRatings: Array<{ rating: number; paths: string[]; error: unknown }>;

@@ -62,16 +62,56 @@ test('culling plan writes only automatic values that actually change', () => {
   ]);
 });
 
+// State after applying: the color write for manual-rating.jpg failed.
+const writtenRatings = { 'auto.jpg': 4, 'manual-color.jpg': 3 };
+const writtenColors: Record<string, string | null> = { 'auto.jpg': 'green' };
+const afterApply = images.map((image) =>
+  image.path === 'auto.jpg'
+    ? { ...image, rating: 4, tags: ['keep', 'color:green'] }
+    : image.path === 'manual-color.jpg'
+      ? { ...image, rating: 3 }
+      : image,
+);
+
 test('undo restores previous values only for what was really written', () => {
   const plan = planCullingApplication(proposals, images);
-  // The color write for manual-rating.jpg failed: it must not be "restored".
-  const undo = buildCullingUndoAssignments(
-    plan.undo,
-    { 'auto.jpg': 4, 'manual-color.jpg': 3 },
-    { 'auto.jpg': 'green' },
-  );
+  // manual-rating.jpg's color write failed: it must not be "restored".
+  const undo = buildCullingUndoAssignments(plan.undo, writtenRatings, writtenColors, afterApply);
   assert.deepEqual(undo.ratings, { 'auto.jpg': 0, 'manual-color.jpg': 2 });
   assert.deepEqual(undo.colors, { 'auto.jpg': null });
+  assert.deepEqual(undo.skippedPaths, []);
+});
+
+test('undo leaves photos changed after the application untouched', () => {
+  const plan = planCullingApplication(proposals, images);
+  // A newer application B rated auto.jpg 2; the user then starred manual-color.jpg by hand.
+  const later = afterApply.map((image) =>
+    image.path === 'auto.jpg'
+      ? { ...image, rating: 2 }
+      : image.path === 'manual-color.jpg'
+        ? { ...image, rating: 5, rating_is_manual: true }
+        : image,
+  );
+  const undo = buildCullingUndoAssignments(plan.undo, writtenRatings, writtenColors, later);
+  assert.deepEqual(undo.ratings, {});
+  // auto.jpg still shows the green label A wrote, but one of its values moved on: it is reported.
+  assert.deepEqual(undo.colors, { 'auto.jpg': null });
+  assert.deepEqual(undo.skippedPaths, ['auto.jpg', 'manual-color.jpg']);
+});
+
+test('undo of an older application yields to a newer one with the same values', () => {
+  const plan = planCullingApplication(proposals, images);
+  // B rewrote the same values on auto.jpg: only the writer record tells them apart.
+  const undo = buildCullingUndoAssignments(
+    plan.undo,
+    writtenRatings,
+    writtenColors,
+    afterApply,
+    (path) => path !== 'auto.jpg',
+  );
+  assert.deepEqual(undo.ratings, { 'manual-color.jpg': 2 });
+  assert.deepEqual(undo.colors, {});
+  assert.deepEqual(undo.skippedPaths, ['auto.jpg']);
 });
 
 test('color label is read from color: tags', () => {

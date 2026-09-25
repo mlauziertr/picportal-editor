@@ -92,17 +92,50 @@ export function planCullingApplication(
  * Assignments that restore the pre-application values, limited to what was
  * really written. Only automatic values were overwritten (manual ones are
  * protected), so restoring them as automatic reproduces the previous flags.
+ *
+ * Undo is conditional: a value is restored only while the photo still holds
+ * exactly what this application wrote, as an automatic value, and no later
+ * application touched it (`isLatestWriter`). Anything changed since — a manual
+ * edit or a newer application — is left as is and reported in `skippedPaths`.
  */
 export function buildCullingUndoAssignments(
   undo: readonly CullingUndoEntry[],
   writtenRatings: Record<string, number>,
   writtenColors: Record<string, string | null>,
-): { ratings: Record<string, number>; colors: Record<string, string | null> } {
+  currentImages: readonly CullingImageState[],
+  isLatestWriter: (path: string) => boolean = () => true,
+): { ratings: Record<string, number>; colors: Record<string, string | null>; skippedPaths: string[] } {
+  const imagesByPath = new Map(currentImages.map((image) => [image.path, image]));
   const ratings: Record<string, number> = {};
   const colors: Record<string, string | null> = {};
+  const skippedPaths: string[] = [];
   for (const entry of undo) {
-    if (entry.path in writtenRatings) ratings[entry.path] = entry.rating;
-    if (entry.path in writtenColors) colors[entry.path] = entry.colorLabel;
+    const wroteRating = entry.path in writtenRatings;
+    const wroteColor = entry.path in writtenColors;
+    if (!wroteRating && !wroteColor) continue;
+    const image = imagesByPath.get(entry.path);
+    const latest = image !== undefined && isLatestWriter(entry.path);
+    let skipped = false;
+    if (wroteRating) {
+      if (image && latest && image.rating_is_manual === false && (image.rating ?? 0) === writtenRatings[entry.path]) {
+        ratings[entry.path] = entry.rating;
+      } else {
+        skipped = true;
+      }
+    }
+    if (wroteColor) {
+      if (
+        image &&
+        latest &&
+        image.color_label_is_manual === false &&
+        colorLabelFromTags(image.tags) === (writtenColors[entry.path] ?? null)
+      ) {
+        colors[entry.path] = entry.colorLabel;
+      } else {
+        skipped = true;
+      }
+    }
+    if (skipped) skippedPaths.push(entry.path);
   }
-  return { ratings, colors };
+  return { ratings, colors, skippedPaths };
 }

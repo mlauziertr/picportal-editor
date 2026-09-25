@@ -8,6 +8,18 @@ import {
   persistRatingAssignments,
 } from './ratingPersistence';
 
+// Last application (or undo) that wrote each photo, so an older "Undo" never
+// overwrites a newer decision. In memory only, like the undo journal.
+let nextApplicationId = 1;
+const latestWriterByPath = new Map<string, number>();
+
+function recordWriter(paths: Iterable<string>, applicationId: number | null) {
+  for (const path of paths) {
+    if (applicationId === null) latestWriterByPath.delete(path);
+    else latestWriterByPath.set(path, applicationId);
+  }
+}
+
 async function persistAutomaticAssignments(ratings: Record<string, number>, colors: Record<string, string | null>) {
   // Ratings and labels share one sidecar file. Keep the two passes ordered so
   // concurrent read/modify/write calls cannot discard the other decision.
@@ -58,8 +70,12 @@ async function persistAutomaticAssignments(ratings: Record<string, number>, colo
 /** Writes the culling proposals the user chose to apply; nothing is written before this call. */
 export async function applyCullingSuggestions(suggestions: CullingSuggestions): Promise<CullingPersistenceSummary> {
   const plan = planCullingApplication(suggestions, useLibraryStore.getState().imageList);
+  const applicationId = nextApplicationId++;
+  // Claimed before writing: an older undo started meanwhile must already see this application.
+  recordWriter(new Set([...Object.keys(plan.ratings), ...Object.keys(plan.colors)]), applicationId);
   const { ratingResult, colorResult } = await persistAutomaticAssignments(plan.ratings, plan.colors);
   return {
+    applicationId,
     succeededRatings: ratingResult.succeeded,
     succeededColors: colorResult.succeeded,
     failedRatings: ratingResult.failures,
@@ -69,13 +85,22 @@ export async function applyCullingSuggestions(suggestions: CullingSuggestions): 
   };
 }
 
-/** Restores the rating and color label each photo had before `applyCullingSuggestions`. */
-export async function undoCullingApplication(summary: CullingPersistenceSummary): Promise<number> {
-  const { ratings, colors } = buildCullingUndoAssignments(
+/**
+ * Restores the rating and color label each photo had before `applyCullingSuggestions`,
+ * only where this application's value is still in place (see `buildCullingUndoAssignments`).
+ */
+export async function undoCullingApplication(
+  summary: CullingPersistenceSummary,
+): Promise<{ restored: number; skipped: number }> {
+  const { ratings, colors, skippedPaths } = buildCullingUndoAssignments(
     summary.undo,
     summary.succeededRatings,
     summary.succeededColors,
+    useLibraryStore.getState().imageList,
+    (path) => latestWriterByPath.get(path) === summary.applicationId,
   );
+  const restoredPaths = new Set([...Object.keys(ratings), ...Object.keys(colors)]);
+  recordWriter(restoredPaths, null);
   const { ratingResult, colorResult } = await persistAutomaticAssignments(ratings, colors);
   const failures = ratingResult.failures.length + colorResult.failures.length;
   if (failures > 0) {
@@ -83,5 +108,5 @@ export async function undoCullingApplication(summary: CullingPersistenceSummary)
       [...ratingResult.failures, ...colorResult.failures].map((failure) => String(failure.error)).join('; '),
     );
   }
-  return new Set([...Object.keys(ratings), ...Object.keys(colors)]).size;
+  return { restored: restoredPaths.size, skipped: skippedPaths.length };
 }

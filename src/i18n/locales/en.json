@@ -1431,6 +1431,8 @@
       "applied_other": "Decisions applied to {{count}} photos.",
       "undoApply": "Undo",
       "undone": "Previous ratings and labels restored.",
+      "undoneSkipped_one": "{{count}} photo changed since then was left as is.",
+      "undoneSkipped_other": "{{count}} photos changed since then were left as is.",
       "discardConfirmTitle": "Close without applying?",
       "discardConfirmBody": "The proposals will be lost. Your photos have not been changed.",
       "discardConfirmAction": "Close without applying",

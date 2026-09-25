@@ -46,9 +46,10 @@ function AppliedToast({ count, persistence }: { count: number; persistence: Cull
         onClick={async () => {
           setIsUndoing(true);
           try {
-            await undoCullingApplication(persistence);
+            const { skipped } = await undoCullingApplication(persistence);
             toast.dismiss();
             toast.info(t('modals.culling.undone'));
+            if (skipped > 0) toast.info(t('modals.culling.undoneSkipped', { count: skipped }));
           } catch (undoError) {
             setIsUndoing(false);
             toast.error(String(undoError));
