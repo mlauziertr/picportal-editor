@@ -83,8 +83,12 @@ export function applyCullingSuggestions(suggestions: CullingSuggestions): Promis
   return serializeCullingWrite(async () => {
     const plan = planCullingApplication(suggestions, useLibraryStore.getState().imageList);
     const applicationId = nextApplicationId++;
-    recordWriter(new Set([...Object.keys(plan.ratings), ...Object.keys(plan.colors)]), applicationId);
     const { ratingResult, colorResult } = await persistAutomaticAssignments(plan.ratings, plan.colors);
+    // Only a confirmed write takes a photo over; a failed one leaves the previous writer's undo usable.
+    recordWriter(
+      new Set([...Object.keys(ratingResult.succeeded), ...Object.keys(colorResult.succeeded)]),
+      applicationId,
+    );
     return {
       applicationId,
       succeededRatings: ratingResult.succeeded,
@@ -113,8 +117,16 @@ export function undoCullingApplication(
       (path) => latestWriterByPath.get(path) === summary.applicationId,
     );
     const restoredPaths = new Set([...Object.keys(ratings), ...Object.keys(colors)]);
-    recordWriter(restoredPaths, null);
     const { ratingResult, colorResult } = await persistAutomaticAssignments(ratings, colors);
+    // A photo stays this application's until every one of its restores is confirmed, so a failed undo can be retried.
+    recordWriter(
+      [...restoredPaths].filter(
+        (path) =>
+          (!(path in ratings) || path in ratingResult.succeeded) &&
+          (!(path in colors) || path in colorResult.succeeded),
+      ),
+      null,
+    );
     const failures = ratingResult.failures.length + colorResult.failures.length;
     if (failures > 0) {
       throw new Error(
