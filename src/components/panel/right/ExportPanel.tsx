@@ -35,6 +35,11 @@ import type { Adjustments } from '../../../utils/adjustments';
 import { valueForPath } from '../../../utils/pathBoundSnapshot';
 import { useUIStore } from '../../../store/useUIStore';
 import PicPortalPanel, { PicPortalExportOptions } from './PicPortalPanel';
+import {
+  isPicPortalCommandError,
+  PicPortalCommandError,
+  picPortalErrorMessage,
+} from '../../../utils/picPortalSessionUi';
 
 interface ExportPanelProps {
   exportState: ExportState;
@@ -589,8 +594,9 @@ export default function ExportPanel({
       const result = await invoke<{
         completed: number;
         failed: number;
+        pending: number;
         cancelled: boolean;
-        items: Array<{ path: string; state: string; error?: string | null }>;
+        items: Array<{ path: string; state: string; error?: PicPortalCommandError | null }>;
       }>(Invokes.PicPortalExport, {
         paths: pathsToExport,
         baseOriginFolders: rootPaths,
@@ -608,7 +614,7 @@ export default function ExportPanel({
           errorMessage: '',
           progress: { current: result.completed, total: numImages },
         });
-      } else if (result.failed > 0) {
+      } else if (result.failed > 0 || result.pending > 0) {
         setExportState({
           status: Status.Error,
           errorMessage: t('picportal.partialFailure', {
@@ -623,10 +629,11 @@ export default function ExportPanel({
         setExportState({ status: Status.Success, progress: { current: result.completed, total: numImages } });
       }
     } catch (error) {
-      const message = String(error);
+      const message = picPortalErrorMessage(error);
+      const cancelled = isPicPortalCommandError(error) ? error.code === 'cancelled' : message.includes('cancelled');
       setExportState({
-        status: message.includes('cancelled') ? Status.Cancelled : Status.Error,
-        errorMessage: message.includes('cancelled') ? '' : message,
+        status: cancelled ? Status.Cancelled : Status.Error,
+        errorMessage: cancelled ? '' : message,
         progress,
       });
     }
