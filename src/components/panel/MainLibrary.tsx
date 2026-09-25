@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
 import { open } from '@tauri-apps/plugin-shell';
 import {
@@ -32,6 +33,7 @@ import {
   RawStatus,
   EditedStatus,
   LibraryDisplayMode,
+  Invokes,
 } from '../ui/AppProperties';
 import { GroupBadgeInfo, GroupId } from '../../utils/imageGrouping';
 import { ImportState, Status } from '../ui/ExportImportProperties';
@@ -276,13 +278,22 @@ export default function MainLibrary(props: MainLibraryProps) {
     }
   }, [isBusyDelayed]);
 
+  const closeCullingResults = useCallback(() => {
+    setUI((state) => ({ cullingResultsState: { ...state.cullingResultsState, isOpen: false } }));
+    // Closed on purpose: a later reload must not bring these proposals back.
+    invoke(Invokes.DismissCullingResult).catch((error) => console.error('Failed to dismiss culling result:', error));
+  }, [setUI]);
+
   useEffect(() => {
-    if (cullingResultsState.isOpen && cullingResultsState.folderPath !== props.currentFolderPath) {
-      setUI((state) => ({
-        cullingResultsState: { ...state.cullingResultsState, isOpen: false },
-      }));
+    // No folder yet (e.g. still restoring after a reload) is not a folder change.
+    if (
+      cullingResultsState.isOpen &&
+      props.currentFolderPath !== null &&
+      cullingResultsState.folderPath !== props.currentFolderPath
+    ) {
+      closeCullingResults();
     }
-  }, [cullingResultsState.folderPath, cullingResultsState.isOpen, props.currentFolderPath, setUI]);
+  }, [cullingResultsState.folderPath, cullingResultsState.isOpen, props.currentFolderPath, closeCullingResults]);
 
   useEffect(() => {
     const compareVersions = (v1: string, v2: string) => {
@@ -657,7 +668,7 @@ export default function MainLibrary(props: MainLibraryProps) {
           persistence={cullingResultsState.persistence}
           folderPath={cullingResultsState.folderPath}
           initialSelectedPath={cullingResultsState.selectedPath}
-          onClose={() => setUI((state) => ({ cullingResultsState: { ...state.cullingResultsState, isOpen: false } }))}
+          onClose={closeCullingResults}
         />
       )}
       {props.isAndroid && (

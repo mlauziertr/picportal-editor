@@ -18,7 +18,7 @@ import ConfirmModal from './ConfirmModal';
 import ImportSettingsModal from './ImportSettingsModal';
 import CullingModal from './CullingModal';
 import CollageModal from './CollageModal';
-import { AppSettings, AlbumItem, AlbumGroup, CullingPersistenceSummary, CullingSuggestions } from '../ui/AppProperties';
+import { AppSettings, AlbumItem, AlbumGroup } from '../ui/AppProperties';
 import { CopyPasteSettings } from '../../utils/adjustments';
 
 export interface AppModalsProps {
@@ -37,7 +37,6 @@ export interface AppModalsProps {
   handleRenameFolder: (newName: string) => Promise<void>;
   handleSaveRename: (nameTemplate: string) => Promise<void>;
   handleStartImport: (settings: any) => Promise<void>;
-  handleApplyCulling: (suggestions: CullingSuggestions) => Promise<CullingPersistenceSummary>;
   executeDelete: (paths: string[], options: any) => Promise<void>;
   handleSaveCollage: (base64Data: string, firstPath: string) => Promise<string>;
   handleCreateAlbumItem: (name: string, type: 'album' | 'group') => Promise<void>;
@@ -336,33 +335,9 @@ export default function AppModals(props: AppModalsProps) {
           })
         }
         progress={cullingModalState.progress}
-        suggestions={cullingModalState.suggestions}
         error={cullingModalState.error}
         imagePaths={cullingModalState.pathsToCull}
         folderPath={cullingModalState.folderPath}
-        onComplete={async (completedSuggestions) => {
-          const persistence = await props.handleApplyCulling(completedSuggestions);
-          await props.refreshImageList().catch((refreshError) => {
-            console.error('Culling result reconciliation failed:', refreshError);
-          });
-          setUI({
-            cullingModalState: {
-              isOpen: false,
-              progress: null,
-              suggestions: null,
-              error: null,
-              pathsToCull: [],
-              folderPath: null,
-            },
-            cullingResultsState: {
-              isOpen: true,
-              folderPath: cullingModalState.folderPath,
-              suggestions: completedSuggestions,
-              persistence,
-              selectedPath: completedSuggestions.results[0]?.path || null,
-            },
-          });
-        }}
         onError={(err) => {
           setUI((state) => ({ cullingModalState: { ...state.cullingModalState, error: err, progress: null } }));
         }}

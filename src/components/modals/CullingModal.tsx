@@ -1,8 +1,16 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useTranslation } from 'react-i18next';
-import { ChevronDown, ChevronUp, Loader2, Sparkles, XCircle } from 'lucide-react';
-import { CullingSettings, CullingSuggestions, Invokes, Progress } from '../ui/AppProperties';
+import { toast } from 'react-toastify';
+import { CheckCircle, ChevronDown, ChevronUp, CircleDashed, Sparkles, X, XCircle } from 'lucide-react';
+import {
+  CULLING_ALREADY_RUNNING,
+  CULLING_CANCELLED,
+  CullingCapabilities,
+  CullingSettings,
+  Invokes,
+  Progress,
+} from '../ui/AppProperties';
 import Button from '../ui/Button';
 import Switch from '../ui/Switch';
 import Text from '../ui/Text';
@@ -12,11 +20,9 @@ interface CullingModalProps {
   isOpen: boolean;
   onClose(): void;
   progress: Progress | null;
-  suggestions: CullingSuggestions | null;
   error: string | null;
   imagePaths: string[];
   folderPath: string | null;
-  onComplete(suggestions: CullingSuggestions, settings: CullingSettings): Promise<void>;
   onError(error: string): void;
 }
 
@@ -24,8 +30,9 @@ const DEFAULT_SETTINGS: CullingSettings = {
   selectionAmount: 'standard',
   blurSeverity: 'moderate',
   detectDuplicates: true,
-  detectBlurry: true,
-  detectClosedEyes: true,
+  // Off by default for v1: measured unreliable on real photos (MAX-21), kept as opt-in experiments.
+  detectBlurry: false,
+  detectClosedEyes: false,
   detectHighlights: true,
   detectSubject: true,
   subjectProfile: 'general',
@@ -87,54 +94,129 @@ export default function CullingModal({
   isOpen,
   onClose,
   progress,
-  suggestions,
   error,
   imagePaths,
   folderPath,
-  onComplete,
   onError,
 }: CullingModalProps) {
   const { t } = useTranslation();
   const [settings, setSettings] = useState<CullingSettings>(DEFAULT_SETTINGS);
   const [isCustomizeOpen, setIsCustomizeOpen] = useState(false);
-  const [isCompleting, setIsCompleting] = useState(false);
-  const completionRef = useRef<CullingSuggestions | null>(null);
+  const [capabilities, setCapabilities] = useState<CullingCapabilities | null>(null);
+  const [isCancelling, setIsCancelling] = useState(false);
   const startInProgressRef = useRef(false);
 
   useEffect(() => {
     if (!isOpen) {
-      completionRef.current = null;
-      setIsCompleting(false);
       setIsCustomizeOpen(false);
+      setIsCancelling(false);
+      setCapabilities(null);
+      return;
     }
+    let active = true;
+    invoke<CullingCapabilities>(Invokes.CullingCapabilities)
+      .then((result) => {
+        if (!active) return;
+        setCapabilities(result);
+        // Optional detectors that cannot run start disabled instead of failing silently.
+        setSettings((current) => ({
+          ...current,
+          detectSubject: current.detectSubject && result.subject === 'ready',
+          detectClosedEyes: current.detectClosedEyes && result.faces === 'ready',
+        }));
+      })
+      .catch((capabilityError) => {
+        console.error('Culling capability check failed:', capabilityError);
+      });
+    return () => {
+      active = false;
+    };
   }, [isOpen]);
 
   useEffect(() => {
-    if (!isOpen || !suggestions || completionRef.current === suggestions) return;
-    completionRef.current = suggestions;
-    setIsCompleting(true);
-    onComplete(suggestions, settings).catch((completionError) => {
-      setIsCompleting(false);
-      onError(String(completionError));
-    });
-  }, [isOpen, suggestions, settings, onComplete, onError]);
+    if (!progress) setIsCancelling(false);
+  }, [progress]);
 
   const handleStartCulling = useCallback(async () => {
     if (imagePaths.length === 0 || startInProgressRef.current) return;
     startInProgressRef.current = true;
     try {
-      await invoke(Invokes.CullImages, { paths: imagePaths, settings });
+      await invoke(Invokes.CullImages, { paths: imagePaths, settings, folderPath });
     } catch (startError) {
-      onError(String(startError));
+      const message = String(startError);
+      if (message === CULLING_CANCELLED) return;
+      if (message === CULLING_ALREADY_RUNNING) {
+        toast.info(t('modals.culling.errors.alreadyRunning'));
+        return;
+      }
+      onError(message);
     } finally {
       startInProgressRef.current = false;
     }
-  }, [imagePaths, settings, onError]);
+  }, [imagePaths, settings, folderPath, onError, t]);
+
+  const handleCancelAnalysis = useCallback(async () => {
+    setIsCancelling(true);
+    try {
+      const wasRunning = await invoke<boolean>(Invokes.CancelCulling);
+      if (!wasRunning) onClose();
+    } catch (cancelError) {
+      setIsCancelling(false);
+      console.error('Failed to cancel culling:', cancelError);
+    }
+  }, [onClose]);
+
+  const recoveredRun = Boolean(capabilities?.running) && !progress;
+  const isRunning = Boolean(progress) || recoveredRun;
+
+  // Closing the window while the analysis runs cancels it (nothing has been written yet).
+  const handleClose = useCallback(() => {
+    if (isRunning) {
+      void handleCancelAnalysis();
+    } else {
+      onClose();
+    }
+  }, [isRunning, handleCancelAnalysis, onClose]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.stopPropagation();
+        handleClose();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [isOpen, handleClose]);
 
   if (!isOpen) return null;
 
-  const isRunning = Boolean(progress) || isCompleting;
   const folderLabel = folderPath || t('modals.culling.noFolder', { defaultValue: 'No folder open' });
+  const stageCode = progress?.stageCode || 'preparing';
+  const progressCurrent = progress?.current || 0;
+  const progressTotal = progress?.total || 0;
+  const progressText = t('modals.culling.progressCount', {
+    current: progressCurrent,
+    total: progressTotal,
+    defaultValue: '{{current}} of {{total}}',
+  });
+  const capabilityRows: Array<{ key: 'sharpness' | 'faces' | 'subject'; ready: boolean; hint?: string }> =
+    capabilities
+      ? [
+          { key: 'sharpness', ready: true },
+          {
+            key: 'faces',
+            ready: capabilities.faces === 'ready',
+            hint: t('modals.culling.capabilities.facesMissing'),
+          },
+          {
+            key: 'subject',
+            ready: capabilities.subject === 'ready',
+            hint: t('modals.culling.capabilities.workerMissing'),
+          },
+        ]
+      : [];
 
   return (
     <div
@@ -144,27 +226,43 @@ export default function CullingModal({
     >
       <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl bg-surface p-6 shadow-2xl">
         {isRunning ? (
-          <div className="flex min-h-64 flex-col items-center justify-center text-center">
-            <Loader2 className="h-14 w-14 animate-spin text-accent" />
-            <Text variant={TextVariants.heading} className="mt-5">
-              {isCompleting
-                ? t('modals.culling.savingResults', { defaultValue: 'Saving culling results…' })
-                : progress?.stage || t('modals.culling.starting')}
+          <div className="flex min-h-64 flex-col justify-center">
+            <div className="flex items-center gap-2">
+              <Sparkles className="h-6 w-6 text-accent" />
+              <Text variant={TextVariants.title}>{t('modals.culling.title')}</Text>
+            </div>
+            <div className="mt-6 flex items-baseline justify-between gap-4">
+              <Text variant={TextVariants.heading}>
+                {t(`modals.culling.stage.${stageCode}`, { defaultValue: progress?.stage || '' })}
+              </Text>
+              {progressTotal > 0 && <Text color={TextColors.secondary}>{progressText}</Text>}
+            </div>
+            <div
+              className="mt-3 h-2 w-full rounded-full bg-bg-primary"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={progressTotal}
+              aria-valuenow={progressCurrent}
+              aria-valuetext={progressText}
+            >
+              <div
+                className="h-2 rounded-full bg-accent motion-safe:transition-all"
+                style={{ width: `${progressTotal > 0 ? (progressCurrent / progressTotal) * 100 : 0}%` }}
+              />
+            </div>
+            <Text color={TextColors.secondary} className="mt-3">
+              {t('modals.culling.progressHint')}
             </Text>
-            <Text color={TextColors.secondary} className="mt-2">
-              {t('modals.culling.analyzingCount', {
-                count: imagePaths.length,
-                defaultValue: 'Analyzing {{count}} photos locally',
-              })}
-            </Text>
-            {progress && progress.total > 0 && (
-              <div className="mt-5 w-full max-w-md rounded-full bg-bg-primary">
-                <div
-                  className="h-2 rounded-full bg-accent transition-all"
-                  style={{ width: `${((progress.current || 0) / progress.total) * 100}%` }}
-                />
-              </div>
-            )}
+            <div className="mt-6 flex justify-end">
+              <button
+                type="button"
+                className="rounded-md px-4 py-2 text-text-secondary hover:bg-bg-primary disabled:opacity-50"
+                onClick={handleCancelAnalysis}
+                disabled={isCancelling}
+              >
+                {isCancelling ? t('modals.culling.cancelling') : t('modals.culling.cancelAnalysis')}
+              </button>
+            </div>
           </div>
         ) : error ? (
           <div className="flex min-h-64 flex-col items-center justify-center text-center">
@@ -175,9 +273,16 @@ export default function CullingModal({
             <Text color={TextColors.secondary} className="mt-2 max-w-lg break-words">
               {error}
             </Text>
-            <Button className="mt-6" onClick={onClose}>
-              {t('modals.culling.close')}
-            </Button>
+            <div className="mt-6 flex gap-3">
+              <button
+                type="button"
+                className="rounded-md px-4 py-2 text-text-secondary hover:bg-bg-primary"
+                onClick={onClose}
+              >
+                {t('modals.culling.close')}
+              </button>
+              <Button onClick={handleStartCulling}>{t('modals.culling.retry')}</Button>
+            </div>
           </div>
         ) : (
           <>
@@ -195,9 +300,9 @@ export default function CullingModal({
                 type="button"
                 className="rounded-md p-2 text-text-secondary hover:bg-bg-primary hover:text-text-primary"
                 onClick={onClose}
-                aria-label={t('modals.culling.cancel')}
+                aria-label={t('modals.culling.close')}
               >
-                ×
+                <X size={18} />
               </button>
             </div>
 
@@ -221,6 +326,47 @@ export default function CullingModal({
                           'The run will use every supported photo in this folder, regardless of selection or filters.',
                       })}
               </Text>
+            </div>
+
+            <div className="mt-5 rounded-lg border border-border-color/40 p-4">
+              <div className="flex items-baseline justify-between gap-4">
+                <Text variant={TextVariants.heading}>{t('modals.culling.capabilities.title')}</Text>
+                <Text color={TextColors.secondary} variant={TextVariants.small}>
+                  {t('modals.culling.capabilities.privacy')}
+                </Text>
+              </div>
+              {capabilities ? (
+                <ul className="mt-2 space-y-1">
+                  {capabilityRows.map((row) => (
+                    <li key={row.key} className="flex items-center gap-2 text-sm" title={row.ready ? undefined : row.hint}>
+                      {row.ready ? (
+                        <CheckCircle size={16} className="shrink-0 text-accent" />
+                      ) : (
+                        <CircleDashed size={16} className="shrink-0 text-text-secondary" />
+                      )}
+                      <span className="flex-1">{t(`modals.culling.capabilities.${row.key}`)}</span>
+                      <span className="text-text-secondary">
+                        {row.ready
+                          ? t('modals.culling.capabilities.ready')
+                          : t('modals.culling.capabilities.unavailable')}
+                      </span>
+                    </li>
+                  ))}
+                  {capabilityRows
+                    .filter((row) => !row.ready && row.hint)
+                    .map((row) => (
+                      <li key={`${row.key}-hint`}>
+                        <Text color={TextColors.secondary} variant={TextVariants.small}>
+                          {row.hint}
+                        </Text>
+                      </li>
+                    ))}
+                </ul>
+              ) : (
+                <Text color={TextColors.secondary} className="mt-2">
+                  {t('modals.culling.capabilities.checking')}
+                </Text>
+              )}
             </div>
 
             <div className="mt-6 space-y-5">
@@ -252,7 +398,8 @@ export default function CullingModal({
                     <button
                       key={option.value}
                       type="button"
-                      className={`rounded-md px-2 py-2 text-sm transition-colors ${
+                      disabled={!settings.detectBlurry}
+                      className={`rounded-md px-2 py-2 text-sm transition-colors disabled:opacity-50 ${
                         settings.blurSeverity === option.value
                           ? 'bg-card-active text-text-primary shadow-sm'
                           : 'text-text-secondary hover:text-text-primary'
@@ -289,6 +436,7 @@ export default function CullingModal({
                   <div className="space-y-4 border-t border-border-color/40 px-4 py-4">
                     <Switch
                       checked={settings.detectSubject}
+                      disabled={capabilities?.subject === 'unavailable'}
                       label={t('modals.culling.detectSubject', { defaultValue: 'Local subject proposals' })}
                       onChange={(detectSubject) => setSettings((current) => ({ ...current, detectSubject }))}
                       tooltip={t('modals.culling.detectSubjectHint', {
@@ -337,13 +485,16 @@ export default function CullingModal({
                     />
                     <Switch
                       checked={settings.detectBlurry}
-                      label={t('modals.culling.detectBlurry', { defaultValue: 'Blurry photos' })}
+                      label={t('modals.culling.detectBlurry', { defaultValue: 'Blurry photos (experimental)' })}
                       onChange={(detectBlurry) => setSettings((current) => ({ ...current, detectBlurry }))}
+                      tooltip={t('modals.culling.detectBlurryHint')}
                     />
                     <Switch
                       checked={settings.detectClosedEyes}
-                      label={t('modals.culling.detectClosedEyes', { defaultValue: 'Closed eyes (local heuristic)' })}
+                      disabled={capabilities?.faces === 'unavailable'}
+                      label={t('modals.culling.detectClosedEyes', { defaultValue: 'Closed eyes (experimental)' })}
                       onChange={(detectClosedEyes) => setSettings((current) => ({ ...current, detectClosedEyes }))}
+                      tooltip={t('modals.culling.detectClosedEyesHint')}
                     />
                     <Switch
                       checked={settings.autoAssignStars}

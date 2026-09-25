@@ -342,6 +342,40 @@ fn verify_subject_bundle(model_directory: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Pre-flight check used before a culling run: resolves the model bundle, the
+/// worker script and the Python interpreter, then verifies the hashed subject
+/// and pose artifacts. Returns the first `LOCAL_CULLING_*` reason code on failure.
+/// Hashing the artifacts is slow (~700 MB), so the outcome is cached for the
+/// process lifetime; installing the worker requires restarting the app.
+pub fn capability(app: &AppHandle) -> Result<(), String> {
+    static CAPABILITY: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    CAPABILITY
+        .get_or_init(|| {
+            let model_directory = model_directory(app)?;
+            worker_script_path(app)?;
+            verify_subject_bundle(&model_directory)
+                .map_err(|error| error.split(':').next().unwrap_or_default().to_owned())?;
+            if !pose_model_ready(&model_directory) {
+                return Err("LOCAL_CULLING_POSE_MODEL_UNAVAILABLE".to_owned());
+            }
+            // Same interpreter and packages as the worker (manifest `runtime.pythonPackages`).
+            let python =
+                std::env::var_os("PICPORTAL_CULLING_PYTHON").unwrap_or_else(|| "python3".into());
+            let python_ok = Command::new(python)
+                .args(["-c", "import torch, transformers, numpy, PIL, mediapipe"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success());
+            if !python_ok {
+                return Err("LOCAL_CULLING_WORKER_START_FAILED".to_owned());
+            }
+            Ok(())
+        })
+        .clone()
+}
+
 fn pose_model_ready(model_directory: &Path) -> bool {
     let Ok(manifest_bytes) = fs::read(model_directory.join("manifest.json")) else {
         return false;

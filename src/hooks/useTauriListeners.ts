@@ -1,7 +1,17 @@
 import { useEffect, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { convertFileSrc } from '@tauri-apps/api/core';
+import i18n from 'i18next';
+import { toast } from 'react-toastify';
+import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { Status } from '../components/ui/ExportImportProperties';
+import { Invokes } from '../components/ui/AppProperties';
+import type { CullingSession, CullingSuggestions } from '../components/ui/AppProperties';
+import {
+  cullingResultsFor,
+  noteCullingEvent,
+  readCullingSession,
+  restoreCullingSession,
+} from '../utils/cullingSession';
 import { useProcessStore } from '../store/useProcessStore';
 import { useEditorStore } from '../store/useEditorStore';
 import { useUIStore } from '../store/useUIStore';
@@ -397,39 +407,85 @@ export function useTauriListeners({
       }),
       listen('culling-start', (event: any) => {
         if (isEffectActive) {
+          noteCullingEvent();
           useUIStore.getState().setUI((state) => ({
             cullingModalState: {
               ...state.cullingModalState,
               isOpen: true,
-              progress: { current: 0, total: event.payload, stage: 'Initializing...' },
+              progress: { current: 0, total: event.payload, stage: '', stageCode: 'preparing' },
               suggestions: null,
               error: null,
+              isCancelling: false,
             },
           }));
         }
       }),
       listen('culling-progress', (event: any) => {
         if (isEffectActive) {
-          useUIStore
-            .getState()
-            .setUI((state) => ({ cullingModalState: { ...state.cullingModalState, progress: event.payload } }));
+          noteCullingEvent();
+          // Also reopens the progress view when the analysis outlived a webview reload.
+          useUIStore.getState().setUI((state) => ({
+            cullingModalState: { ...state.cullingModalState, isOpen: true, progress: event.payload },
+          }));
+        }
+      }),
+      listen('culling-cancelled', () => {
+        if (isEffectActive) {
+          noteCullingEvent();
+          useUIStore.getState().setUI((state) => ({
+            cullingModalState: {
+              ...state.cullingModalState,
+              isOpen: false,
+              progress: null,
+              suggestions: null,
+              error: null,
+              pathsToCull: [],
+              isCancelling: false,
+            },
+          }));
+          toast.info(i18n.t('modals.culling.cancelled'));
         }
       }),
       listen('culling-complete', (event: any) => {
         if (isEffectActive) {
+          noteCullingEvent();
+          // Propose, then apply: results open for review, nothing is written here.
+          const suggestions = event.payload as CullingSuggestions;
           useUIStore.getState().setUI((state) => ({
-            cullingModalState: { ...state.cullingModalState, progress: null, suggestions: event.payload },
+            cullingModalState: {
+              isOpen: false,
+              progress: null,
+              suggestions: null,
+              error: null,
+              pathsToCull: [],
+              folderPath: null,
+              isCancelling: false,
+            },
+            // The payload names its folder: after a reload the UI store no longer knows it.
+            cullingResultsState: cullingResultsFor(suggestions, state.cullingModalState.folderPath),
           }));
         }
       }),
       listen('culling-error', (event: any) => {
         if (isEffectActive) {
+          noteCullingEvent();
           useUIStore.getState().setUI((state) => ({
             cullingModalState: { ...state.cullingModalState, progress: null, error: String(event.payload) },
           }));
         }
       }),
     ];
+
+    // Once subscribed, read back an analysis that outlived a webview reload:
+    // events emitted before the reload are gone, the backend session is not.
+    Promise.all(listeners)
+      .then(() => readCullingSession(() => invoke<CullingSession>(Invokes.CullingSession)))
+      .then((session) => {
+        if (!isEffectActive || !session) return;
+        const restored = restoreCullingSession(session, useUIStore.getState());
+        if (restored) useUIStore.getState().setUI(restored);
+      })
+      .catch((error) => console.error('Failed to restore the culling session:', error));
 
     return () => {
       isEffectActive = false;
