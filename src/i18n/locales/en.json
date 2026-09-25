@@ -2185,7 +2185,8 @@
     "errors": {
       "modelOutdated": "Your style was trained with an earlier version. Retrain it to continue.",
       "modelDamaged": "Your style file is damaged. Retrain it to continue.",
-      "generic": "My style could not be applied. Your settings are unchanged."
+      "generic": "My style could not be applied. Your settings are unchanged.",
+      "stale": "My style was not applied: the photo or its settings changed during the calculation."
     }
   }
 }

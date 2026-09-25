@@ -54,12 +54,19 @@ import { useProcessStore } from '../store/useProcessStore';
 import { useUIStore } from '../store/useUIStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { Invokes, Option, OPTION_SEPARATOR, Panel, AlbumItem, Album, AlbumGroup } from '../components/ui/AppProperties';
-import { COLOR_LABELS, INITIAL_ADJUSTMENTS, normalizeLoadedAdjustments } from '../utils/adjustments';
+import { Adjustments, COLOR_LABELS, INITIAL_ADJUSTMENTS, normalizeLoadedAdjustments } from '../utils/adjustments';
 import TaggingSubMenu from '../context/TaggingSubMenu';
 import { useEditorActions } from './useEditorActions';
 import { useLibraryActions } from './useLibraryActions';
 import { globalImageCache } from '../utils/ImageLRUCache';
-import { StyleApplySummary, styleBatchMessages, styleErrorMessage, styleFallbackNotice } from '../utils/styleModel';
+import {
+  ActivePhotoSource,
+  StyleApplySummary,
+  reloadActivePhotos,
+  styleBatchMessages,
+  styleErrorMessage,
+  styleFallbackNotice,
+} from '../utils/styleModel';
 import { isVirtualCopyPath, splitVirtualCopyPath, stripVirtualCopySuffix } from '../utils/virtualCopyPath';
 
 export interface UseAppContextMenusProps {
@@ -356,8 +363,7 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
       event.stopPropagation();
 
       const { selectedImage, copiedAdjustments, setEditor } = useEditorStore.getState();
-      const { multiSelectedPaths, imageList, libraryActivePath, albumTree, activeAlbumId, setLibrary } =
-        useLibraryStore.getState();
+      const { multiSelectedPaths, imageList, albumTree, activeAlbumId, setLibrary } = useLibraryStore.getState();
       const { appSettings } = useSettingsStore.getState();
       const { activeView, setUI, setPanel } = useUIStore.getState();
       const { setProcess } = useProcessStore.getState();
@@ -471,30 +477,46 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
         }
       };
 
-      const reloadSelectionAdjustments = async () => {
-        if (selectedImage && finalSelection.includes(selectedImage.path)) {
-          const metadata: any = await invoke(Invokes.LoadMetadata, { path: selectedImage.path });
-          if (metadata.adjustments && !metadata.adjustments.is_null) {
-            const normalized = normalizeLoadedAdjustments(metadata.adjustments);
-            setEditor({ adjustments: normalized });
-            useEditorStore.getState().resetHistory(normalized);
-          }
-        }
-        if (libraryActivePath && finalSelection.includes(libraryActivePath)) {
-          const metadata: any = await invoke(Invokes.LoadMetadata, { path: libraryActivePath });
-          if (metadata.adjustments && !metadata.adjustments.is_null) {
-            const normalized = normalizeLoadedAdjustments(metadata.adjustments);
-            setLibrary({ libraryActiveAdjustments: normalized });
-          }
-        }
+      // Views captured when the batch starts; the reload only lands on a view that still shows the
+      // same photo with the same settings (see reloadActivePhotos).
+      const captureActivePhotos = () => {
+        const editorView: ActivePhotoSource<Adjustments> = {
+          current: () => {
+            const { selectedImage: image, adjustments } = useEditorStore.getState();
+            return { path: image?.path ?? null, adjustments };
+          },
+          apply: (adjustments) => {
+            setEditor({ adjustments });
+            useEditorStore.getState().resetHistory(adjustments);
+          },
+        };
+        const libraryView: ActivePhotoSource<Adjustments> = {
+          current: () => {
+            const { libraryActivePath: activePath, libraryActiveAdjustments } = useLibraryStore.getState();
+            return { path: activePath, adjustments: libraryActiveAdjustments };
+          },
+          apply: (adjustments) => setLibrary({ libraryActiveAdjustments: adjustments }),
+        };
+        return [editorView, libraryView].map((source) => ({ launch: source.current(), source }));
       };
+
+      const loadAdjustments = async (photoPath: string): Promise<Adjustments | null> => {
+        const metadata: any = await invoke(Invokes.LoadMetadata, { path: photoPath });
+        return metadata.adjustments && !metadata.adjustments.is_null
+          ? normalizeLoadedAdjustments(metadata.adjustments)
+          : null;
+      };
+
+      const reloadSelectionAdjustments = (activePhotos: ReturnType<typeof captureActivePhotos>) =>
+        reloadActivePhotos(activePhotos, finalSelection, loadAdjustments);
 
       const handleApplyAutoAdjustmentsToSelection = () => {
         if (finalSelection.length === 0) return;
         finalSelection.forEach((p) => globalImageCache.delete(p));
+        const activePhotos = captureActivePhotos();
 
         invoke(Invokes.ApplyAutoAdjustmentsToPaths, { paths: finalSelection })
-          .then(reloadSelectionAdjustments)
+          .then(() => reloadSelectionAdjustments(activePhotos))
           .catch((err) => {
             console.error('Failed to apply auto adjustments to paths:', err);
             toast.error(t('contextMenus.toasts.failedApplyAuto', { err }));
@@ -504,10 +526,11 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
       const handleApplyStyleToSelection = () => {
         if (finalSelection.length === 0) return;
         finalSelection.forEach((p) => globalImageCache.delete(p));
+        const activePhotos = captureActivePhotos();
 
         invoke<StyleApplySummary>(Invokes.ApplyStyleToPaths, { paths: finalSelection, skipEdited: true })
           .then(async (summary) => {
-            await reloadSelectionAdjustments();
+            await reloadSelectionAdjustments(activePhotos);
             const messages = styleBatchMessages(t, summary);
             (summary.failed > 0 ? toast.warning : toast.success)(messages.join(' '));
             const notice = styleFallbackNotice(t, summary.model);

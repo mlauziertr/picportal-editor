@@ -18,7 +18,12 @@ import {
 import { calculateCenteredCrop } from '../utils/cropUtils';
 import { Invokes } from '../components/ui/AppProperties';
 import { globalImageCache } from '../utils/ImageLRUCache';
-import { StyleEditorProposal, styleErrorMessage, styleFallbackNotice } from '../utils/styleModel';
+import {
+  StyleEditorProposal,
+  applyStyleToActivePhoto,
+  styleErrorMessage,
+  styleFallbackNotice,
+} from '../utils/styleModel';
 
 export const debouncedSetHistory = debounce((newAdj: Adjustments) => {
   useEditorStore.getState().pushHistory(newAdj);
@@ -89,17 +94,25 @@ export function useEditorActions() {
   }, [setAdjustments]);
 
   const handleApplyStyle = useCallback(async () => {
-    const { selectedImage, adjustments } = useEditorStore.getState();
-    if (!selectedImage?.isReady) return;
-    const path = selectedImage.path;
+    if (!useEditorStore.getState().selectedImage?.isReady) return;
     try {
-      const proposal: StyleEditorProposal = await invoke(Invokes.CalculateStyleAdjustments, {
-        path,
-        currentAdjustments: adjustments,
-      });
-      if (useEditorStore.getState().selectedImage?.path !== path) return;
-      setAdjustments((prev: Adjustments) => ({ ...prev, ...proposal.patch }));
-      const notice = styleFallbackNotice(t, proposal.model);
+      const result = await applyStyleToActivePhoto<Adjustments>(
+        {
+          current: () => {
+            const { selectedImage, adjustments } = useEditorStore.getState();
+            return { path: selectedImage?.path ?? null, adjustments };
+          },
+          apply: (adjustments) => setAdjustments(() => adjustments),
+        },
+        ({ path, adjustments }) =>
+          invoke<StyleEditorProposal>(Invokes.CalculateStyleAdjustments, { path, currentAdjustments: adjustments }),
+      );
+      if (result.status === 'stale') {
+        toast.info(t('style.errors.stale'));
+        return;
+      }
+      if (result.status !== 'applied') return;
+      const notice = styleFallbackNotice(t, result.proposal.model);
       if (notice) toast.info(notice);
     } catch (err) {
       console.error('Failed to apply style:', err);

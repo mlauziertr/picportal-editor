@@ -2230,7 +2230,8 @@
     "errors": {
       "modelOutdated": "Votre style a été entraîné avec une version antérieure. Réentraînez-le pour continuer.",
       "modelDamaged": "Le fichier de votre style est endommagé. Réentraînez-le pour continuer.",
-      "generic": "Mon style n’a pas pu être appliqué. Vos réglages sont inchangés."
+      "generic": "Mon style n’a pas pu être appliqué. Vos réglages sont inchangés.",
+      "stale": "Mon style n’a pas été appliqué : la photo ou ses réglages ont changé pendant le calcul."
     }
   }
 }

@@ -78,3 +78,55 @@ export const styleBatchMessages = (t: TFunction, summary: StyleApplySummary): st
   if (summary.failed > 0) messages.push(t('style.batch.failed', { count: summary.failed }));
   return messages;
 };
+
+// Asynchronous responses (editor proposal, batch reload) must only land on the photo and the
+// settings they were computed from. The stores replace the adjustments object on every change,
+// so its identity is the settings revision.
+export interface ActivePhotoSnapshot<A> {
+  path: string | null;
+  adjustments: A;
+}
+
+export interface ActivePhotoSource<A> {
+  current: () => ActivePhotoSnapshot<A>;
+  apply: (adjustments: A) => void;
+}
+
+export const isSnapshotCurrent = <A>(snapshot: ActivePhotoSnapshot<A>, current: ActivePhotoSnapshot<A>): boolean =>
+  snapshot.path !== null && snapshot.path === current.path && snapshot.adjustments === current.adjustments;
+
+export type StyleApplyResult = { status: 'applied'; proposal: StyleEditorProposal } | { status: 'stale' | 'noPhoto' };
+
+// Editor: compute the proposal for the active photo, then merge its patch only if neither the
+// photo nor its settings changed while the model was running.
+export const applyStyleToActivePhoto = async <A extends object>(
+  source: ActivePhotoSource<A>,
+  compute: (snapshot: ActivePhotoSnapshot<A>) => Promise<StyleEditorProposal>,
+): Promise<StyleApplyResult> => {
+  const snapshot = source.current();
+  if (snapshot.path === null) return { status: 'noPhoto' };
+  const proposal = await compute(snapshot);
+  if (!isSnapshotCurrent(snapshot, source.current())) return { status: 'stale' };
+  source.apply({ ...snapshot.adjustments, ...proposal.patch });
+  return { status: 'applied', proposal };
+};
+
+// Library batch: reload the sidecar of each view (editor, library preview) only if it still shows
+// the photo it showed at launch, that photo was in the batch, and its settings were not changed
+// meanwhile (checked again once the sidecar is read). Returns the reloaded paths.
+export const reloadActivePhotos = async <A>(
+  views: { launch: ActivePhotoSnapshot<A>; source: ActivePhotoSource<A> }[],
+  batch: string[],
+  load: (path: string) => Promise<A | null>,
+): Promise<string[]> => {
+  const reloaded: string[] = [];
+  for (const { launch, source } of views) {
+    if (launch.path === null || !batch.includes(launch.path)) continue;
+    if (!isSnapshotCurrent(launch, source.current())) continue;
+    const adjustments = await load(launch.path);
+    if (adjustments === null || !isSnapshotCurrent(launch, source.current())) continue;
+    source.apply(adjustments);
+    reloaded.push(launch.path);
+  }
+  return reloaded;
+};
