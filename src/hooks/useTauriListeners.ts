@@ -2,9 +2,11 @@ import { useEffect, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import i18n from 'i18next';
 import { toast } from 'react-toastify';
-import { convertFileSrc } from '@tauri-apps/api/core';
+import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { Status } from '../components/ui/ExportImportProperties';
-import type { CullingSuggestions } from '../components/ui/AppProperties';
+import { Invokes } from '../components/ui/AppProperties';
+import type { CullingSession, CullingSuggestions } from '../components/ui/AppProperties';
+import { cullingResultsFor, restoreCullingSession } from '../utils/cullingSession';
 import { useProcessStore } from '../store/useProcessStore';
 import { useEditorStore } from '../store/useEditorStore';
 import { useUIStore } from '../store/useUIStore';
@@ -450,13 +452,8 @@ export function useTauriListeners({
               folderPath: null,
               isCancelling: false,
             },
-            cullingResultsState: {
-              isOpen: true,
-              folderPath: state.cullingModalState.folderPath,
-              suggestions,
-              persistence: null,
-              selectedPath: suggestions.results[0]?.path || null,
-            },
+            // The payload names its folder: after a reload the UI store no longer knows it.
+            cullingResultsState: cullingResultsFor(suggestions, state.cullingModalState.folderPath),
           }));
         }
       }),
@@ -468,6 +465,17 @@ export function useTauriListeners({
         }
       }),
     ];
+
+    // Once subscribed, read back an analysis that outlived a webview reload:
+    // events emitted before the reload are gone, the backend session is not.
+    Promise.all(listeners)
+      .then(() => invoke<CullingSession>(Invokes.CullingSession))
+      .then((session) => {
+        if (!isEffectActive) return;
+        const restored = restoreCullingSession(session, useUIStore.getState());
+        if (restored) useUIStore.getState().setUI(restored);
+      })
+      .catch((error) => console.error('Failed to restore the culling session:', error));
 
     return () => {
       isEffectActive = false;

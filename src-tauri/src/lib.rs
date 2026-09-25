@@ -2239,6 +2239,8 @@ pub fn run() {
             culling::cull_images,
             culling::cancel_culling,
             culling::culling_capabilities,
+            culling::culling_session,
+            culling::dismiss_culling_result,
             picportal::picportal_login,
             picportal::picportal_restore_session,
             picportal::picportal_logout,

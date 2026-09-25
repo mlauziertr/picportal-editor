@@ -5,7 +5,8 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::{PicPortalState, face_processing, image_loader, subject_inference};
@@ -108,9 +109,11 @@ pub struct CullingSuggestions {
     pub color_assignments: HashMap<String, Option<String>>,
     pub eye_analysis_status: String,
     pub subject_analysis_status: String,
+    /// Folder the analysis was started for, so the UI can reopen it after a reload.
+    pub folder_path: Option<String>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 struct CullingProgress {
     current: usize,
@@ -142,7 +145,41 @@ pub const CULLING_CANCELLED: &str = "CULLING_CANCELLED";
 pub const CULLING_ALREADY_RUNNING: &str = "CULLING_ALREADY_RUNNING";
 
 static CULLING_RUNNING: AtomicBool = AtomicBool::new(false);
-static CULLING_CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// Outcome race between the user and the run: exactly one of cancel or
+/// completion wins, so an accepted cancel never delivers results.
+static CULLING_OUTCOME: AtomicU8 = AtomicU8::new(OUTCOME_OPEN);
+const OUTCOME_OPEN: u8 = 0;
+const OUTCOME_CANCELLED: u8 = 1;
+const OUTCOME_COMMITTED: u8 = 2;
+
+/// What the UI needs to rebuild itself after a webview reload: events sent
+/// before the reload are lost, this snapshot is not.
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CullingSession {
+    pub running: bool,
+    pub folder_path: Option<String>,
+    progress: Option<CullingProgress>,
+    /// Finished analysis the user has not closed yet.
+    pub result: Option<CullingSuggestions>,
+}
+
+static CULLING_SESSION: Mutex<Option<CullingSession>> = Mutex::new(None);
+
+fn update_session(update: impl FnOnce(&mut CullingSession)) {
+    if let Ok(mut session) = CULLING_SESSION.lock() {
+        update(session.get_or_insert_with(CullingSession::default));
+    }
+}
+
+fn record_progress(progress: &CullingProgress) {
+    update_session(|session| session.progress = Some(progress.clone()));
+}
+
+fn emit_progress(app_handle: &AppHandle, progress: CullingProgress) {
+    record_progress(&progress);
+    let _ = app_handle.emit("culling-progress", progress);
+}
 
 /// Single-run guard: only one analysis at a time, released even on early return.
 struct CullingRunGuard;
@@ -152,32 +189,73 @@ impl CullingRunGuard {
         CULLING_RUNNING
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| CULLING_ALREADY_RUNNING.to_owned())?;
-        CULLING_CANCEL_REQUESTED.store(false, Ordering::Release);
+        CULLING_OUTCOME.store(OUTCOME_OPEN, Ordering::Release);
         Ok(Self)
     }
 
     fn is_cancelled(&self) -> bool {
-        CULLING_CANCEL_REQUESTED.load(Ordering::Acquire)
+        CULLING_OUTCOME.load(Ordering::Acquire) == OUTCOME_CANCELLED
+    }
+
+    /// Claims the result for delivery. Fails when a cancel was accepted first;
+    /// once it succeeds, `cancel_culling` reports that it is too late.
+    fn try_commit(&self) -> bool {
+        CULLING_OUTCOME
+            .compare_exchange(
+                OUTCOME_OPEN,
+                OUTCOME_COMMITTED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
     }
 }
 
 impl Drop for CullingRunGuard {
     fn drop(&mut self) {
-        CULLING_CANCEL_REQUESTED.store(false, Ordering::Release);
+        update_session(|session| {
+            session.running = false;
+            session.progress = None;
+        });
+        CULLING_OUTCOME.store(OUTCOME_OPEN, Ordering::Release);
         CULLING_RUNNING.store(false, Ordering::Release);
     }
 }
 
 /// Requests cancellation of the running analysis. The flag is checked between
-/// images; nothing is written by an analysis, so cancelling never loses data.
-/// Returns whether an analysis was running.
+/// images and phases; nothing is written by an analysis, so cancelling never
+/// loses data. Returns whether the cancel was accepted: false when nothing
+/// runs, or when the results are already being delivered.
 #[tauri::command]
 pub fn cancel_culling() -> bool {
-    let running = CULLING_RUNNING.load(Ordering::Acquire);
-    if running {
-        CULLING_CANCEL_REQUESTED.store(true, Ordering::Release);
+    if !CULLING_RUNNING.load(Ordering::Acquire) {
+        return false;
     }
-    running
+    match CULLING_OUTCOME.compare_exchange(
+        OUTCOME_OPEN,
+        OUTCOME_CANCELLED,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        Ok(_) => true,
+        Err(current) => current == OUTCOME_CANCELLED,
+    }
+}
+
+/// Current analysis, read by the UI when it (re)starts.
+#[tauri::command]
+pub fn culling_session() -> CullingSession {
+    CULLING_SESSION
+        .lock()
+        .ok()
+        .and_then(|session| session.clone())
+        .unwrap_or_default()
+}
+
+/// The user closed the results: a later reload must not reopen them.
+#[tauri::command]
+pub fn dismiss_culling_result() {
+    update_session(|session| session.result = None);
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -921,6 +999,7 @@ fn detector_reasons(
 pub async fn cull_images(
     paths: Vec<String>,
     settings: CullingSettings,
+    folder_path: Option<String>,
     app_handle: AppHandle,
     face_state: State<'_, PicPortalState>,
 ) -> Result<CullingSuggestions, String> {
@@ -928,12 +1007,20 @@ pub async fn cull_images(
         return Ok(CullingSuggestions::default());
     }
     let run = CullingRunGuard::acquire()?;
+    // A new run replaces the previous session, including an undismissed result.
+    update_session(|session| {
+        *session = CullingSession {
+            running: true,
+            folder_path: folder_path.clone(),
+            ..Default::default()
+        }
+    });
     let app_settings = load_settings(app_handle.clone()).unwrap_or_default();
     let total_count = paths.len();
     let completed_count = Arc::new(AtomicUsize::new(0));
     let _ = app_handle.emit("culling-start", total_count);
-    let _ = app_handle.emit(
-        "culling-progress",
+    emit_progress(
+        &app_handle,
         CullingProgress::new(0, total_count, "preparing"),
     );
     let cancelled = |app_handle: &AppHandle| -> Result<CullingSuggestions, String> {
@@ -955,8 +1042,8 @@ pub async fn cull_images(
                 .map_err(|error| (path.to_owned(), error));
             // Count after the work so the bar reflects finished images, not started ones.
             let completed = completed_count.fetch_add(1, Ordering::Relaxed) + 1;
-            let _ = app_handle.emit(
-                "culling-progress",
+            emit_progress(
+                &app_handle,
                 CullingProgress::new(completed, total_count, "analyzing"),
             );
             result
@@ -1034,10 +1121,7 @@ pub async fn cull_images(
     }
 
     if settings.detect_subject || settings.detect_closed_eyes {
-        let _ = app_handle.emit(
-            "culling-progress",
-            CullingProgress::new(0, total_count, "subject"),
-        );
+        emit_progress(&app_handle, CullingProgress::new(0, total_count, "subject"));
         let subject_total = successful.len();
         for (index, data) in successful.iter_mut().enumerate() {
             if run.is_cancelled() {
@@ -1074,8 +1158,8 @@ pub async fn cull_images(
                     );
                 }
             }
-            let _ = app_handle.emit(
-                "culling-progress",
+            emit_progress(
+                &app_handle,
                 CullingProgress::new(index + 1, subject_total, "subject"),
             );
         }
@@ -1084,14 +1168,21 @@ pub async fn cull_images(
         return cancelled(&app_handle);
     }
 
-    let _ = app_handle.emit(
-        "culling-progress",
+    emit_progress(
+        &app_handle,
         CullingProgress::new(total_count, total_count, "grouping"),
     );
     let mut suggestions = build_suggestions(&mut successful, &settings, &unprocessed_paths);
     suggestions.failed_paths = failed_paths;
     suggestions.eye_analysis_status = eye_status;
     suggestions.subject_analysis_status = subject_status;
+    suggestions.folder_path = folder_path;
+    // A cancel accepted while grouping wins over the result; after the commit,
+    // cancel reports that it is too late and the results are delivered.
+    if !run.try_commit() {
+        return cancelled(&app_handle);
+    }
+    update_session(|session| session.result = Some(suggestions.clone()));
     let _ = app_handle.emit("culling-complete", &suggestions);
     Ok(suggestions)
 }
@@ -1268,7 +1359,44 @@ mod tests {
             !next.is_cancelled(),
             "a new run never inherits a stale cancel"
         );
+
+        // Cancel accepted while grouping: the result must not be delivered.
+        assert!(cancel_culling());
+        assert!(
+            !next.try_commit(),
+            "an accepted cancel wins over completion"
+        );
         drop(next);
+
+        // Completion first: a late cancel is refused, so the UI expects results.
+        let run = CullingRunGuard::acquire().expect("third run starts");
+        assert!(run.try_commit());
+        assert!(!cancel_culling(), "too late: results are being delivered");
+        assert!(!run.is_cancelled());
+        drop(run);
+
+        // Session snapshot outlives the run until the user dismisses the result.
+        *CULLING_SESSION.lock().unwrap() = Some(CullingSession {
+            running: true,
+            folder_path: Some("/shoot".to_owned()),
+            progress: None,
+            result: None,
+        });
+        let run = CullingRunGuard::acquire().expect("fourth run starts");
+        record_progress(&CullingProgress::new(4, 10, "analyzing"));
+        assert_eq!(culling_session().progress.map(|p| p.current), Some(4));
+        update_session(|session| session.result = Some(CullingSuggestions::default()));
+        drop(run);
+        let session = culling_session();
+        assert!(!session.running && session.progress.is_none());
+        assert_eq!(session.folder_path.as_deref(), Some("/shoot"));
+        assert!(
+            session.result.is_some(),
+            "finished result survives for a reload"
+        );
+        dismiss_culling_result();
+        assert!(culling_session().result.is_none());
+        *CULLING_SESSION.lock().unwrap() = None;
     }
 
     #[test]

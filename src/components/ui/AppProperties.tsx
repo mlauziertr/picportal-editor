@@ -49,6 +49,8 @@ export enum Invokes {
   CullImages = 'cull_images',
   CancelCulling = 'cancel_culling',
   CullingCapabilities = 'culling_capabilities',
+  CullingSession = 'culling_session',
+  DismissCullingResult = 'dismiss_culling_result',
   PicPortalLogin = 'picportal_login',
   PicPortalRestoreSession = 'picportal_restore_session',
   PicPortalLogout = 'picportal_logout',
@@ -485,6 +487,17 @@ export interface CullingSuggestions {
   colorAssignments: Record<string, string | null>;
   eyeAnalysisStatus: string;
   subjectAnalysisStatus: string;
+  /** Folder the analysis was started for; survives a webview reload. */
+  folderPath?: string | null;
+}
+
+/** Backend view of the current analysis, read back after a webview reload. */
+export interface CullingSession {
+  running: boolean;
+  folderPath: string | null;
+  progress: { current: number; total: number; stage: string; stageCode: CullingStageCode } | null;
+  /** Finished analysis not yet dismissed by the user. */
+  result: CullingSuggestions | null;
 }
 
 export interface CullingPersistenceSummary {

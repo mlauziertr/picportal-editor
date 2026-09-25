@@ -141,7 +141,7 @@ export default function CullingModal({
     if (imagePaths.length === 0 || startInProgressRef.current) return;
     startInProgressRef.current = true;
     try {
-      await invoke(Invokes.CullImages, { paths: imagePaths, settings });
+      await invoke(Invokes.CullImages, { paths: imagePaths, settings, folderPath });
     } catch (startError) {
       const message = String(startError);
       if (message === CULLING_CANCELLED) return;
@@ -153,7 +153,7 @@ export default function CullingModal({
     } finally {
       startInProgressRef.current = false;
     }
-  }, [imagePaths, settings, onError, t]);
+  }, [imagePaths, settings, folderPath, onError, t]);
 
   const handleCancelAnalysis = useCallback(async () => {
     setIsCancelling(true);
