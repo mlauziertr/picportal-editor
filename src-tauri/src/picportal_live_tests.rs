@@ -1,12 +1,21 @@
 //! Opt-in round trip against the production PicPortal API (MAX-22).
 //!
-//! Ignored by default. Run with a dedicated test account:
-//! `PICPORTAL_LIVE_EMAIL=… PICPORTAL_LIVE_PASSWORD=… cargo test --lib live_tests -- --ignored --nocapture`
+//! It writes to the account, so it is ignored by default and, even with
+//! `--ignored`, does nothing without all four variables:
 //!
-//! It creates a draft gallery `test-editor-<timestamp>` without face filtering,
-//! publishes ten generated JPEGs through `publish_one`, and prints `LIVE` lines
-//! without credentials or cookie values. The gallery id is printed so the
-//! caller can inspect and delete it afterwards; the test never deletes data.
+//! ```text
+//! PICPORTAL_LIVE_EMAIL=… PICPORTAL_LIVE_PASSWORD=… \
+//! PICPORTAL_LIVE_ACCOUNT_ID=<id of the dedicated test account> \
+//! PICPORTAL_LIVE_ALLOW_WRITES=test-editor-galleries \
+//! cargo test --lib live_publication_round_trip -- --ignored --nocapture
+//! ```
+//!
+//! The login must resolve to `PICPORTAL_LIVE_ACCOUNT_ID` before anything is
+//! written. It then creates a draft gallery `test-editor-<timestamp>` without
+//! face filtering and publishes ten generated JPEGs through `publish_one`.
+//! The gallery is deleted afterwards, also when a scenario fails, and its
+//! absence is checked; if deletion fails, the id is printed for manual
+//! cleanup. `LIVE` lines carry no credentials or cookie values.
 
 use super::*;
 use serde_json::json;
@@ -157,20 +166,61 @@ async fn photo_count(session: &PicPortalSession, gallery_id: &str) -> u64 {
         .photo_count
 }
 
+/// Variable that must hold [`LIVE_WRITE_CONSENT`] before the test writes.
+const LIVE_WRITE_VARIABLE: &str = "PICPORTAL_LIVE_ALLOW_WRITES";
+const LIVE_WRITE_CONSENT: &str = "test-editor-galleries";
+
+struct LiveAccount {
+    email: String,
+    password: String,
+    account_id: String,
+}
+
+/// Returns the test account only when credentials, its expected id and the
+/// explicit write consent are all present.
+fn live_account() -> Option<LiveAccount> {
+    let variable = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    };
+    let account = LiveAccount {
+        email: variable("PICPORTAL_LIVE_EMAIL")?,
+        password: variable("PICPORTAL_LIVE_PASSWORD")?,
+        account_id: variable("PICPORTAL_LIVE_ACCOUNT_ID")?,
+    };
+    (variable(LIVE_WRITE_VARIABLE).as_deref() == Some(LIVE_WRITE_CONSENT)).then_some(account)
+}
+
+async fn delete_gallery(session: &PicPortalSession, gallery_id: &str) -> Result<(), String> {
+    let response = session
+        .client
+        .delete(endpoint(
+            &session.base_url,
+            &format!("galleries/{gallery_id}"),
+        ))
+        .header("origin", APP_ORIGIN)
+        .send()
+        .await
+        .map_err(|error| transport_error("gallery deletion failed", error))?;
+    capture_response_cookies(&response, &session.cookies);
+    require_success(response).await.map(|_| ())
+}
+
 #[tokio::test]
-#[ignore = "talks to api.getpicportal.com; needs PICPORTAL_LIVE_EMAIL and PICPORTAL_LIVE_PASSWORD"]
+#[ignore = "writes to api.getpicportal.com; needs a dedicated test account and PICPORTAL_LIVE_ALLOW_WRITES"]
 async fn live_publication_round_trip() {
-    let (Ok(email), Ok(password)) = (
-        std::env::var("PICPORTAL_LIVE_EMAIL"),
-        std::env::var("PICPORTAL_LIVE_PASSWORD"),
-    ) else {
-        eprintln!("PICPORTAL_LIVE_EMAIL/PICPORTAL_LIVE_PASSWORD not set; skipped");
+    let Some(account) = live_account() else {
+        eprintln!(
+            "PICPORTAL_LIVE_EMAIL, PICPORTAL_LIVE_PASSWORD, PICPORTAL_LIVE_ACCOUNT_ID and \
+             {LIVE_WRITE_VARIABLE}={LIVE_WRITE_CONSENT} are required; skipped without any request"
+        );
         return;
     };
     let work = tempfile::tempdir().expect("work directory");
 
     // Connection: wrong password, then the real one.
-    let rejected = open_login_session(&email, "not-the-test-password")
+    let rejected = open_login_session(&account.email, "not-the-test-password")
         .await
         .err()
         .expect("wrong password is rejected");
@@ -179,7 +229,9 @@ async fn live_publication_round_trip() {
         json!({ "code": rejected.code, "status": rejected.status }),
     );
     assert_eq!(rejected.code, "bad_credentials");
-    let (session, galleries) = open_login_session(&email, &password).await.expect("login");
+    let (session, galleries) = open_login_session(&account.email, &account.password)
+        .await
+        .expect("login");
     live(
         "login.ok",
         json!({
@@ -188,6 +240,21 @@ async fn live_publication_round_trip() {
             "cookieNames": cookie_names(&session),
         }),
     );
+    // Account guard: nothing is written unless the login is the test account.
+    if session.account_id != account.account_id {
+        let logout_error = remote_logout(&session).await;
+        live(
+            "account.guard",
+            json!({ "authorized": false, "loggedOut": logout_error.is_none() }),
+        );
+        panic!("logged-in account is not PICPORTAL_LIVE_ACCOUNT_ID; nothing was written");
+    }
+    live("account.guard", json!({ "authorized": true }));
+    let leftovers = galleries
+        .iter()
+        .filter(|gallery| gallery.title.starts_with("test-editor-"))
+        .count();
+    live("gallery.leftovers_before", json!(leftovers));
 
     // Restore after restart: the keyring payload is rebuilt into a new client.
     let stored = serde_json::to_string(&stored_session_data(&session).expect("stored session"))
@@ -235,7 +302,55 @@ async fn live_publication_round_trip() {
         "gallery.created",
         json!({ "id": created.id, "slug": created.slug, "title": created.title }),
     );
-    let relaunched = restore(&stored);
+
+    // Scenarios run in their own task so a failed assertion still reaches the
+    // cleanup below.
+    let scenarios = tokio::spawn(publication_scenarios(
+        restore(&stored),
+        title,
+        work.path().to_path_buf(),
+    ));
+    let scenario_result = scenarios.await;
+
+    let deletion = delete_gallery(&restored, &created.id).await;
+    let still_listed = restored
+        .galleries()
+        .await
+        .map(|galleries| galleries.iter().any(|gallery| gallery.id == created.id));
+    live(
+        "gallery.cleanup",
+        json!({
+            "id": created.id,
+            "deleted": deletion.is_ok(),
+            "stillListed": still_listed.as_ref().ok(),
+        }),
+    );
+    if deletion.is_err() || !matches!(still_listed, Ok(false)) {
+        live(
+            "gallery.left_for_manual_cleanup",
+            json!({ "id": created.id }),
+        );
+    }
+    if let Err(error) = scenario_result {
+        std::panic::resume_unwind(error.into_panic());
+    }
+    deletion.expect("test gallery deleted");
+    assert_eq!(still_listed, Ok(false), "test gallery no longer listed");
+
+    // Real logout revokes the shared server session.
+    let logout_error = remote_logout(&restored).await;
+    live("logout.ok", json!({ "remoteError": logout_error }));
+    assert!(logout_error.is_none());
+    let after_logout = session_identity(&restore(&stored)).await.err();
+    live(
+        "logout.revoked",
+        json!({ "status": after_logout.as_deref().and_then(http_status) }),
+    );
+    assert_eq!(after_logout.as_deref().and_then(http_status), Some(401));
+}
+
+/// Everything that runs against the test gallery titled `title`.
+async fn publication_scenarios(relaunched: PicPortalSession, title: String, work: PathBuf) {
     let matching: Vec<GallerySummary> = relaunched
         .galleries()
         .await
@@ -272,12 +387,12 @@ async fn live_publication_round_trip() {
     );
     assert!(!publish_faces);
 
-    let staging = work.path().join("staging");
+    let staging = work.join("staging");
     fs::create_dir_all(&staging).expect("staging");
     let paths: Vec<String> = (1..=10)
         .map(|index| write_test_jpeg(&staging, index))
         .collect();
-    let queue_path = work.path().join("picportal-queue.json");
+    let queue_path = work.join("picportal-queue.json");
 
     // Cancel before the fifth image, then retry the whole selection.
     let mut first = LiveHarness::new(&relaunched, &gallery, &capabilities, queue_path.clone());
@@ -326,7 +441,7 @@ async fn live_publication_round_trip() {
         &rejected_session,
         &gallery,
         &capabilities,
-        work.path().join("auth-queue.json"),
+        work.join("auth-queue.json"),
     );
     let auth_outcome = auth.run(extra.clone()).await;
     live("publish.auth_rejected", outcome_summary(&auth_outcome));
@@ -346,7 +461,7 @@ async fn live_publication_round_trip() {
         &offline_session,
         &gallery,
         &capabilities,
-        work.path().join("offline-queue.json"),
+        work.join("offline-queue.json"),
     );
     let offline_outcome = offline.run(extra).await;
     live("publish.offline", outcome_summary(&offline_outcome));
@@ -367,20 +482,5 @@ async fn live_publication_round_trip() {
     live(
         "logout.offline",
         json!({ "code": offline_logout.code, "retryable": offline_logout.retryable }),
-    );
-
-    // Real logout revokes the shared server session.
-    let logout_error = remote_logout(&relaunched).await;
-    live("logout.ok", json!({ "remoteError": logout_error }));
-    assert!(logout_error.is_none());
-    let after_logout = session_identity(&restore(&stored)).await.err();
-    live(
-        "logout.revoked",
-        json!({ "status": after_logout.as_deref().and_then(http_status) }),
-    );
-    assert_eq!(after_logout.as_deref().and_then(http_status), Some(401));
-    live(
-        "gallery.left_for_cleanup",
-        json!({ "id": gallery.id, "slug": gallery.slug }),
     );
 }

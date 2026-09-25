@@ -122,7 +122,8 @@ pub struct PicPortalSessionStatus {
 pub struct PublishResult {
     pub completed: usize,
     pub failed: usize,
-    /// Items not attempted because the run stopped (cancel or rejected session).
+    /// Items not attempted because the run stopped (cancel or rejected session),
+    /// or still processed by the server (`processing`); "Resume" settles both.
     pub pending: usize,
     pub cancelled: bool,
     pub items: Vec<PublishItemResult>,
@@ -384,22 +385,56 @@ struct DerivativeResponse {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct DerivativeRejection {
     #[serde(default)]
     error: String,
-    #[serde(default)]
-    fallback_queued: bool,
 }
 
-/// After a rejected manifest the server queues its own derivatives and answers
-/// every later attempt for that photo with 409; the photo is then published.
-fn derivatives_handled_by_server_fallback(status: StatusCode, body: &str) -> bool {
+/// After a rejected manifest the server computes its own derivatives and
+/// answers every later attempt for that photo with 409
+/// `DERIVATIVE_STATE_INVALID` (`fallbackQueued` is true while it works, false
+/// once it is done). That only says the server owns the derivatives: the photo
+/// counts as published once its status is confirmed `ready`.
+fn derivatives_owned_by_server(status: StatusCode, body: &str) -> bool {
     let rejection = serde_json::from_str::<DerivativeRejection>(body).unwrap_or_default();
-    status == StatusCode::CONFLICT
-        && rejection.error == "DERIVATIVE_STATE_INVALID"
-        && rejection.fallback_queued
+    status == StatusCode::CONFLICT && rejection.error == "DERIVATIVE_STATE_INVALID"
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DerivativeOutcome {
+    Accepted,
+    /// The server computes the derivatives itself; not yet confirmed ready.
+    ServerFallback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerProcessing {
+    Ready,
+    Failed,
+    InProgress,
+}
+
+#[derive(Debug, Deserialize)]
+struct GalleryDetailResponse {
+    photos: Vec<GalleryPhotoStatus>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GalleryPhotoStatus {
+    id: String,
+    processing_status: String,
+}
+
+/// Queue and item state of a photo whose derivatives the server is still
+/// computing; "Resume" confirms it against the server instead of re-uploading.
+const SERVER_PROCESSING_STATE: &str = "processing";
+
+/// Waits between status checks after a server fallback, before the photo is
+/// reported as still processing.
+#[cfg(not(test))]
+const SERVER_PROCESSING_POLL_DELAYS_MS: &[u64] = &[1_000, 2_000, 3_000, 4_000, 5_000, 5_000];
+#[cfg(test)]
+const SERVER_PROCESSING_POLL_DELAYS_MS: &[u64] = &[1, 1];
 
 #[derive(Debug, Deserialize)]
 struct FaceAnalysisResponse {
@@ -1291,7 +1326,11 @@ async fn drive_publication(
         }
         match attempt {
             Ok(item) => {
-                result.completed += 1;
+                if item.state == SERVER_PROCESSING_STATE {
+                    result.pending += 1;
+                } else {
+                    result.completed += 1;
+                }
                 result.items.push(item);
             }
             Err(error) => {
@@ -1786,11 +1825,31 @@ async fn publish_one(
     let source = fs::read(&source_path)
         .map_err(|error| format!("cannot read export {}: {error}", source_path.display()))?;
     let source_sha256 = local_derivatives::sha256_hex(&source);
-    let existing = queue
+    let mut existing = queue
         .items
         .iter()
         .find(|item| queue_identity_matches(item, path, session, &gallery.id, &source_sha256))
         .cloned();
+    if let Some(pending) = existing.as_ref()
+        && pending.state == SERVER_PROCESSING_STATE
+    {
+        let photo_id = pending
+            .photo_id
+            .clone()
+            .ok_or_else(|| "server-processed PicPortal photo has no photo id".to_owned())?;
+        match server_processing_status(session, &gallery.id, &photo_id).await? {
+            ServerProcessing::Ready => {
+                existing =
+                    mark_server_processing_ready(queue, path, session, &gallery.id, &source_sha256);
+                save_queue(queue_path, queue)?;
+            }
+            // Posting the derivatives again makes the server re-queue its own run.
+            ServerProcessing::Failed => {}
+            ServerProcessing::InProgress => {
+                return Ok(server_processing_item(path, photo_id));
+            }
+        }
+    }
     if let Some(existing) = existing.as_ref()
         && existing.state == "uploaded"
     {
@@ -1892,7 +1951,7 @@ async fn publish_one(
         thumbnail: derivative_dimensions(&derivatives.thumbnail),
     };
     ensure_publish_not_cancelled(state)?;
-    upload_derivatives(
+    let outcome = upload_derivatives(
         session,
         &gallery.id,
         &photo_id,
@@ -1901,6 +1960,29 @@ async fn publish_one(
         &derivatives.thumbnail.bytes,
     )
     .await?;
+    if outcome == DerivativeOutcome::ServerFallback {
+        if let Some(item) = queue.items.iter_mut().find(|item| {
+            queue_identity_matches(item, path, session, &gallery.id, &derivatives.source_sha256)
+        }) {
+            item.state = SERVER_PROCESSING_STATE.to_owned();
+            item.photo_id = Some(photo_id.clone());
+            item.face_analysis_uploaded = false;
+            item.last_error = None;
+        }
+        save_queue(queue_path, queue)?;
+        match wait_for_server_processing(session, &gallery.id, &photo_id, state).await? {
+            ServerProcessing::Ready => {}
+            ServerProcessing::Failed => {
+                return Err(
+                    "PicPortal could not process this photo on the server; retry to queue it again"
+                        .to_owned(),
+                );
+            }
+            ServerProcessing::InProgress => {
+                return Ok(server_processing_item(path, photo_id));
+            }
+        }
+    }
     if let Some(analysis) = face_analysis {
         ensure_publish_not_cancelled(state)?;
         upload_faces_for_photo(
@@ -1930,6 +2012,88 @@ async fn publish_one(
         photo_id: Some(photo_id),
         error: None,
     })
+}
+
+fn server_processing_item(path: &str, photo_id: String) -> PublishItemResult {
+    PublishItemResult {
+        path: path.to_owned(),
+        state: SERVER_PROCESSING_STATE.to_owned(),
+        photo_id: Some(photo_id),
+        error: None,
+    }
+}
+
+/// Promotes a confirmed server-processed photo to `uploaded` and returns the
+/// updated entry, so pending face analysis resumes like any finished upload.
+fn mark_server_processing_ready(
+    queue: &mut QueueFile,
+    path: &str,
+    session: &PicPortalSession,
+    gallery_id: &str,
+    source_sha256: &str,
+) -> Option<QueueItem> {
+    let item = queue
+        .items
+        .iter_mut()
+        .find(|item| queue_identity_matches(item, path, session, gallery_id, source_sha256))?;
+    item.state = "uploaded".to_owned();
+    item.upload_id = None;
+    item.last_error = None;
+    Some(item.clone())
+}
+
+/// Reads the photo's processing status from the admin gallery detail.
+async fn server_processing_status(
+    session: &PicPortalSession,
+    gallery_id: &str,
+    photo_id: &str,
+) -> Result<ServerProcessing, String> {
+    let response = session
+        .client
+        .get(endpoint(
+            &session.base_url,
+            &format!("galleries/{gallery_id}"),
+        ))
+        .header("origin", APP_ORIGIN)
+        .send()
+        .await
+        .map_err(|error| transport_error("photo status request failed", error))?;
+    capture_response_cookies(&response, &session.cookies);
+    let detail = require_success(response)
+        .await?
+        .json::<GalleryDetailResponse>()
+        .await
+        .map_err(|error| format!("gallery detail response is invalid: {error}"))?;
+    let photo = detail
+        .photos
+        .into_iter()
+        .find(|photo| photo.id == photo_id)
+        .ok_or_else(|| "PicPortal photo is no longer in the gallery".to_owned())?;
+    Ok(match photo.processing_status.as_str() {
+        "ready" => ServerProcessing::Ready,
+        "failed" => ServerProcessing::Failed,
+        _ => ServerProcessing::InProgress,
+    })
+}
+
+/// Polls the server fallback for a bounded time; a photo still in progress is
+/// returned as such rather than counted as published.
+async fn wait_for_server_processing(
+    session: &PicPortalSession,
+    gallery_id: &str,
+    photo_id: &str,
+    state: &PicPortalState,
+) -> Result<ServerProcessing, String> {
+    for delay in SERVER_PROCESSING_POLL_DELAYS_MS {
+        ensure_publish_not_cancelled(state)?;
+        tokio::time::sleep(Duration::from_millis(*delay)).await;
+        ensure_publish_not_cancelled(state)?;
+        let status = server_processing_status(session, gallery_id, photo_id).await?;
+        if status != ServerProcessing::InProgress {
+            return Ok(status);
+        }
+    }
+    Ok(ServerProcessing::InProgress)
 }
 
 fn face_publication_enabled(
@@ -2422,7 +2586,7 @@ async fn upload_derivatives(
     manifest: &DerivativeManifest,
     preview: &[u8],
     thumbnail: &[u8],
-) -> Result<(), String> {
+) -> Result<DerivativeOutcome, String> {
     let preview_part = reqwest::multipart::Part::bytes(preview.to_vec())
         .file_name("preview.webp")
         .mime_str("image/webp")
@@ -2450,8 +2614,8 @@ async fn upload_derivatives(
     capture_response_cookies(&response, &session.cookies);
     if response.status() == StatusCode::CONFLICT {
         let body = response.text().await.unwrap_or_default();
-        if derivatives_handled_by_server_fallback(StatusCode::CONFLICT, &body) {
-            return Ok(());
+        if derivatives_owned_by_server(StatusCode::CONFLICT, &body) {
+            return Ok(DerivativeOutcome::ServerFallback);
         }
         return Err(format!(
             "HTTP 409: {}",
@@ -2466,7 +2630,7 @@ async fn upload_derivatives(
     if !accepted.accepted {
         return Err("PicPortal rejected the local derivative manifest".to_owned());
     }
-    Ok(())
+    Ok(DerivativeOutcome::Accepted)
 }
 
 async fn upload_face_analysis(
@@ -2648,7 +2812,11 @@ fn mark_queue_error(
             && item.account_id == session.account_id
             && item.gallery_id == gallery_id
     }) {
-        item.state = "failed".to_owned();
+        // A server-processed photo keeps its state so "Resume" checks the
+        // server before posting anything again.
+        if item.state != SERVER_PROCESSING_STATE {
+            item.state = "failed".to_owned();
+        }
         item.last_error = Some(error.to_owned());
     }
 }
@@ -3510,6 +3678,14 @@ mod tests {
     async fn scripted_server(
         respond: impl Fn(&str) -> u16 + Send + Sync + 'static,
     ) -> (String, Arc<Mutex<Vec<String>>>) {
+        scripted_json_server(move |line| (respond(line), "{}".to_owned())).await
+    }
+
+    /// Like `scripted_server`, with a JSON body per answer; request bodies are
+    /// read in full so multipart uploads complete before the reply.
+    async fn scripted_json_server(
+        respond: impl Fn(&str) -> (u16, String) + Send + Sync + 'static,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -3524,18 +3700,44 @@ mod tests {
                 let respond = respond.clone();
                 tokio::spawn(async move {
                     let mut request = Vec::new();
-                    let mut buffer = [0_u8; 1024];
-                    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let mut buffer = [0_u8; 8192];
+                    let header_end = loop {
+                        if let Some(end) =
+                            request.windows(4).position(|window| window == b"\r\n\r\n")
+                        {
+                            break end + 4;
+                        }
+                        match socket.read(&mut buffer).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(read) => request.extend_from_slice(&buffer[..read]),
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&request[..header_end]).to_lowercase();
+                    let chunked = head.contains("transfer-encoding: chunked");
+                    let length = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    loop {
+                        let body = &request[header_end..];
+                        let complete = if chunked {
+                            body.ends_with(b"0\r\n\r\n")
+                        } else {
+                            body.len() >= length
+                        };
+                        if complete {
+                            break;
+                        }
                         match socket.read(&mut buffer).await {
                             Ok(0) | Err(_) => return,
                             Ok(read) => request.extend_from_slice(&buffer[..read]),
                         }
                     }
-                    let text = String::from_utf8_lossy(&request);
+                    let text = String::from_utf8_lossy(&request[..header_end]);
                     let line = text.lines().next().unwrap_or_default().to_owned();
-                    let status = respond(&line);
+                    let (status, body) = respond(&line);
                     log.lock().expect("log").push(line);
-                    let body = "{}";
                     let response = format!(
                         "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                         body.len()
@@ -3552,6 +3754,247 @@ mod tests {
             base_url: base_url.to_owned(),
             ..synthetic_session()
         }
+    }
+
+    fn write_export_jpeg(directory: &Path) -> (String, String) {
+        let image = image::RgbImage::from_fn(640, 480, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8])
+        });
+        let path = directory.join("export.jpg");
+        image.save(&path).expect("write export");
+        let sha = local_derivatives::sha256_hex(&fs::read(&path).expect("read export"));
+        (path.to_string_lossy().into_owned(), sha)
+    }
+
+    /// Queue where the original already reached the server as `photo-1`, so
+    /// `publish_one` goes straight to the derivatives.
+    fn queue_with_original(
+        session: &PicPortalSession,
+        path: &str,
+        sha: &str,
+        state: &str,
+    ) -> QueueFile {
+        QueueFile {
+            items: vec![QueueItem {
+                path: path.to_owned(),
+                api_base_url: session.base_url.clone(),
+                account_id: session.account_id.clone(),
+                gallery_id: "gallery".into(),
+                source_sha256: sha.to_owned(),
+                state: state.to_owned(),
+                photo_id: Some("photo-1".into()),
+                face_analysis_uploaded: false,
+                upload_id: None,
+                upload_offset: 0,
+                last_error: None,
+            }],
+        }
+    }
+
+    /// `publish_one` on the fixture gallery, without face analysis.
+    async fn publish_fixture(
+        session: &PicPortalSession,
+        path: &str,
+        state: &PicPortalState,
+        queue_path: &Path,
+        queue: &mut QueueFile,
+    ) -> Result<PublishItemResult, String> {
+        publish_one(
+            session,
+            &gallery(false),
+            &processing_capabilities(false),
+            false,
+            path,
+            None,
+            state,
+            queue_path,
+            queue,
+        )
+        .await
+    }
+
+    const DERIVATIVES_LINE: &str = "POST /galleries/gallery/photos/photo-1/derivatives HTTP/1.1";
+    const DETAIL_LINE: &str = "GET /galleries/gallery HTTP/1.1";
+
+    /// Scripted PicPortal whose derivative endpoint always hands the photo to
+    /// the server fallback, and whose gallery detail reports `statuses` in
+    /// turn (the last one repeats).
+    async fn fallback_server(
+        statuses: Arc<Mutex<std::collections::VecDeque<&'static str>>>,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
+        scripted_json_server(move |line| {
+            if line == DERIVATIVES_LINE {
+                (
+                    409,
+                    r#"{"error":"DERIVATIVE_STATE_INVALID","fallbackQueued":true}"#.to_owned(),
+                )
+            } else if line == DETAIL_LINE {
+                let mut statuses = statuses.lock().expect("statuses");
+                let status = if statuses.len() > 1 {
+                    statuses.pop_front().expect("status")
+                } else {
+                    statuses.front().copied().unwrap_or("queued")
+                };
+                (
+                    200,
+                    serde_json::json!({
+                        "gallery": { "id": "gallery", "access_token": "not-read" },
+                        "photos": [
+                            { "id": "other", "processing_status": "ready" },
+                            { "id": "photo-1", "processing_status": status },
+                        ],
+                    })
+                    .to_string(),
+                )
+            } else {
+                (404, r#"{"error":"UNEXPECTED"}"#.to_owned())
+            }
+        })
+        .await
+    }
+
+    fn statuses(values: &[&'static str]) -> Arc<Mutex<std::collections::VecDeque<&'static str>>> {
+        Arc::new(Mutex::new(values.iter().copied().collect()))
+    }
+
+    fn queue_state(queue: &QueueFile) -> (&str, Option<&str>) {
+        (
+            queue.items[0].state.as_str(),
+            queue.items[0].photo_id.as_deref(),
+        )
+    }
+
+    #[tokio::test]
+    async fn server_fallback_counts_as_published_only_once_the_server_confirms_ready() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (path, sha) = write_export_jpeg(directory.path());
+        let (base_url, seen) = fallback_server(statuses(&["processing", "ready"])).await;
+        let session = session_at(&base_url);
+        let queue_path = directory.path().join("queue.json");
+        let mut queue = queue_with_original(&session, &path, &sha, "original_uploaded");
+
+        let state = PicPortalState::default();
+        let item = publish_fixture(&session, &path, &state, &queue_path, &mut queue)
+            .await
+            .expect("published");
+
+        assert_eq!(item.state, "uploaded");
+        assert_eq!(item.photo_id.as_deref(), Some("photo-1"));
+        assert_eq!(queue_state(&queue), ("uploaded", Some("photo-1")));
+        assert_eq!(
+            seen.lock().expect("seen").as_slice(),
+            [DERIVATIVES_LINE, DETAIL_LINE, DETAIL_LINE],
+            "no new upload, one status check per poll until ready"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_server_fallback_fails_the_item_and_retry_requeues_the_same_photo() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (path, sha) = write_export_jpeg(directory.path());
+        let script = statuses(&["failed"]);
+        let (base_url, seen) = fallback_server(script.clone()).await;
+        let session = session_at(&base_url);
+        let queue_path = directory.path().join("queue.json");
+        let mut queue = queue_with_original(&session, &path, &sha, "original_uploaded");
+        let state = PicPortalState::default();
+
+        let error = publish_fixture(&session, &path, &state, &queue_path, &mut queue)
+            .await
+            .expect_err("server processing failed");
+        assert!(error.contains("could not process this photo on the server"));
+        mark_queue_error(&mut queue, &path, &session, "gallery", &error);
+        assert_eq!(queue_state(&queue), ("processing", Some("photo-1")));
+        assert_eq!(
+            seen.lock().expect("seen").as_slice(),
+            [DERIVATIVES_LINE, DETAIL_LINE]
+        );
+
+        // Retry: the failure is confirmed, the derivatives are posted again for
+        // the same photo (the server re-queues it), then it becomes ready.
+        seen.lock().expect("seen").clear();
+        *script.lock().expect("statuses") = ["failed", "ready"].into_iter().collect();
+        let item = publish_fixture(&session, &path, &state, &queue_path, &mut queue)
+            .await
+            .expect("published on retry");
+        assert_eq!(item.state, "uploaded");
+        assert_eq!(item.photo_id.as_deref(), Some("photo-1"));
+        assert_eq!(queue_state(&queue), ("uploaded", Some("photo-1")));
+        assert_eq!(
+            seen.lock().expect("seen").as_slice(),
+            [DETAIL_LINE, DERIVATIVES_LINE, DETAIL_LINE]
+        );
+    }
+
+    #[tokio::test]
+    async fn photo_still_processing_stays_pending_and_resume_confirms_it_without_reposting() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (path, sha) = write_export_jpeg(directory.path());
+        let script = statuses(&["processing"]);
+        let (base_url, seen) = fallback_server(script.clone()).await;
+        let session = session_at(&base_url);
+        let queue_path = directory.path().join("queue.json");
+        let mut queue = queue_with_original(&session, &path, &sha, "original_uploaded");
+        let state = PicPortalState::default();
+
+        let item = publish_fixture(&session, &path, &state, &queue_path, &mut queue)
+            .await
+            .expect("reported as processing");
+        assert_eq!(item.state, "processing");
+        assert_eq!(item.photo_id.as_deref(), Some("photo-1"));
+        assert_eq!(queue_state(&queue), ("processing", Some("photo-1")));
+        let saved = load_queue(&queue_path).expect("saved queue");
+        assert_eq!(queue_state(&saved), ("processing", Some("photo-1")));
+        assert_eq!(
+            seen.lock().expect("seen").len(),
+            1 + SERVER_PROCESSING_POLL_DELAYS_MS.len()
+        );
+
+        // Resume while the server still works: one status check, nothing posted.
+        seen.lock().expect("seen").clear();
+        let item = publish_fixture(&session, &path, &state, &queue_path, &mut queue)
+            .await
+            .expect("still processing");
+        assert_eq!(item.state, "processing");
+        assert_eq!(seen.lock().expect("seen").as_slice(), [DETAIL_LINE]);
+
+        // Resume once the server is done: confirmed without any upload.
+        seen.lock().expect("seen").clear();
+        *script.lock().expect("statuses") = ["ready"].into_iter().collect();
+        let item = publish_fixture(&session, &path, &state, &queue_path, &mut queue)
+            .await
+            .expect("published");
+        assert_eq!(item.state, "uploaded");
+        assert_eq!(item.photo_id.as_deref(), Some("photo-1"));
+        assert_eq!(queue_state(&queue), ("uploaded", Some("photo-1")));
+        assert_eq!(seen.lock().expect("seen").as_slice(), [DETAIL_LINE]);
+    }
+
+    #[tokio::test]
+    async fn cancelling_while_the_server_processes_keeps_the_photo_for_resume() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (path, sha) = write_export_jpeg(directory.path());
+        let (base_url, seen) = fallback_server(statuses(&["processing"])).await;
+        let session = session_at(&base_url);
+        let mut queue = queue_with_original(&session, &path, &sha, "original_uploaded");
+        let state = PicPortalState::default();
+        let mut queue_after_post = queue_with_original(&session, &path, &sha, "processing");
+        // Cancelled before the first status poll.
+        state.publish_cancelled.store(true, Ordering::SeqCst);
+        let error = wait_for_server_processing(&session, "gallery", "photo-1", &state)
+            .await
+            .expect_err("cancelled");
+        assert!(error.contains("cancelled"));
+        mark_queue_error(&mut queue_after_post, &path, &session, "gallery", &error);
+        assert_eq!(
+            queue_state(&queue_after_post),
+            ("processing", Some("photo-1"))
+        );
+        assert!(seen.lock().expect("seen").is_empty());
+
+        // An unrelated failure still marks an ordinary item as failed.
+        mark_queue_error(&mut queue, &path, &session, "gallery", "HTTP 500: boom");
+        assert_eq!(queue_state(&queue), ("failed", Some("photo-1")));
     }
 
     #[tokio::test]
@@ -3623,6 +4066,8 @@ mod tests {
         failures: std::collections::HashMap<String, std::collections::VecDeque<String>>,
         refresh_succeeds: bool,
         cancel_after_attempts: Option<usize>,
+        /// Paths the server is still processing when published.
+        processing: Vec<String>,
         attempts: Vec<String>,
         refreshes: usize,
         recorded_failures: Vec<String>,
@@ -3656,9 +4101,14 @@ mod tests {
             {
                 return Err(error);
             }
+            let state = if self.processing.iter().any(|pending| pending == path) {
+                SERVER_PROCESSING_STATE
+            } else {
+                "uploaded"
+            };
             Ok(PublishItemResult {
                 path: path.to_owned(),
-                state: "uploaded".to_owned(),
+                state: state.to_owned(),
                 photo_id: Some(format!("photo-{path}")),
                 error: None,
             })
@@ -3689,6 +4139,26 @@ mod tests {
             .iter()
             .map(|item| (item.path.as_str(), item.state.as_str()))
             .collect()
+    }
+
+    #[tokio::test]
+    async fn photos_still_processed_by_the_server_are_pending_not_completed() {
+        let mut driver = ScriptedPublication {
+            processing: paths(&["b"]),
+            ..Default::default()
+        };
+        let mut refresh_available = true;
+        let outcome =
+            drive_publication(paths(&["a", "b", "c"]), &mut refresh_available, &mut driver).await;
+
+        assert_eq!(outcome.result.completed, 2);
+        assert_eq!(outcome.result.failed, 0);
+        assert_eq!(outcome.result.pending, 1);
+        assert!(!outcome.result.cancelled);
+        assert_eq!(
+            states(&outcome.result),
+            [("a", "uploaded"), ("b", "processing"), ("c", "uploaded")]
+        );
     }
 
     #[tokio::test]
@@ -3912,21 +4382,22 @@ mod tests {
     }
 
     #[test]
-    fn only_a_queued_server_fallback_conflict_counts_as_published_derivatives() {
-        let queued = r#"{"error":"DERIVATIVE_STATE_INVALID","fallbackQueued":true}"#;
-        assert!(derivatives_handled_by_server_fallback(
-            StatusCode::CONFLICT,
-            queued
-        ));
-        assert!(!derivatives_handled_by_server_fallback(
+    fn only_a_derivative_state_conflict_hands_the_photo_to_the_server() {
+        for body in [
+            r#"{"error":"DERIVATIVE_STATE_INVALID","fallbackQueued":true}"#,
+            r#"{"error":"DERIVATIVE_STATE_INVALID","fallbackQueued":false}"#,
+        ] {
+            assert!(derivatives_owned_by_server(StatusCode::CONFLICT, body));
+        }
+        assert!(!derivatives_owned_by_server(
             StatusCode::UNPROCESSABLE_ENTITY,
             r#"{"error":"DERIVATIVE_MANIFEST_INVALID","fallbackQueued":true}"#
         ));
-        assert!(!derivatives_handled_by_server_fallback(
+        assert!(!derivatives_owned_by_server(
             StatusCode::CONFLICT,
-            r#"{"error":"DERIVATIVE_STATE_INVALID"}"#
+            r#"{"error":"PHOTO_ORIGINAL_NOT_READY","fallbackQueued":true}"#
         ));
-        assert!(!derivatives_handled_by_server_fallback(
+        assert!(!derivatives_owned_by_server(
             StatusCode::CONFLICT,
             "not json"
         ));
