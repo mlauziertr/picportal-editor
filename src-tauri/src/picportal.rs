@@ -90,6 +90,8 @@ pub struct PicPortalSessionStatus {
 pub struct PublishResult {
     pub completed: usize,
     pub failed: usize,
+    /// Items not attempted because the run stopped (cancel or rejected session).
+    pub pending: usize,
     pub cancelled: bool,
     pub items: Vec<PublishItemResult>,
 }
@@ -109,7 +111,7 @@ pub struct PublishItemResult {
     pub path: String,
     pub state: String,
     pub photo_id: Option<String>,
-    pub error: Option<String>,
+    pub error: Option<PicPortalError>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -512,8 +514,134 @@ async fn require_success(response: reqwest::Response) -> Result<reqwest::Respons
     }
 }
 
+// 403 stays a session invalidation until the production server shows that it
+// never signals a rejected session (CSRF/origin); see MAX-22.
 fn is_auth_failure(error: &str) -> bool {
     error.contains("HTTP 401:") || error.contains("HTTP 403:")
+}
+
+const OFFLINE_MARKER: &str = "[network:offline]";
+const TIMEOUT_MARKER: &str = "[network:timeout]";
+
+/// Formats a transport failure so the command boundary can still tell an
+/// unreachable server from a timeout after the error became a string.
+fn transport_error(context: &str, error: reqwest::Error) -> String {
+    let marker = if error.is_timeout() {
+        TIMEOUT_MARKER
+    } else if error.is_connect() || error.is_request() || error.is_body() {
+        OFFLINE_MARKER
+    } else {
+        ""
+    };
+    if marker.is_empty() {
+        format!("{context}: {error}")
+    } else {
+        format!("{context} {marker}: {error}")
+    }
+}
+
+fn http_status(error: &str) -> Option<u16> {
+    let (_, rest) = error.split_once("HTTP ")?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    if digits.len() == 3 && rest[digits.len()..].starts_with(':') {
+        digits.parse().ok()
+    } else {
+        None
+    }
+}
+
+/// Error returned by every PicPortal Tauri command. `message` is technical
+/// detail for "copy details"; the interface chooses its text from `code`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PicPortalError {
+    pub code: &'static str,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub retryable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+}
+
+impl PicPortalError {
+    fn classify(message: String) -> Self {
+        let status = http_status(&message);
+        let code = if message.contains("secure session storage could not be cleared") {
+            "session_clear_failed"
+        } else if message == SESSION_EXPIRED_MESSAGE
+            || message.starts_with("log in to PicPortal")
+            || message.starts_with("PicPortal account changed")
+        {
+            "session_expired"
+        } else if message.contains("remote logout could not be confirmed") {
+            "logout_unconfirmed"
+        } else if message.contains("PicPortal export cancelled") {
+            "cancelled"
+        } else if message.contains("another PicPortal publication is already running") {
+            "already_running"
+        } else if message.contains("local derivative processing is disabled by the server") {
+            "derivatives_disabled"
+        } else if message.contains("selected PicPortal gallery no longer exists") {
+            "gallery_not_found"
+        } else if message.contains("PicPortal rendering") {
+            "render_failed"
+        } else if message.contains(TIMEOUT_MARKER) {
+            "timeout"
+        } else if message.contains(OFFLINE_MARKER) {
+            "offline"
+        } else {
+            match status {
+                Some(401) => "session_expired",
+                Some(403) => "forbidden",
+                Some(404) => "gallery_not_found",
+                Some(413) => "file_too_large",
+                Some(500..=599) => "server",
+                _ => "unknown",
+            }
+        };
+        let retryable = matches!(
+            code,
+            "offline" | "timeout" | "server" | "render_failed" | "cancelled" | "unknown"
+        );
+        Self {
+            code,
+            message,
+            path: None,
+            retryable,
+            status,
+        }
+    }
+
+    /// Classifies a failure of the login request itself, where 401 means the
+    /// credentials were refused rather than an expired session.
+    fn login(message: String) -> Self {
+        let mut error = Self::classify(message);
+        if error.status == Some(401) {
+            error.code = "bad_credentials";
+            error.retryable = false;
+        }
+        error
+    }
+
+    fn for_path(message: String, path: &str) -> Self {
+        Self {
+            path: Some(path.to_owned()),
+            ..Self::classify(message)
+        }
+    }
+}
+
+impl From<String> for PicPortalError {
+    fn from(message: String) -> Self {
+        Self::classify(message)
+    }
+}
+
+impl std::fmt::Display for PicPortalError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
 }
 
 fn clear_session_state(state: &PicPortalState) {
@@ -604,7 +732,7 @@ async fn session_identity(session: &PicPortalSession) -> Result<MeResponse, Stri
         .header("origin", APP_ORIGIN)
         .send()
         .await
-        .map_err(|error| format!("PicPortal identity request failed: {error}"))?;
+        .map_err(|error| transport_error("PicPortal identity request failed", error))?;
     capture_response_cookies(&response, &session.cookies);
     require_success(response)
         .await?
@@ -625,6 +753,29 @@ async fn refresh_native_session(session: &PicPortalSession) -> bool {
     };
     capture_response_cookies(&response, &session.cookies);
     response.status().is_success()
+}
+
+/// Runs a session request and, on an authentication failure, spends the
+/// command's single native-session refresh before replaying it once.
+async fn with_session_refresh<T, F, Fut>(
+    session: &PicPortalSession,
+    refresh_available: &mut bool,
+    mut request: F,
+) -> Result<T, String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    match request().await {
+        Err(error) if is_auth_failure(&error) && std::mem::take(refresh_available) => {
+            if refresh_native_session(session).await {
+                request().await
+            } else {
+                Err(error)
+            }
+        }
+        result => result,
+    }
 }
 
 fn persist_login_session(
@@ -671,9 +822,11 @@ pub async fn picportal_login(
     email: String,
     password: String,
     state: State<'_, PicPortalState>,
-) -> Result<PicPortalLoginResult, String> {
+) -> Result<PicPortalLoginResult, PicPortalError> {
     if email.trim().is_empty() || password.is_empty() {
-        return Err("PicPortal email and password are required".to_owned());
+        return Err("PicPortal email and password are required"
+            .to_owned()
+            .into());
     }
     let (client, cookies) = production_client(&[])?;
     let login_response = client
@@ -682,9 +835,11 @@ pub async fn picportal_login(
         .json(&serde_json::json!({ "email": email.trim(), "password": password }))
         .send()
         .await
-        .map_err(|error| format!("PicPortal login failed: {error}"))?;
+        .map_err(|error| transport_error("PicPortal login failed", error))?;
     capture_response_cookies(&login_response, &cookies);
-    let login_response = require_success(login_response).await?;
+    let login_response = require_success(login_response)
+        .await
+        .map_err(PicPortalError::login)?;
     let login = login_response
         .json::<LoginResponse>()
         .await
@@ -731,7 +886,7 @@ pub async fn picportal_login(
 #[tauri::command]
 pub async fn picportal_restore_session(
     state: State<'_, PicPortalState>,
-) -> Result<PicPortalSessionStatus, String> {
+) -> Result<PicPortalSessionStatus, PicPortalError> {
     let existing = state
         .session
         .lock()
@@ -745,10 +900,10 @@ pub async fn picportal_restore_session(
                 return if message == SESSION_EXPIRED_MESSAGE {
                     Ok(disconnected_status(Some(message)))
                 } else {
-                    Err(message)
+                    Err(message.into())
                 };
             }
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.into()),
         };
         let _ = store_stored_session(&session);
         return Ok(PicPortalSessionStatus {
@@ -784,15 +939,15 @@ pub async fn picportal_restore_session(
             return if message == SESSION_EXPIRED_MESSAGE {
                 Ok(disconnected_status(Some(message)))
             } else {
-                Err(message)
+                Err(message.into())
             };
         }
-        Err(error) => return Err(error),
+        Err(error) => return Err(error.into()),
     };
     let (account_id, admin) = admin_identity(me, &session.admin)?;
     if account_id != session.account_id {
         if let Err(error) = invalidate_session(&state, None) {
-            return Err(format!("PicPortal account changed; {error}"));
+            return Err(format!("PicPortal account changed; {error}").into());
         }
         return Ok(disconnected_status(Some(
             "PicPortal account changed; connect again".to_owned(),
@@ -806,7 +961,7 @@ pub async fn picportal_restore_session(
             if message == SESSION_EXPIRED_MESSAGE {
                 return Ok(disconnected_status(Some(message)));
             }
-            return Err(message);
+            return Err(message.into());
         }
     };
     let message = store_stored_session(&session).err();
@@ -825,7 +980,7 @@ pub async fn picportal_restore_session(
 }
 
 #[tauri::command]
-pub async fn picportal_logout(state: State<'_, PicPortalState>) -> Result<(), String> {
+pub async fn picportal_logout(state: State<'_, PicPortalState>) -> Result<(), PicPortalError> {
     let session = state
         .session
         .lock()
@@ -848,20 +1003,20 @@ pub async fn picportal_logout(state: State<'_, PicPortalState>) -> Result<(), St
                     remote_error = Some(error);
                 }
             }
-            Err(error) => remote_error = Some(format!("PicPortal logout failed: {error}")),
+            Err(error) => remote_error = Some(transport_error("PicPortal logout failed", error)),
         }
     }
-    complete_picportal_logout(&state, clear_stored_session(), remote_error)
+    complete_picportal_logout(&state, clear_stored_session(), remote_error).map_err(Into::into)
 }
 
 #[tauri::command]
 pub async fn picportal_galleries(
     state: State<'_, PicPortalState>,
     app: AppHandle,
-) -> Result<Vec<GallerySummary>, String> {
+) -> Result<Vec<GallerySummary>, PicPortalError> {
     let session = current_session(&state)?;
-    let galleries = session
-        .galleries()
+    let mut refresh_available = true;
+    let galleries = with_session_refresh(&session, &mut refresh_available, || session.galleries())
         .await
         .map_err(|error| session_error(error, &state, Some(&app)))?;
     let _ = store_stored_session(&session);
@@ -873,7 +1028,7 @@ pub async fn picportal_create_gallery(
     input: CreateGalleryInput,
     state: State<'_, PicPortalState>,
     app: AppHandle,
-) -> Result<GallerySummary, String> {
+) -> Result<GallerySummary, PicPortalError> {
     let session = current_session(&state)?;
     let (title, face_filter_enabled, payload) = create_gallery_payload(input)?;
     let response = session
@@ -883,7 +1038,7 @@ pub async fn picportal_create_gallery(
         .json(&payload)
         .send()
         .await
-        .map_err(|error| format!("gallery creation failed: {error}"))
+        .map_err(|error| transport_error("gallery creation failed", error))
         .map_err(|error| session_error(error, &state, Some(&app)))?;
     capture_response_cookies(&response, &session.cookies);
     let created = require_success(response)
@@ -990,70 +1145,91 @@ fn emit_publish_progress(app: &AppHandle, current: usize, total: usize, stage: &
     );
 }
 
-async fn publish_paths(
+/// Per-item operations of a publication run, kept apart from the loop so the
+/// session-expiry and pending semantics can be exercised without a server.
+trait PublicationDriver {
+    fn is_cancelled(&self) -> bool;
+    fn progress(&mut self, current: usize, total: usize);
+    async fn publish(&mut self, path: &str) -> Result<PublishItemResult, String>;
+    async fn refresh_session(&mut self) -> bool;
+    fn record_failure(&mut self, path: &str, error: &str);
+    /// Drops the rejected session and returns the message reported for it.
+    fn invalidate_session(&mut self, error: &str) -> String;
+}
+
+struct PublicationOutcome {
+    result: PublishResult,
+    session_invalidated: bool,
+}
+
+fn pending_item(path: String) -> PublishItemResult {
+    PublishItemResult {
+        path,
+        state: "pending".to_owned(),
+        photo_id: None,
+        error: None,
+    }
+}
+
+/// Publishes `paths` in order. An authentication failure spends the command's
+/// single session refresh and replays the current item once; if the session
+/// is still rejected it is invalidated and the untried items are returned as
+/// `pending` so "Resume" can finish them after reconnecting.
+async fn drive_publication(
     paths: Vec<String>,
-    session: &PicPortalSession,
-    gallery: &GallerySummary,
-    capabilities: &ProcessingCapabilities,
-    publish_faces: bool,
-    app: &AppHandle,
-    state: &PicPortalState,
-) -> Result<PublishResult, String> {
-    let queue_path = queue_path(app)?;
-    let mut queue = load_queue(&queue_path)?;
+    refresh_available: &mut bool,
+    driver: &mut impl PublicationDriver,
+) -> PublicationOutcome {
     let total = paths.len();
     let mut result = PublishResult {
         completed: 0,
         failed: 0,
+        pending: 0,
         cancelled: false,
         items: Vec::new(),
     };
     let mut session_invalidated = false;
+    let mut remaining = paths.into_iter().enumerate();
 
-    for (index, path) in paths.into_iter().enumerate() {
-        if state.publish_cancelled.load(Ordering::SeqCst) {
+    for (index, path) in remaining.by_ref() {
+        if driver.is_cancelled() {
             result.cancelled = true;
+            result.pending += 1;
+            result.items.push(pending_item(path));
             break;
         }
-        emit_publish_progress(app, index, total, "uploading");
-        let item_result = publish_one(
-            session,
-            gallery,
-            capabilities,
-            publish_faces,
-            &path,
-            app,
-            state,
-            &queue_path,
-            &mut queue,
-        )
-        .await;
-        match item_result {
+        driver.progress(index, total);
+        let mut attempt = driver.publish(&path).await;
+        if let Err(error) = &attempt
+            && is_auth_failure(error)
+            && !driver.is_cancelled()
+            && std::mem::take(refresh_available)
+            && driver.refresh_session().await
+        {
+            attempt = driver.publish(&path).await;
+        }
+        match attempt {
             Ok(item) => {
                 result.completed += 1;
                 result.items.push(item);
             }
             Err(error) => {
-                let authentication_failed = is_auth_failure(&error);
                 result.failed += 1;
-                mark_queue_error(&mut queue, &path, session, &gallery.id, &error);
-                let message = if authentication_failed {
+                driver.record_failure(&path, &error);
+                let message = if is_auth_failure(&error) {
                     session_invalidated = true;
-                    auth_failure_message(&error, invalidate_session(state, Some(app)))
+                    driver.invalidate_session(&error)
                 } else {
                     error
                 };
+                let cancelled = driver.is_cancelled();
                 result.items.push(PublishItemResult {
-                    path,
-                    state: if state.publish_cancelled.load(Ordering::SeqCst) {
-                        "cancelled".to_owned()
-                    } else {
-                        "failed".to_owned()
-                    },
+                    state: if cancelled { "cancelled" } else { "failed" }.to_owned(),
                     photo_id: None,
-                    error: Some(message),
+                    error: Some(PicPortalError::for_path(message, &path)),
+                    path,
                 });
-                if state.publish_cancelled.load(Ordering::SeqCst) {
+                if cancelled {
                     result.cancelled = true;
                     break;
                 }
@@ -1062,19 +1238,98 @@ async fn publish_paths(
                 }
             }
         }
-        emit_publish_progress(app, index + 1, total, "uploading");
-        if session_invalidated {
-            break;
-        }
+        driver.progress(index + 1, total);
     }
-    if state.publish_cancelled.load(Ordering::SeqCst) {
+    for (_, path) in remaining {
+        result.pending += 1;
+        result.items.push(pending_item(path));
+    }
+    if driver.is_cancelled() {
         result.cancelled = true;
     }
-    save_queue(&queue_path, &queue)?;
-    if !session_invalidated {
+    PublicationOutcome {
+        result,
+        session_invalidated,
+    }
+}
+
+struct LivePublication<'a> {
+    session: &'a PicPortalSession,
+    gallery: &'a GallerySummary,
+    capabilities: &'a ProcessingCapabilities,
+    publish_faces: bool,
+    app: &'a AppHandle,
+    state: &'a PicPortalState,
+    queue_path: PathBuf,
+    queue: QueueFile,
+}
+
+impl PublicationDriver for LivePublication<'_> {
+    fn is_cancelled(&self) -> bool {
+        self.state.publish_cancelled.load(Ordering::SeqCst)
+    }
+
+    fn progress(&mut self, current: usize, total: usize) {
+        emit_publish_progress(self.app, current, total, "uploading");
+    }
+
+    async fn publish(&mut self, path: &str) -> Result<PublishItemResult, String> {
+        publish_one(
+            self.session,
+            self.gallery,
+            self.capabilities,
+            self.publish_faces,
+            path,
+            self.app,
+            self.state,
+            &self.queue_path,
+            &mut self.queue,
+        )
+        .await
+    }
+
+    async fn refresh_session(&mut self) -> bool {
+        refresh_native_session(self.session).await
+    }
+
+    fn record_failure(&mut self, path: &str, error: &str) {
+        mark_queue_error(&mut self.queue, path, self.session, &self.gallery.id, error);
+    }
+
+    fn invalidate_session(&mut self, error: &str) -> String {
+        auth_failure_message(error, invalidate_session(self.state, Some(self.app)))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn publish_paths(
+    paths: Vec<String>,
+    session: &PicPortalSession,
+    gallery: &GallerySummary,
+    capabilities: &ProcessingCapabilities,
+    publish_faces: bool,
+    refresh_available: &mut bool,
+    app: &AppHandle,
+    state: &PicPortalState,
+) -> Result<PublishResult, String> {
+    let queue_path = queue_path(app)?;
+    let queue = load_queue(&queue_path)?;
+    let mut driver = LivePublication {
+        session,
+        gallery,
+        capabilities,
+        publish_faces,
+        app,
+        state,
+        queue_path,
+        queue,
+    };
+    let outcome = drive_publication(paths, refresh_available, &mut driver).await;
+    save_queue(&driver.queue_path, &driver.queue)?;
+    if !outcome.session_invalidated {
         let _ = store_stored_session(session);
     }
-    Ok(result)
+    Ok(outcome.result)
 }
 
 fn normalize_picportal_output_format(output_format: &str) -> Result<String, String> {
@@ -1241,32 +1496,41 @@ pub async fn picportal_export(
     app: AppHandle,
     state: State<'_, PicPortalState>,
     export_state: State<'_, AppState>,
-) -> Result<PublishResult, String> {
+) -> Result<PublishResult, PicPortalError> {
     if paths.is_empty() {
-        return Err("select at least one image for PicPortal export".to_owned());
+        return Err("select at least one image for PicPortal export"
+            .to_owned()
+            .into());
     }
     let output_format = normalize_picportal_output_format(&output_format)?;
     if export_settings.export_masks {
         return Err(
             "PicPortal export does not upload separate mask files; turn off Export masks"
-                .to_owned(),
+                .to_owned()
+                .into(),
         );
     }
     let session = current_session(&state)?;
-    let galleries = session
-        .galleries()
+    // One refresh per publication command, shared by preflight and uploads.
+    let mut refresh_available = true;
+    let galleries = with_session_refresh(&session, &mut refresh_available, || session.galleries())
         .await
         .map_err(|error| session_error(error, &state, Some(&app)))?;
     let gallery = galleries
         .into_iter()
         .find(|gallery| gallery.id == gallery_id)
         .ok_or_else(|| "selected PicPortal gallery no longer exists".to_owned())?;
-    let capabilities = session
-        .processing_capabilities()
-        .await
-        .map_err(|error| session_error(error, &state, Some(&app)))?;
+    let capabilities = with_session_refresh(&session, &mut refresh_available, || {
+        session.processing_capabilities()
+    })
+    .await
+    .map_err(|error| session_error(error, &state, Some(&app)))?;
     if !capabilities.derivatives.tauri_enabled {
-        return Err("PicPortal local derivative processing is disabled by the server".to_owned());
+        return Err(
+            "PicPortal local derivative processing is disabled by the server"
+                .to_owned()
+                .into(),
+        );
     }
     let publish_faces = face_publication_enabled(&gallery, &capabilities, include_face_analysis)?;
     let operation_id = direct_export_operation_id(
@@ -1319,21 +1583,27 @@ pub async fn picportal_export(
             if state.publish_cancelled.load(Ordering::SeqCst) {
                 return Err(
                     "PicPortal export cancelled; generated files were kept for a safe retry"
-                        .to_owned(),
+                        .to_owned()
+                        .into(),
                 );
             }
             return Err(format!(
                 "PicPortal rendering completed with {errors} error(s); no upload was started"
-            ));
+            )
+            .into());
         }
         Err(_) if state.publish_cancelled.load(Ordering::SeqCst) => {
             return Err(
-                "PicPortal export cancelled; generated files were kept for a safe retry".to_owned(),
+                "PicPortal export cancelled; generated files were kept for a safe retry"
+                    .to_owned()
+                    .into(),
             );
         }
         Err(_) => {
             return Err(
-                "PicPortal rendering task ended unexpectedly; no upload was started".to_owned(),
+                "PicPortal rendering task ended unexpectedly; no upload was started"
+                    .to_owned()
+                    .into(),
             );
         }
     }
@@ -1345,6 +1615,7 @@ pub async fn picportal_export(
         &gallery,
         &capabilities,
         publish_faces,
+        &mut refresh_available,
         &app,
         &state,
     )
@@ -1373,7 +1644,7 @@ impl PicPortalSession {
             .header("origin", APP_ORIGIN)
             .send()
             .await
-            .map_err(|error| format!("gallery request failed: {error}"))?;
+            .map_err(|error| transport_error("gallery request failed", error))?;
         capture_response_cookies(&response, &self.cookies);
         let response = require_success(response).await?;
         let value = response
@@ -1394,7 +1665,7 @@ impl PicPortalSession {
             .header("origin", APP_ORIGIN)
             .send()
             .await
-            .map_err(|error| format!("processing capabilities request failed: {error}"))?;
+            .map_err(|error| transport_error("processing capabilities request failed", error))?;
         capture_response_cookies(&response, &self.cookies);
         require_success(response)
             .await?
@@ -1868,7 +2139,7 @@ async fn upload_original(
     let mut start = start_request(requested_upload_id.as_deref())
         .send()
         .await
-        .map_err(|error| format!("upload session failed: {error}"))?;
+        .map_err(|error| transport_error("upload session failed", error))?;
     capture_response_cookies(&start, &session.cookies);
     if requested_upload_id.is_some()
         && matches!(start.status(), StatusCode::NOT_FOUND | StatusCode::CONFLICT)
@@ -1880,7 +2151,7 @@ async fn upload_original(
         start = start_request(None)
             .send()
             .await
-            .map_err(|error| format!("new upload session failed: {error}"))?;
+            .map_err(|error| transport_error("new upload session failed", error))?;
         capture_response_cookies(&start, &session.cookies);
     }
     if start.status() == StatusCode::NOT_FOUND {
@@ -1970,7 +2241,7 @@ async fn upload_original(
             .body(chunk)
             .send()
             .await
-            .map_err(|error| format!("upload chunk failed: {error}"))?;
+            .map_err(|error| transport_error("upload chunk failed", error))?;
         capture_response_cookies(&response, &session.cookies);
         let payload = require_success(response)
             .await?
@@ -2003,7 +2274,7 @@ async fn upload_original(
         .json(&serde_json::json!({ "sha256": source_sha256, "deferProcessing": true }))
         .send()
         .await
-        .map_err(|error| format!("upload completion failed: {error}"))?;
+        .map_err(|error| transport_error("upload completion failed", error))?;
     capture_response_cookies(&complete, &session.cookies);
     let photo = require_success(complete)
         .await?
@@ -2049,7 +2320,7 @@ async fn upload_multipart(
         .multipart(form)
         .send()
         .await
-        .map_err(|error| format!("multipart upload failed: {error}"))?;
+        .map_err(|error| transport_error("multipart upload failed", error))?;
     capture_response_cookies(&response, &session.cookies);
     let photo = require_success(response)
         .await?
@@ -2094,7 +2365,7 @@ async fn upload_derivatives(
         .multipart(form)
         .send()
         .await
-        .map_err(|error| format!("derivative upload failed: {error}"))?;
+        .map_err(|error| transport_error("derivative upload failed", error))?;
     capture_response_cookies(&response, &session.cookies);
     let accepted = require_success(response)
         .await?
@@ -2133,7 +2404,7 @@ async fn upload_face_analysis(
         .multipart(form)
         .send()
         .await
-        .map_err(|error| format!("face analysis upload failed: {error}"))?;
+        .map_err(|error| transport_error("face analysis upload failed", error))?;
     capture_response_cookies(&response, &session.cookies);
     let accepted = require_success(response)
         .await?
@@ -2985,5 +3256,524 @@ mod tests {
             Some("new-upload")
         );
         assert_eq!(restored_after_second_crash.items[0].upload_offset, 128);
+    }
+
+    #[test]
+    fn command_errors_are_classified_for_the_interface() {
+        let cases = [
+            (SESSION_EXPIRED_MESSAGE.to_owned(), "session_expired", false),
+            (
+                "log in to PicPortal before using publication".to_owned(),
+                "session_expired",
+                false,
+            ),
+            (
+                "PicPortal authentication was rejected (HTTP 401: expired); PicPortal session invalidation not completed because secure session storage could not be cleared: keyring".to_owned(),
+                "session_clear_failed",
+                false,
+            ),
+            (
+                "PicPortal session was removed locally, but remote logout could not be confirmed: PicPortal logout failed [network:offline]: dns".to_owned(),
+                "logout_unconfirmed",
+                false,
+            ),
+            (
+                format!("gallery request failed {OFFLINE_MARKER}: dns error"),
+                "offline",
+                true,
+            ),
+            (
+                format!("upload chunk failed {TIMEOUT_MARKER}: operation timed out"),
+                "timeout",
+                true,
+            ),
+            ("HTTP 503: maintenance".to_owned(), "server", true),
+            ("HTTP 413: too large".to_owned(), "file_too_large", false),
+            ("HTTP 404: gallery not found".to_owned(), "gallery_not_found", false),
+            ("HTTP 403: forbidden".to_owned(), "forbidden", false),
+            ("HTTP 401: unauthorized".to_owned(), "session_expired", false),
+            ("HTTP 419: page expired".to_owned(), "unknown", true),
+            (
+                "PicPortal local derivative processing is disabled by the server".to_owned(),
+                "derivatives_disabled",
+                false,
+            ),
+            (
+                "another PicPortal publication is already running".to_owned(),
+                "already_running",
+                false,
+            ),
+            (
+                "PicPortal rendering completed with 2 error(s); no upload was started".to_owned(),
+                "render_failed",
+                true,
+            ),
+            (
+                "PicPortal export cancelled; generated files were kept for a safe retry".to_owned(),
+                "cancelled",
+                true,
+            ),
+            (
+                "selected PicPortal gallery no longer exists".to_owned(),
+                "gallery_not_found",
+                false,
+            ),
+            ("gallery response is invalid: EOF".to_owned(), "unknown", true),
+        ];
+        for (message, code, retryable) in cases {
+            let error = PicPortalError::from(message.clone());
+            assert_eq!(error.code, code, "{message}");
+            assert_eq!(error.retryable, retryable, "{message}");
+            assert_eq!(error.message, message);
+        }
+        assert_eq!(
+            PicPortalError::from("HTTP 503: x".to_owned()).status,
+            Some(503)
+        );
+        assert_eq!(PicPortalError::from("no status".to_owned()).status, None);
+    }
+
+    #[test]
+    fn login_rejection_is_bad_credentials_but_other_login_failures_are_not() {
+        assert_eq!(
+            PicPortalError::login("HTTP 401: invalid credentials".to_owned()).code,
+            "bad_credentials"
+        );
+        assert_eq!(
+            PicPortalError::login("HTTP 502: gateway".to_owned()).code,
+            "server"
+        );
+        assert_eq!(
+            PicPortalError::login(format!("PicPortal login failed {OFFLINE_MARKER}: dns")).code,
+            "offline"
+        );
+    }
+
+    #[test]
+    fn structured_errors_serialize_with_the_agreed_shape() {
+        let error = PicPortalError::for_path("HTTP 413: too large".to_owned(), "/staging/a.jpg");
+        assert_eq!(
+            serde_json::to_value(&error).expect("serialize"),
+            serde_json::json!({
+                "code": "file_too_large",
+                "message": "HTTP 413: too large",
+                "path": "/staging/a.jpg",
+                "retryable": false,
+                "status": 413,
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(PicPortalError::from("boom".to_owned())).expect("serialize"),
+            serde_json::json!({ "code": "unknown", "message": "boom", "retryable": true })
+        );
+    }
+
+    #[tokio::test]
+    async fn transport_errors_distinguish_offline_from_timeout() {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let closed_url = format!("http://{}/", closed.local_addr().expect("address"));
+        drop(closed);
+        let offline = Client::new()
+            .get(&closed_url)
+            .send()
+            .await
+            .expect_err("closed port must fail");
+        assert_eq!(
+            PicPortalError::from(transport_error("gallery request failed", offline)).code,
+            "offline"
+        );
+
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let silent_url = format!("http://{}/", silent.local_addr().expect("address"));
+        let hold = tokio::spawn(async move {
+            let (_socket, _) = silent.accept().await.expect("accept");
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        let timeout = Client::builder()
+            .timeout(Duration::from_millis(200))
+            .build()
+            .expect("client")
+            .get(&silent_url)
+            .send()
+            .await
+            .expect_err("silent server must time out");
+        assert_eq!(
+            PicPortalError::from(transport_error("upload chunk failed", timeout)).code,
+            "timeout"
+        );
+        hold.abort();
+    }
+
+    /// Minimal local HTTP server: answers each request with the status chosen
+    /// by `respond` for its request line and records the request lines seen.
+    async fn scripted_server(
+        respond: impl Fn(&str) -> u16 + Send + Sync + 'static,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let base_url = format!("http://{}", listener.local_addr().expect("address"));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let respond = Arc::new(respond);
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let log = log.clone();
+                let respond = respond.clone();
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut buffer = [0_u8; 1024];
+                    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        match socket.read(&mut buffer).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(read) => request.extend_from_slice(&buffer[..read]),
+                        }
+                    }
+                    let text = String::from_utf8_lossy(&request);
+                    let line = text.lines().next().unwrap_or_default().to_owned();
+                    let status = respond(&line);
+                    log.lock().expect("log").push(line);
+                    let body = "{}";
+                    let response = format!(
+                        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        (base_url, seen)
+    }
+
+    fn session_at(base_url: &str) -> PicPortalSession {
+        PicPortalSession {
+            base_url: base_url.to_owned(),
+            ..synthetic_session()
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_request_is_replayed_once_after_a_successful_native_refresh() {
+        let (base_url, seen) = scripted_server(|_| 200).await;
+        let session = session_at(&base_url);
+        let mut refresh_available = true;
+        let attempts = Arc::new(Mutex::new(0));
+        let result = with_session_refresh(&session, &mut refresh_available, || {
+            let attempts = attempts.clone();
+            async move {
+                let mut attempts = attempts.lock().expect("attempts");
+                *attempts += 1;
+                if *attempts == 1 {
+                    Err("HTTP 401: expired".to_owned())
+                } else {
+                    Ok("galleries")
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(result, Ok("galleries"));
+        assert_eq!(*attempts.lock().expect("attempts"), 2);
+        assert!(!refresh_available, "the command's refresh is spent");
+        assert_eq!(
+            seen.lock().expect("seen").as_slice(),
+            [format!("POST /{NATIVE_SESSION_REFRESH_PATH} HTTP/1.1")]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_refresh_or_spent_budget_returns_the_original_rejection() {
+        let (base_url, seen) = scripted_server(|_| 401).await;
+        let session = session_at(&base_url);
+        let mut refresh_available = true;
+        let result: Result<(), String> =
+            with_session_refresh(&session, &mut refresh_available, || async {
+                Err("HTTP 401: expired".to_owned())
+            })
+            .await;
+        assert_eq!(result, Err("HTTP 401: expired".to_owned()));
+        assert_eq!(seen.lock().expect("seen").len(), 1);
+
+        let result: Result<(), String> =
+            with_session_refresh(&session, &mut refresh_available, || async {
+                Err("HTTP 401: expired".to_owned())
+            })
+            .await;
+        assert_eq!(result, Err("HTTP 401: expired".to_owned()));
+        assert_eq!(seen.lock().expect("seen").len(), 1, "no second refresh");
+
+        let mut refresh_available = true;
+        let result: Result<(), String> =
+            with_session_refresh(&session, &mut refresh_available, || async {
+                Err("HTTP 503: down".to_owned())
+            })
+            .await;
+        assert_eq!(result, Err("HTTP 503: down".to_owned()));
+        assert!(
+            refresh_available,
+            "non-authentication failures keep the refresh"
+        );
+    }
+
+    #[derive(Default)]
+    struct ScriptedPublication {
+        /// Failures returned by successive attempts on a path; empty means success.
+        failures: std::collections::HashMap<String, std::collections::VecDeque<String>>,
+        refresh_succeeds: bool,
+        cancel_after_attempts: Option<usize>,
+        attempts: Vec<String>,
+        refreshes: usize,
+        recorded_failures: Vec<String>,
+        invalidations: usize,
+    }
+
+    impl ScriptedPublication {
+        fn failing(mut self, path: &str, errors: &[&str]) -> Self {
+            self.failures.insert(
+                path.to_owned(),
+                errors.iter().map(|error| (*error).to_owned()).collect(),
+            );
+            self
+        }
+    }
+
+    impl PublicationDriver for ScriptedPublication {
+        fn is_cancelled(&self) -> bool {
+            self.cancel_after_attempts
+                .is_some_and(|limit| self.attempts.len() >= limit)
+        }
+
+        fn progress(&mut self, _current: usize, _total: usize) {}
+
+        async fn publish(&mut self, path: &str) -> Result<PublishItemResult, String> {
+            self.attempts.push(path.to_owned());
+            if let Some(error) = self
+                .failures
+                .get_mut(path)
+                .and_then(std::collections::VecDeque::pop_front)
+            {
+                return Err(error);
+            }
+            Ok(PublishItemResult {
+                path: path.to_owned(),
+                state: "uploaded".to_owned(),
+                photo_id: Some(format!("photo-{path}")),
+                error: None,
+            })
+        }
+
+        async fn refresh_session(&mut self) -> bool {
+            self.refreshes += 1;
+            self.refresh_succeeds
+        }
+
+        fn record_failure(&mut self, path: &str, _error: &str) {
+            self.recorded_failures.push(path.to_owned());
+        }
+
+        fn invalidate_session(&mut self, _error: &str) -> String {
+            self.invalidations += 1;
+            SESSION_EXPIRED_MESSAGE.to_owned()
+        }
+    }
+
+    fn paths(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    fn states(result: &PublishResult) -> Vec<(&str, &str)> {
+        result
+            .items
+            .iter()
+            .map(|item| (item.path.as_str(), item.state.as_str()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn expired_session_mid_publication_refreshes_and_replays_the_current_item_once() {
+        let mut driver = ScriptedPublication {
+            refresh_succeeds: true,
+            ..Default::default()
+        }
+        .failing("b", &["HTTP 401: expired"]);
+        let mut refresh_available = true;
+        let outcome = drive_publication(
+            paths(&["a", "b", "c", "d"]),
+            &mut refresh_available,
+            &mut driver,
+        )
+        .await;
+
+        assert!(!outcome.session_invalidated);
+        assert_eq!(outcome.result.completed, 4);
+        assert_eq!(outcome.result.failed, 0);
+        assert_eq!(outcome.result.pending, 0);
+        assert_eq!(driver.attempts, paths(&["a", "b", "b", "c", "d"]));
+        assert_eq!(driver.refreshes, 1);
+        assert_eq!(driver.invalidations, 0);
+        assert!(driver.recorded_failures.is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_refresh_invalidates_and_returns_untried_items_as_pending() {
+        let mut driver = ScriptedPublication {
+            refresh_succeeds: false,
+            ..Default::default()
+        }
+        .failing("b", &["HTTP 401: expired"]);
+        let mut refresh_available = true;
+        let outcome = drive_publication(
+            paths(&["a", "b", "c", "d"]),
+            &mut refresh_available,
+            &mut driver,
+        )
+        .await;
+
+        assert!(outcome.session_invalidated);
+        assert_eq!(
+            states(&outcome.result),
+            [
+                ("a", "uploaded"),
+                ("b", "failed"),
+                ("c", "pending"),
+                ("d", "pending")
+            ]
+        );
+        assert_eq!(
+            (
+                outcome.result.completed,
+                outcome.result.failed,
+                outcome.result.pending
+            ),
+            (1, 1, 2)
+        );
+        let error = outcome.result.items[1].error.as_ref().expect("error");
+        assert_eq!(error.code, "session_expired");
+        assert_eq!(error.path.as_deref(), Some("b"));
+        assert_eq!(
+            driver.attempts,
+            paths(&["a", "b"]),
+            "no replay without refresh"
+        );
+        assert_eq!(driver.refreshes, 1);
+        assert_eq!(driver.invalidations, 1);
+        assert_eq!(driver.recorded_failures, paths(&["b"]));
+    }
+
+    #[tokio::test]
+    async fn replay_still_rejected_invalidates_without_a_second_refresh() {
+        let mut driver = ScriptedPublication {
+            refresh_succeeds: true,
+            ..Default::default()
+        }
+        .failing("b", &["HTTP 401: expired", "HTTP 403: still rejected"]);
+        let mut refresh_available = true;
+        let outcome =
+            drive_publication(paths(&["a", "b", "c"]), &mut refresh_available, &mut driver).await;
+
+        assert!(outcome.session_invalidated);
+        assert_eq!(driver.attempts, paths(&["a", "b", "b"]));
+        assert_eq!(driver.refreshes, 1);
+        assert_eq!(
+            states(&outcome.result),
+            [("a", "uploaded"), ("b", "failed"), ("c", "pending")]
+        );
+    }
+
+    #[tokio::test]
+    async fn one_refresh_per_command_even_if_the_session_expires_again() {
+        let mut driver = ScriptedPublication {
+            refresh_succeeds: true,
+            ..Default::default()
+        }
+        .failing("a", &["HTTP 401: expired"])
+        .failing("c", &["HTTP 401: expired again"]);
+        let mut refresh_available = true;
+        let outcome = drive_publication(
+            paths(&["a", "b", "c", "d"]),
+            &mut refresh_available,
+            &mut driver,
+        )
+        .await;
+
+        assert_eq!(driver.refreshes, 1);
+        assert!(outcome.session_invalidated);
+        assert_eq!(
+            states(&outcome.result),
+            [
+                ("a", "uploaded"),
+                ("b", "uploaded"),
+                ("c", "failed"),
+                ("d", "pending")
+            ]
+        );
+
+        let mut spent = ScriptedPublication {
+            refresh_succeeds: true,
+            ..Default::default()
+        }
+        .failing("a", &["HTTP 401: expired"]);
+        let mut refresh_available = false;
+        let outcome =
+            drive_publication(paths(&["a", "b"]), &mut refresh_available, &mut spent).await;
+        assert_eq!(spent.refreshes, 0, "preflight already spent the refresh");
+        assert_eq!(states(&outcome.result), [("a", "failed"), ("b", "pending")]);
+    }
+
+    #[tokio::test]
+    async fn non_authentication_failures_continue_without_refresh() {
+        let mut driver = ScriptedPublication {
+            refresh_succeeds: true,
+            ..Default::default()
+        }
+        .failing("b", &["HTTP 503: down"]);
+        let mut refresh_available = true;
+        let outcome =
+            drive_publication(paths(&["a", "b", "c"]), &mut refresh_available, &mut driver).await;
+
+        assert!(!outcome.session_invalidated);
+        assert_eq!(driver.refreshes, 0);
+        assert!(refresh_available);
+        assert_eq!(
+            states(&outcome.result),
+            [("a", "uploaded"), ("b", "failed"), ("c", "uploaded")]
+        );
+        assert_eq!(
+            outcome.result.items[1]
+                .error
+                .as_ref()
+                .map(|error| error.code),
+            Some("server")
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_returns_untried_items_as_pending() {
+        let mut driver = ScriptedPublication {
+            cancel_after_attempts: Some(2),
+            ..Default::default()
+        };
+        let mut refresh_available = true;
+        let outcome = drive_publication(
+            paths(&["a", "b", "c", "d"]),
+            &mut refresh_available,
+            &mut driver,
+        )
+        .await;
+
+        assert!(outcome.result.cancelled);
+        assert_eq!(
+            states(&outcome.result),
+            [
+                ("a", "uploaded"),
+                ("b", "uploaded"),
+                ("c", "pending"),
+                ("d", "pending")
+            ]
+        );
+        assert_eq!(outcome.result.pending, 2);
     }
 }

@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   canLogoutPicPortalUiSession,
   isPicPortalUiSessionReady,
+  picPortalErrorMessage,
   transitionPicPortalUiSession,
 } from '../src/utils/picPortalSessionUi.ts';
 
@@ -55,4 +56,38 @@ test('successful invalidation clears the UI session', () => {
   assert.equal(transition.state.authenticationRejected, false);
   assert.equal(isPicPortalUiSessionReady(transition.state), false);
   assert.equal(canLogoutPicPortalUiSession(transition.state), false);
+});
+
+test('structured command errors drive the session transition by code', () => {
+  const expired = transitionPicPortalUiSession(session, {
+    code: 'session_expired',
+    message: 'PicPortal session expired or was revoked; connect again',
+    retryable: false,
+  });
+  assert.equal(expired.outcome, 'invalidated');
+  assert.equal(expired.state.admin, null);
+
+  const retained = transitionPicPortalUiSession(session, {
+    code: 'session_clear_failed',
+    message: 'synthetic keyring failure',
+    retryable: false,
+    status: 401,
+  });
+  assert.equal(retained.outcome, 'credentials-retained');
+  assert.equal(retained.state.authenticationRejected, true);
+
+  const offline = transitionPicPortalUiSession(session, {
+    code: 'offline',
+    message: 'gallery request failed [network:offline]: synthetic',
+    retryable: true,
+  });
+  assert.equal(offline.outcome, 'unchanged');
+});
+
+test('structured command errors expose their technical message, not [object Object]', () => {
+  assert.equal(
+    picPortalErrorMessage({ code: 'server', message: 'HTTP 503: synthetic', retryable: true, status: 503 }),
+    'HTTP 503: synthetic',
+  );
+  assert.equal(picPortalErrorMessage('legacy string error'), 'legacy string error');
 });

@@ -11,6 +11,7 @@ import { picPortalDestinationChanged, retainExplicitGallerySelection } from '../
 import {
   canLogoutPicPortalUiSession,
   isPicPortalUiSessionReady,
+  picPortalErrorMessage,
   transitionPicPortalUiSession,
 } from '../../../utils/picPortalSessionUi';
 
@@ -140,7 +141,7 @@ export default function PicPortalPanel({
       if (transition.outcome === 'credentials-retained') {
         setAuthenticationRejected(transition.state.authenticationRejected);
       }
-      setStatus(String(error));
+      setStatus(picPortalErrorMessage(error));
     },
     [admin, authenticationRejected, clearSession, galleryId],
   );
@@ -158,7 +159,7 @@ export default function PicPortalPanel({
             error,
           );
           if (transition.outcome === 'credentials-retained') setAuthenticationRejected(true);
-          setStatus(String(error));
+          setStatus(picPortalErrorMessage(error));
         }
       } finally {
         if (active) setRestoring(false);
@@ -246,7 +247,7 @@ export default function PicPortalPanel({
       const connected = t('picportal.loggedIn', { defaultValue: 'Connected to PicPortal' });
       setStatus(result.message ? `${connected}\n${result.message}` : connected);
     } catch (error) {
-      setStatus(String(error));
+      setStatus(picPortalErrorMessage(error));
     } finally {
       setBusy(false);
     }
@@ -259,7 +260,7 @@ export default function PicPortalPanel({
       clearSession();
       setStatus(t('picportal.loggedOut', { defaultValue: 'Disconnected' }));
     } catch (error) {
-      const message = String(error);
+      const message = picPortalErrorMessage(error);
       const transition = transitionPicPortalUiSession(
         { admin, galleryId, authenticationRejected },
         error,
