@@ -107,3 +107,17 @@ test('a snapshot requested before a culling event is discarded as stale', async 
   // No event meanwhile: the snapshot is the latest state.
   assert.deepEqual(await readCullingSession(async () => running), running);
 });
+
+test('a snapshot read after culling-cancelled does not reopen the progress', async () => {
+  // The listener handled culling-cancelled and closed the modal; the backend
+  // publishes "not running" before that event, so a later read sees it idle.
+  noteCullingEvent();
+  const afterCancel = await readCullingSession(async () => ({
+    running: false,
+    folderPath: '/shoot',
+    progress: null,
+    result: null,
+  }));
+  assert.ok(afterCancel);
+  assert.equal(restoreCullingSession(afterCancel, resetUi), null);
+});

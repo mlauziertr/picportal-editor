@@ -230,6 +230,17 @@ impl Drop for CullingRunGuard {
     }
 }
 
+/// Publishes "not running" before announcing the cancel: a UI that reads the
+/// session right after the event must not see the analysis as still running
+/// and reopen its progress. The guard's `Drop` only runs once the command returns.
+fn publish_cancelled(announce: impl FnOnce()) {
+    update_session(|session| {
+        session.running = false;
+        session.progress = None;
+    });
+    announce();
+}
+
 /// Requests cancellation of the running analysis. The flag is checked between
 /// images and phases; nothing is written by an analysis, so cancelling never
 /// loses data. Returns whether the cancel was accepted: false when nothing
@@ -1030,7 +1041,9 @@ pub async fn cull_images(
     );
     let cancelled = |app_handle: &AppHandle| -> Result<CullingSuggestions, String> {
         log::info!("Assisted culling cancelled by the user; nothing was written");
-        let _ = app_handle.emit("culling-cancelled", ());
+        publish_cancelled(|| {
+            let _ = app_handle.emit("culling-cancelled", ());
+        });
         Err(CULLING_CANCELLED.to_owned())
     };
     let hasher = HasherConfig::new()
@@ -1407,6 +1420,29 @@ mod tests {
         );
         dismiss_culling_result();
         assert!(culling_session().result.is_none());
+        *CULLING_SESSION.lock().unwrap() = None;
+
+        // Cancelled run: a session read when the event is announced, before the
+        // command returns and the guard drops, already reports "not running".
+        let run = CullingRunGuard::acquire().expect("cancelled run starts");
+        update_session(|session| {
+            *session = CullingSession {
+                running: true,
+                folder_path: Some("/shoot".to_owned()),
+                ..Default::default()
+            }
+        });
+        record_progress(&CullingProgress::new(4, 10, "analyzing"));
+        assert!(cancel_culling());
+        let mut seen_at_event = None;
+        publish_cancelled(|| seen_at_event = Some(culling_session()));
+        let seen_at_event = seen_at_event.expect("cancel announced");
+        assert!(
+            !seen_at_event.running && seen_at_event.progress.is_none(),
+            "no progress to reopen after culling-cancelled"
+        );
+        assert!(seen_at_event.result.is_none());
+        drop(run);
         *CULLING_SESSION.lock().unwrap() = None;
 
         // Cancel racing the commit and the guard release on another thread:
