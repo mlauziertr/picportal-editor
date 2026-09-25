@@ -80,12 +80,27 @@ export const styleBatchMessages = (t: TFunction, summary: StyleApplySummary): st
 };
 
 // Asynchronous responses (editor proposal, batch reload) must only land on the photo and the
-// settings they were computed from. The stores replace the adjustments object on every change,
-// so its identity is the settings revision.
+// settings they were computed from. Path and object identity are not enough: reopening a photo
+// reuses its cached adjustments object and undo restores an earlier one, so each view also
+// carries a revision that grows on every change and never comes back (see revisionCounter).
 export interface ActivePhotoSnapshot<A> {
   path: string | null;
   adjustments: A;
+  revision: number;
 }
+
+// Counts the changes of the values picked by `select` in a store (zustand `subscribe`).
+export const revisionCounter = <S>(
+  subscribe: (listener: (state: S, previous: S) => void) => unknown,
+  select: (state: S) => readonly unknown[],
+): (() => number) => {
+  let revision = 0;
+  subscribe((state, previous) => {
+    const before = select(previous);
+    if (select(state).some((value, index) => !Object.is(value, before[index]))) revision += 1;
+  });
+  return () => revision;
+};
 
 export interface ActivePhotoSource<A> {
   current: () => ActivePhotoSnapshot<A>;
@@ -93,7 +108,10 @@ export interface ActivePhotoSource<A> {
 }
 
 export const isSnapshotCurrent = <A>(snapshot: ActivePhotoSnapshot<A>, current: ActivePhotoSnapshot<A>): boolean =>
-  snapshot.path !== null && snapshot.path === current.path && snapshot.adjustments === current.adjustments;
+  snapshot.path !== null &&
+  snapshot.path === current.path &&
+  snapshot.revision === current.revision &&
+  snapshot.adjustments === current.adjustments;
 
 export type StyleApplyResult = { status: 'applied'; proposal: StyleEditorProposal } | { status: 'stale' | 'noPhoto' };
 

@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { TFunction } from 'i18next';
+import { createStore } from 'zustand/vanilla';
 import type { ActivePhotoSnapshot, ActivePhotoSource, StyleEditorProposal } from '../src/utils/styleModel.ts';
 import {
   applyStyleToActivePhoto,
   classifyStyleError,
   reloadActivePhotos,
+  revisionCounter,
   styleBatchMessages,
   styleErrorMessage,
   styleFallbackNotice,
@@ -45,24 +47,36 @@ test('batch summary lists skipped and failed photos only when present', () => {
 
 type Settings = Record<string, number>;
 
-// A store view whose settings object is replaced on every change, like the zustand stores.
+// A zustand store view whose settings object is replaced on every change, with the same
+// revision counter as the editor and library stores. `open` may reuse a cached settings object
+// and `undo` restores the previous object, as useAppNavigation and the editor history do.
 const view = (path: string | null, adjustments: Settings) => {
-  let state: ActivePhotoSnapshot<Settings> = { path, adjustments };
+  const store = createStore<{ path: string | null; adjustments: Settings }>(() => ({ path, adjustments }));
+  const revision = revisionCounter(store.subscribe, (state) => [state.path, state.adjustments]);
+  const history: Settings[] = [];
   const applied: Settings[] = [];
   const source: ActivePhotoSource<Settings> = {
-    current: () => state,
+    current: () => ({ ...store.getState(), revision: revision() }),
     apply: (next) => {
       applied.push(next);
-      state = { ...state, adjustments: next };
+      store.setState({ adjustments: next });
     },
   };
   return {
     source,
     applied,
-    edit: (patch: Settings) => (state = { ...state, adjustments: { ...state.adjustments, ...patch } }),
-    open: (nextPath: string, next: Settings) => (state = { path: nextPath, adjustments: next }),
+    edit: (patch: Settings) => {
+      const { adjustments: previous } = store.getState();
+      history.push(previous);
+      store.setState({ adjustments: { ...previous, ...patch } });
+    },
+    undo: () => store.setState({ adjustments: history.pop() }),
+    open: (nextPath: string, next: Settings) => {
+      history.length = 0;
+      store.setState({ path: nextPath, adjustments: next });
+    },
     get state() {
-      return state;
+      return store.getState();
     },
   };
 };
@@ -121,6 +135,40 @@ test('editor proposal is dropped when the same photo was reopened during inferen
   pending.resolve(proposal({ exposure: 1.2 }));
   assert.equal((await running).status, 'stale');
   assert.deepEqual(editor.applied, []);
+});
+
+test('editor proposal is dropped when the photo was reopened with its cached settings object', async () => {
+  const editor = view('a.nef', { exposure: 0 });
+  const cachedA = editor.state.adjustments;
+  const pending = deferred<StyleEditorProposal>();
+  const running = applyStyleToActivePhoto(editor.source, () => pending.promise);
+  editor.open('b.nef', { exposure: -0.3 });
+  editor.open('a.nef', cachedA);
+  assert.equal(editor.state.adjustments, cachedA);
+  pending.resolve(proposal({ exposure: 1.2 }));
+  assert.equal((await running).status, 'stale');
+  assert.deepEqual(editor.applied, []);
+  assert.equal(editor.state.adjustments, cachedA);
+});
+
+test('editor proposal is dropped after an edit undone back to the same settings object', async () => {
+  const editor = view('a.nef', { exposure: 0 });
+  const initial = editor.state.adjustments;
+  const pending = deferred<StyleEditorProposal>();
+  const running = applyStyleToActivePhoto(editor.source, () => pending.promise);
+  editor.edit({ exposure: 0.7 });
+  editor.undo();
+  assert.equal(editor.state.adjustments, initial);
+  pending.resolve(proposal({ exposure: 1.2 }));
+  assert.equal((await running).status, 'stale');
+  assert.deepEqual(editor.applied, []);
+});
+
+test('revision ignores store updates that leave the photo and its settings unchanged', async () => {
+  const editor = view('a.nef', { exposure: 0 });
+  const launch = editor.source.current();
+  editor.source.apply(editor.state.adjustments);
+  assert.equal(editor.source.current().revision, launch.revision);
 });
 
 test('batch reload refreshes the active photo when it is unchanged', async () => {
@@ -185,4 +233,43 @@ test('batch reload does not overwrite settings edited during the batch', async (
   }));
   assert.deepEqual(reloaded, []);
   assert.deepEqual(editor.state.adjustments, { exposure: 0, contrast: 12 });
+});
+
+test('batch reload skips views reopened on the launch photo with its cached settings object', async () => {
+  const editor = view('a.nef', { exposure: 0 });
+  const library = view('a.nef', { exposure: 0 });
+  const views = [editor, library].map(({ source }) => ({ launch: source.current(), source }));
+  const pending = deferred<void>();
+  const loads: string[] = [];
+  const running = reloadActivePhotos(views, ['a.nef', 'b.nef'], async (path) => {
+    await pending.promise;
+    loads.push(path);
+    return { exposure: 1 };
+  });
+  // Editor: reopened while its sidecar is read; library: before its sidecar is read.
+  const cachedEditor = editor.state.adjustments;
+  editor.open('b.nef', { exposure: -0.3 });
+  editor.open('a.nef', cachedEditor);
+  const cachedLibrary = library.state.adjustments;
+  library.open('b.nef', { exposure: -0.3 });
+  library.open('a.nef', cachedLibrary);
+  pending.resolve();
+  assert.deepEqual(await running, []);
+  assert.deepEqual(loads, ['a.nef']);
+  assert.deepEqual(editor.applied, []);
+  assert.deepEqual(library.applied, []);
+  assert.equal(editor.state.adjustments, cachedEditor);
+  assert.equal(library.state.adjustments, cachedLibrary);
+});
+
+test('batch reload skips a view whose edit was undone back to the same settings object', async () => {
+  const editor = view('a.nef', { exposure: 0 });
+  const launch = editor.source.current();
+  editor.edit({ contrast: 12 });
+  editor.undo();
+  const reloaded = await reloadActivePhotos([{ launch, source: editor.source }], ['a.nef'], async () => ({
+    exposure: 1,
+  }));
+  assert.deepEqual(reloaded, []);
+  assert.deepEqual(editor.applied, []);
 });

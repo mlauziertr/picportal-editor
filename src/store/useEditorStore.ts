@@ -5,6 +5,7 @@ import { ChannelConfig } from '../components/adjustments/Curves';
 import { ImageDimensions } from '../hooks/useImageRenderSize';
 import { ToolType } from '../components/panel/right/Masks';
 import { OverlayMode } from '../components/panel/right/CropPanel';
+import { revisionCounter } from '../utils/styleModel';
 
 interface InteractivePatch {
   url: string;
@@ -180,3 +181,9 @@ export const useEditorStore = create<EditorState>((set) => ({
       return state;
     }),
 }));
+
+// Revision of the editor's (photo, settings) pair, carried by asynchronous style responses.
+export const editorPhotoRevision = revisionCounter(useEditorStore.subscribe, (state: EditorState) => [
+  state.selectedImage?.path ?? null,
+  state.adjustments,
+]);

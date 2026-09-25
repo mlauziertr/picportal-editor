@@ -8,6 +8,7 @@ import {
   AlbumItem,
 } from '../components/ui/AppProperties';
 import { Adjustments, INITIAL_ADJUSTMENTS } from '../utils/adjustments';
+import { revisionCounter } from '../utils/styleModel';
 import { ColumnWidths } from '../components/panel/MainLibrary';
 
 export interface NavHistoryItem {
@@ -140,3 +141,9 @@ export const useLibraryStore = create<LibraryState>((set) => ({
       return { navHistory: newHistory, navIndex: newHistory.length - 1 };
     }),
 }));
+
+// Revision of the library preview's (photo, settings) pair, carried by asynchronous style responses.
+export const libraryPhotoRevision = revisionCounter(useLibraryStore.subscribe, (state: LibraryState) => [
+  state.libraryActivePath,
+  state.libraryActiveAdjustments,
+]);

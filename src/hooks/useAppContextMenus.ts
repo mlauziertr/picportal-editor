@@ -48,8 +48,8 @@ import {
 import { toast } from 'react-toastify';
 import { useTranslation } from 'react-i18next';
 import { useContextMenu } from '../context/ContextMenuContext';
-import { useEditorStore } from '../store/useEditorStore';
-import { useLibraryStore } from '../store/useLibraryStore';
+import { editorPhotoRevision, useEditorStore } from '../store/useEditorStore';
+import { libraryPhotoRevision, useLibraryStore } from '../store/useLibraryStore';
 import { useProcessStore } from '../store/useProcessStore';
 import { useUIStore } from '../store/useUIStore';
 import { useSettingsStore } from '../store/useSettingsStore';
@@ -483,7 +483,7 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
         const editorView: ActivePhotoSource<Adjustments> = {
           current: () => {
             const { selectedImage: image, adjustments } = useEditorStore.getState();
-            return { path: image?.path ?? null, adjustments };
+            return { path: image?.path ?? null, adjustments, revision: editorPhotoRevision() };
           },
           apply: (adjustments) => {
             setEditor({ adjustments });
@@ -493,7 +493,7 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
         const libraryView: ActivePhotoSource<Adjustments> = {
           current: () => {
             const { libraryActivePath: activePath, libraryActiveAdjustments } = useLibraryStore.getState();
-            return { path: activePath, adjustments: libraryActiveAdjustments };
+            return { path: activePath, adjustments: libraryActiveAdjustments, revision: libraryPhotoRevision() };
           },
           apply: (adjustments) => setLibrary({ libraryActiveAdjustments: adjustments }),
         };

@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import debounce from 'lodash.debounce';
 import { toast } from 'react-toastify';
 import { useTranslation } from 'react-i18next';
-import { useEditorStore } from '../store/useEditorStore';
+import { editorPhotoRevision, useEditorStore } from '../store/useEditorStore';
 import { useLibraryStore } from '../store/useLibraryStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { useProcessStore } from '../store/useProcessStore';
@@ -100,7 +100,7 @@ export function useEditorActions() {
         {
           current: () => {
             const { selectedImage, adjustments } = useEditorStore.getState();
-            return { path: selectedImage?.path ?? null, adjustments };
+            return { path: selectedImage?.path ?? null, adjustments, revision: editorPhotoRevision() };
           },
           apply: (adjustments) => setAdjustments(() => adjustments),
         },
