@@ -64,6 +64,38 @@ pub struct GallerySummary {
     pub photo_count: u64,
     #[serde(default, alias = "face_filter_enabled")]
     pub face_filter_enabled: bool,
+    /// Share link shown by the PicPortal admin, or `None` when a visitor
+    /// could not open it (draft) or the server gave no access token.
+    #[serde(default)]
+    pub gallery_url: Option<String>,
+    #[serde(default, skip_serializing)]
+    status: String,
+    #[serde(default, alias = "access_mode", skip_serializing)]
+    access_mode: String,
+    #[serde(default, alias = "access_token", skip_serializing)]
+    access_token: Option<String>,
+}
+
+impl GallerySummary {
+    /// Mirrors the admin share link (`/g/{slug}`, plus `?access=` for link
+    /// galleries); the site redirects it to the visitor's locale. Production
+    /// refuses drafts to visitors even with the token, so they get no link.
+    fn with_gallery_url(mut self) -> Self {
+        let token = self
+            .access_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|token| !token.is_empty());
+        self.gallery_url = match (self.status.as_str(), self.access_mode.as_str(), token) {
+            _ if self.slug.trim().is_empty() => None,
+            ("active", "link", Some(token)) => {
+                Some(format!("{APP_ORIGIN}/g/{}?access={}", self.slug, token))
+            }
+            ("active", "password", _) => Some(format!("{APP_ORIGIN}/g/{}", self.slug)),
+            _ => None,
+        };
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -176,23 +208,16 @@ struct DerivativeDimensions {
     bytes: u64,
 }
 
+/// Production validates this manifest strictly: an extra field such as a
+/// producer block is answered with 422 DERIVATIVE_MANIFEST_INVALID (MAX-22).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DerivativeManifest {
     version: u8,
     idempotency_key: String,
-    producer: DerivativeProducer,
     source: DerivativeDimensions,
     preview: DerivativeDimensions,
     thumbnail: DerivativeDimensions,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DerivativeProducer {
-    kind: &'static str,
-    app_version: &'static str,
-    pipeline_version: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -314,6 +339,8 @@ struct CreatedGalleryResponse {
 struct CreatedGalleryIdentity {
     id: String,
     slug: String,
+    #[serde(default)]
+    access_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -356,6 +383,24 @@ struct DerivativeResponse {
     accepted: bool,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DerivativeRejection {
+    #[serde(default)]
+    error: String,
+    #[serde(default)]
+    fallback_queued: bool,
+}
+
+/// After a rejected manifest the server queues its own derivatives and answers
+/// every later attempt for that photo with 409; the photo is then published.
+fn derivatives_handled_by_server_fallback(status: StatusCode, body: &str) -> bool {
+    let rejection = serde_json::from_str::<DerivativeRejection>(body).unwrap_or_default();
+    status == StatusCode::CONFLICT
+        && rejection.error == "DERIVATIVE_STATE_INVALID"
+        && rejection.fallback_queued
+}
+
 #[derive(Debug, Deserialize)]
 struct FaceAnalysisResponse {
     status: String,
@@ -374,6 +419,12 @@ const KEYRING_USER: &str = "picportal-session-v1";
 type CookieStore = Arc<Mutex<Vec<String>>>;
 const NATIVE_SESSION_REFRESH_PATH: &str = "auth/native/session/refresh";
 const SESSION_EXPIRED_MESSAGE: &str = "PicPortal session expired or was revoked; connect again";
+
+/// Production answers a POST without a JSON content type with 415, so
+/// body-less actions (logout, refresh) still send an empty JSON object.
+fn empty_json_body() -> serde_json::Value {
+    serde_json::json!({})
+}
 
 fn production_client(stored_cookies: &[String]) -> Result<(Client, CookieStore), String> {
     let cookies = Arc::new(Mutex::new(stored_cookies.to_vec()));
@@ -746,6 +797,7 @@ async fn refresh_native_session(session: &PicPortalSession) -> bool {
         .client
         .post(endpoint(&session.base_url, NATIVE_SESSION_REFRESH_PATH))
         .header("origin", APP_ORIGIN)
+        .json(&empty_json_body())
         .send()
         .await
     else {
@@ -823,6 +875,25 @@ pub async fn picportal_login(
     password: String,
     state: State<'_, PicPortalState>,
 ) -> Result<PicPortalLoginResult, PicPortalError> {
+    let (session, galleries) = open_login_session(&email, &password).await?;
+    let mut current_session = state
+        .session
+        .lock()
+        .map_err(|_| "PicPortal session lock is poisoned".to_owned())?;
+    let session = persist_login_session(&mut current_session, session, store_stored_session)?;
+    Ok(PicPortalLoginResult {
+        admin: session.admin,
+        galleries,
+        persistent: true,
+        message: None,
+    })
+}
+
+/// Signs in against production and returns the unsaved session with its galleries.
+async fn open_login_session(
+    email: &str,
+    password: &str,
+) -> Result<(PicPortalSession, Vec<GallerySummary>), PicPortalError> {
     if email.trim().is_empty() || password.is_empty() {
         return Err("PicPortal email and password are required"
             .to_owned()
@@ -870,17 +941,7 @@ pub async fn picportal_login(
         ..provisional
     };
     let galleries = session.galleries().await?;
-    let mut current_session = state
-        .session
-        .lock()
-        .map_err(|_| "PicPortal session lock is poisoned".to_owned())?;
-    let session = persist_login_session(&mut current_session, session, store_stored_session)?;
-    Ok(PicPortalLoginResult {
-        admin: session.admin,
-        galleries,
-        persistent: true,
-        message: None,
-    })
+    Ok((session, galleries))
 }
 
 #[tauri::command]
@@ -986,27 +1047,32 @@ pub async fn picportal_logout(state: State<'_, PicPortalState>) -> Result<(), Pi
         .lock()
         .map_err(|_| "PicPortal session lock is poisoned".to_owned())?
         .clone();
-    let mut remote_error = None;
-    if let Some(session) = session {
-        match session
-            .client
-            .post(endpoint(&session.base_url, "auth/logout"))
-            .header("origin", APP_ORIGIN)
-            .send()
-            .await
-        {
-            Ok(response) => {
-                capture_response_cookies(&response, &session.cookies);
-                if let Err(error) = require_success(response).await
-                    && !is_auth_failure(&error)
-                {
-                    remote_error = Some(error);
-                }
-            }
-            Err(error) => remote_error = Some(transport_error("PicPortal logout failed", error)),
-        }
-    }
+    let remote_error = match session {
+        Some(session) => remote_logout(&session).await,
+        None => None,
+    };
     complete_picportal_logout(&state, clear_stored_session(), remote_error).map_err(Into::into)
+}
+
+/// Revokes the session on the server; an already rejected session counts as logged out.
+async fn remote_logout(session: &PicPortalSession) -> Option<String> {
+    match session
+        .client
+        .post(endpoint(&session.base_url, "auth/logout"))
+        .header("origin", APP_ORIGIN)
+        .json(&empty_json_body())
+        .send()
+        .await
+    {
+        Ok(response) => {
+            capture_response_cookies(&response, &session.cookies);
+            match require_success(response).await {
+                Err(error) if !is_auth_failure(&error) => Some(error),
+                _ => None,
+            }
+        }
+        Err(error) => Some(transport_error("PicPortal logout failed", error)),
+    }
 }
 
 #[tauri::command]
@@ -1030,6 +1096,19 @@ pub async fn picportal_create_gallery(
     app: AppHandle,
 ) -> Result<GallerySummary, PicPortalError> {
     let session = current_session(&state)?;
+    let gallery = create_gallery(&session, input)
+        .await
+        .map_err(|error| session_error(error, &state, Some(&app)))?;
+    let _ = store_stored_session(&session);
+    Ok(gallery)
+}
+
+async fn create_gallery(
+    session: &PicPortalSession,
+    input: CreateGalleryInput,
+) -> Result<GallerySummary, String> {
+    let status = input.status.clone();
+    let access_mode = input.access_mode.clone();
     let (title, face_filter_enabled, payload) = create_gallery_payload(input)?;
     let response = session
         .client
@@ -1038,24 +1117,26 @@ pub async fn picportal_create_gallery(
         .json(&payload)
         .send()
         .await
-        .map_err(|error| transport_error("gallery creation failed", error))
-        .map_err(|error| session_error(error, &state, Some(&app)))?;
+        .map_err(|error| transport_error("gallery creation failed", error))?;
     capture_response_cookies(&response, &session.cookies);
     let created = require_success(response)
-        .await
-        .map_err(|error| session_error(error, &state, Some(&app)))?
+        .await?
         .json::<CreatedGalleryResponse>()
         .await
         .map_err(|error| format!("gallery creation response is invalid: {error}"))?
         .gallery;
-    let _ = store_stored_session(&session);
     Ok(GallerySummary {
         id: created.id,
         title,
         slug: created.slug,
         photo_count: 0,
         face_filter_enabled,
-    })
+        gallery_url: None,
+        status,
+        access_mode,
+        access_token: created.access_token,
+    }
+    .with_gallery_url())
 }
 
 fn create_gallery_payload(
@@ -1280,7 +1361,7 @@ impl PublicationDriver for LivePublication<'_> {
             self.capabilities,
             self.publish_faces,
             path,
-            self.app,
+            Some(self.app),
             self.state,
             &self.queue_path,
             &mut self.queue,
@@ -1651,11 +1732,15 @@ impl PicPortalSession {
             .json::<serde_json::Value>()
             .await
             .map_err(|error| format!("gallery response is invalid: {error}"))?;
-        if let Ok(payload) = serde_json::from_value::<GalleryListResponse>(value.clone()) {
-            return Ok(payload.galleries);
-        }
-        serde_json::from_value(value)
-            .map_err(|error| format!("gallery response is invalid: {error}"))
+        let galleries = match serde_json::from_value::<GalleryListResponse>(value.clone()) {
+            Ok(payload) => payload.galleries,
+            Err(_) => serde_json::from_value::<Vec<GallerySummary>>(value)
+                .map_err(|error| format!("gallery response is invalid: {error}"))?,
+        };
+        Ok(galleries
+            .into_iter()
+            .map(GallerySummary::with_gallery_url)
+            .collect())
     }
 
     async fn processing_capabilities(&self) -> Result<ProcessingCapabilities, String> {
@@ -1690,7 +1775,7 @@ async fn publish_one(
     capabilities: &ProcessingCapabilities,
     publish_faces: bool,
     path: &str,
-    app: &AppHandle,
+    app: Option<&AppHandle>,
     state: &PicPortalState,
     queue_path: &Path,
     queue: &mut QueueFile,
@@ -1797,11 +1882,6 @@ async fn publish_one(
     let manifest = DerivativeManifest {
         version: 1,
         idempotency_key: idempotency_key.clone(),
-        producer: DerivativeProducer {
-            kind: "picportal-editor",
-            app_version: APP_VERSION,
-            pipeline_version: DERIVATIVE_PIPELINE_VERSION,
-        },
         source: DerivativeDimensions {
             sha256: derivatives.source_sha256.clone(),
             width: derivatives.source_width,
@@ -1890,9 +1970,10 @@ fn completed_face_analysis_photo(
 fn analyze_faces(
     source: &[u8],
     capabilities: &ProcessingCapabilities,
-    app: &AppHandle,
+    app: Option<&AppHandle>,
     state: &PicPortalState,
 ) -> Result<face_processing::LocalFaceAnalysis, String> {
+    let app = app.ok_or_else(|| "local face analysis needs the application runtime".to_owned())?;
     let mut runtime = state
         .face_runtime
         .lock()
@@ -2367,6 +2448,16 @@ async fn upload_derivatives(
         .await
         .map_err(|error| transport_error("derivative upload failed", error))?;
     capture_response_cookies(&response, &session.cookies);
+    if response.status() == StatusCode::CONFLICT {
+        let body = response.text().await.unwrap_or_default();
+        if derivatives_handled_by_server_fallback(StatusCode::CONFLICT, &body) {
+            return Ok(());
+        }
+        return Err(format!(
+            "HTTP 409: {}",
+            body.chars().take(500).collect::<String>()
+        ));
+    }
     let accepted = require_success(response)
         .await?
         .json::<DerivativeResponse>()
@@ -2576,6 +2667,10 @@ fn upsert_queue(queue: &mut QueueFile, item: QueueItem) {
 }
 
 #[cfg(test)]
+#[path = "picportal_live_tests.rs"]
+mod live_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -2603,6 +2698,10 @@ mod tests {
             slug: "gallery".into(),
             photo_count: 0,
             face_filter_enabled,
+            gallery_url: None,
+            status: "draft".into(),
+            access_mode: "link".into(),
+            access_token: None,
         }
     }
 
@@ -3775,5 +3874,94 @@ mod tests {
             ]
         );
         assert_eq!(outcome.result.pending, 2);
+    }
+
+    #[test]
+    fn derivative_manifest_only_sends_fields_production_accepts() {
+        let dimensions = DerivativeDimensions {
+            sha256: "a".repeat(64),
+            width: 10,
+            height: 10,
+            bytes: 100,
+        };
+        let manifest = DerivativeManifest {
+            version: 1,
+            idempotency_key: "key".into(),
+            source: dimensions.clone(),
+            preview: dimensions.clone(),
+            thumbnail: dimensions,
+        };
+        let value = serde_json::to_value(&manifest).expect("manifest");
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "idempotencyKey",
+                "preview",
+                "source",
+                "thumbnail",
+                "version"
+            ]
+        );
+    }
+
+    #[test]
+    fn only_a_queued_server_fallback_conflict_counts_as_published_derivatives() {
+        let queued = r#"{"error":"DERIVATIVE_STATE_INVALID","fallbackQueued":true}"#;
+        assert!(derivatives_handled_by_server_fallback(
+            StatusCode::CONFLICT,
+            queued
+        ));
+        assert!(!derivatives_handled_by_server_fallback(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            r#"{"error":"DERIVATIVE_MANIFEST_INVALID","fallbackQueued":true}"#
+        ));
+        assert!(!derivatives_handled_by_server_fallback(
+            StatusCode::CONFLICT,
+            r#"{"error":"DERIVATIVE_STATE_INVALID"}"#
+        ));
+        assert!(!derivatives_handled_by_server_fallback(
+            StatusCode::CONFLICT,
+            "not json"
+        ));
+    }
+
+    #[test]
+    fn gallery_url_follows_the_admin_share_link_and_hides_drafts() {
+        let listed = |status: &str, access_mode: &str, token: Option<&str>| {
+            serde_json::from_value::<GallerySummary>(serde_json::json!({
+                "id": "id",
+                "title": "Title",
+                "slug": "test-editor",
+                "photo_count": 3,
+                "face_filter_enabled": false,
+                "status": status,
+                "access_mode": access_mode,
+                "access_token": token,
+            }))
+            .expect("production gallery row")
+            .with_gallery_url()
+        };
+        assert_eq!(
+            listed("active", "link", Some("tok")).gallery_url.as_deref(),
+            Some("https://getpicportal.com/g/test-editor?access=tok")
+        );
+        assert_eq!(
+            listed("active", "password", None).gallery_url.as_deref(),
+            Some("https://getpicportal.com/g/test-editor")
+        );
+        assert_eq!(listed("draft", "link", Some("tok")).gallery_url, None);
+        assert_eq!(listed("active", "link", None).gallery_url, None);
+
+        let serialized = serde_json::to_value(listed("active", "link", Some("tok"))).expect("json");
+        assert_eq!(serialized["photoCount"], 3);
+        assert!(serialized.get("accessToken").is_none());
+        assert!(serialized.get("status").is_none());
     }
 }

@@ -26,6 +26,7 @@ interface GallerySummary {
   slug: string;
   photoCount?: number;
   faceFilterEnabled: boolean;
+  galleryUrl?: string | null;
 }
 
 interface AdminIdentity {
