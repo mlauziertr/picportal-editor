@@ -157,6 +157,24 @@ class PipelineTests(unittest.TestCase):
             np.testing.assert_array_equal(loaded["features"], dataset["features"])
             self.assertEqual(loaded["ids"], dataset["ids"])
 
+    def test_overlapping_roots_count_each_photo_once(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            parent = Path(scratch) / "corpus"
+            sub = parent / "sub"
+            synth.generate(sub, count=12, seed=9)
+            synth.generate(parent / "other", count=6, seed=10)
+            alone = extract.build_dataset([parent], workers=1)
+            roots = [parent, sub, parent, Path(scratch) / "corpus" / "sub" / ".." / "sub"]
+            overlapping = extract.build_dataset(roots, workers=1)
+            self.assertEqual(overlapping["summary"]["imagesScanned"], alone["summary"]["imagesScanned"])
+            self.assertEqual(overlapping["summary"]["samples"], alone["summary"]["samples"])
+            self.assertEqual(overlapping["ids"], alone["ids"])
+            self.assertEqual(len(set(overlapping["ids"])), len(overlapping["ids"]))
+            self.assertGreater(overlapping["summary"]["duplicatePathsIgnored"], 0)
+            self.assertEqual(alone["summary"]["duplicatePathsIgnored"], 0)
+            # The holdout split is drawn from the deduplicated samples: no photo on both sides.
+            np.testing.assert_array_equal(overlapping["features"], alone["features"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -22,18 +22,33 @@ from .schema import FEATURE_COUNT, FEATURE_VERSION, OUTPUT_KEYS
 from .targets import read_target
 
 
-def find_images(corpus_dirs: list[Path]) -> list[tuple[Path, Path]]:
+def find_images(corpus_dirs: list[Path]) -> tuple[list[tuple[Path, Path]], int]:
+    """Supported images under the corpus roots, each canonical file once.
+
+    Overlapping roots (`parent` and `parent/sub`), repeated roots and symlinks would otherwise
+    count the same photo several times and let copies straddle the training/holdout split.
+    Returns the jobs and the number of duplicate paths dropped.
+    """
     found = []
+    seen: set[Path] = set()
+    duplicates = 0
     for root in corpus_dirs:
         if not root.is_dir():
             raise SystemExit(f"corpus directory not found: {root}")
+        root = root.resolve()
         for directory, subdirectories, files in os.walk(root):
             subdirectories[:] = sorted(d for d in subdirectories if not d.startswith("."))
             for name in sorted(files):
                 path = Path(directory) / name
-                if is_supported(path):
-                    found.append((root, path))
-    return found
+                if not is_supported(path):
+                    continue
+                canonical = path.resolve()
+                if canonical in seen:
+                    duplicates += 1
+                    continue
+                seen.add(canonical)
+                found.append((root, path))
+    return found, duplicates
 
 
 def _sample(job: tuple[Path, Path]) -> dict:
@@ -58,7 +73,7 @@ def _sample(job: tuple[Path, Path]) -> dict:
 
 
 def build_dataset(corpus_dirs: list[Path], workers: int | None = None) -> dict:
-    jobs = find_images(corpus_dirs)
+    jobs, duplicates = find_images(corpus_dirs)
     if workers == 1 or len(jobs) < 8:
         samples = [_sample(job) for job in jobs]
     else:
@@ -80,6 +95,7 @@ def build_dataset(corpus_dirs: list[Path], workers: int | None = None) -> dict:
         "summary": {
             "featureVersion": FEATURE_VERSION,
             "imagesScanned": len(samples),
+            "duplicatePathsIgnored": duplicates,
             "samples": len(kept),
             "bySource": {src: sum(1 for s in kept if s["source"] == src) for src in ("rrdata", "xmp")},
             "skipped": skipped,
