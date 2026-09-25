@@ -752,6 +752,26 @@ fn calculate_laplacian_variance(image: &GrayImage) -> f64 {
         / laplacian_values.len() as f64
 }
 
+/// Laplacian variance of one detected face, measured on the face box widened
+/// by 25% (hairline and jaw contours) at the analysed image scale. Measurement
+/// only (MAX-35): at the fast-RAW scale faces are 45-110 px wide and this does
+/// not separate sharp from blurred faces better than the global metric.
+#[cfg(test)]
+fn face_zone_sharpness(image: &DynamicImage, face: &face_processing::FaceBox) -> Option<f64> {
+    const MARGIN: f32 = 0.125;
+    let left = (face.x - face.width * MARGIN).max(0.0).floor() as u32;
+    let top = (face.y - face.height * MARGIN).max(0.0).floor() as u32;
+    let right = ((face.x + face.width * (1.0 + MARGIN)).ceil() as u32).min(image.width());
+    let bottom = ((face.y + face.height * (1.0 + MARGIN)).ceil() as u32).min(image.height());
+    if right < left + 8 || bottom < top + 8 {
+        return None;
+    }
+    let crop = image
+        .crop_imm(left, top, right - left, bottom - top)
+        .to_luma8();
+    Some(calculate_laplacian_variance(&crop))
+}
+
 fn calculate_exposure_metric(image: &GrayImage) -> f64 {
     let histogram = imageproc::stats::histogram(image);
     let total_pixels = (image.width() * image.height()) as f64;
@@ -1525,15 +1545,155 @@ mod tests {
         let mut unprocessed = HashSet::new();
         let started = std::time::Instant::now();
         let mut worker = None;
+        // Raw zone measurements (MAX-35), reported next to the production decision.
+        let mut zone_metrics: HashMap<String, serde_json::Value> = HashMap::new();
         for data in successful.iter_mut() {
             match load_culling_image(&data.result.path, &app_settings) {
-                Ok(image) => apply_assisted_signals(
-                    &mut data.result,
-                    &image,
-                    &settings,
-                    &mut worker,
-                    face_runtime.as_mut(),
-                ),
+                Ok(image) => {
+                    apply_assisted_signals(
+                        &mut data.result,
+                        &image,
+                        &settings,
+                        &mut worker,
+                        face_runtime.as_mut(),
+                    );
+                    let (width, height) = (image.width() as f32, image.height() as f32);
+                    let boxes: Vec<_> = data
+                        .result
+                        .attributed_faces
+                        .iter()
+                        .map(|face| face_processing::FaceBox {
+                            x: face.x * width,
+                            y: face.y * height,
+                            width: face.width * width,
+                            height: face.height * height,
+                        })
+                        .collect();
+                    let face_sharpness: Vec<_> = boxes
+                        .iter()
+                        .map(|face| face_zone_sharpness(&image, face))
+                        .collect();
+                    let face_contrast: Vec<_> = boxes
+                        .iter()
+                        .map(|face| {
+                            let crop = image
+                                .crop_imm(
+                                    face.x.max(0.0) as u32,
+                                    face.y.max(0.0) as u32,
+                                    face.width.max(1.0) as u32,
+                                    face.height.max(1.0) as u32,
+                                )
+                                .to_luma8();
+                            let pixels: Vec<f64> = crop.pixels().map(|p| p[0] as f64).collect();
+                            let mean = pixels.iter().sum::<f64>() / pixels.len().max(1) as f64;
+                            pixels.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
+                                / pixels.len().max(1) as f64
+                        })
+                        .collect();
+                    let normalized: Vec<_> = boxes
+                        .iter()
+                        .map(|face| {
+                            face_crop_at_width(&image, face, 48.0).map(|crop| {
+                                let pixels: Vec<f64> = crop.pixels().map(|p| p[0] as f64).collect();
+                                let mean = pixels.iter().sum::<f64>() / pixels.len() as f64;
+                                let contrast =
+                                    pixels.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
+                                        / pixels.len() as f64;
+                                serde_json::json!({
+                                    "lap48": calculate_laplacian_variance(&crop),
+                                    "contrast48": contrast,
+                                    "crete48": crete_blur(&crop),
+                                })
+                            })
+                        })
+                        .collect();
+                    let crete_native: Vec<_> = boxes
+                        .iter()
+                        .map(|face| {
+                            face_crop_at_width(&image, face, face.width)
+                                .and_then(|c| crete_blur(&c))
+                        })
+                        .collect();
+                    // Same faces, measured on the full-size embedded JPEG (MAX-35 trial).
+                    let source = crate::file_management::parse_virtual_path(&data.result.path).0;
+                    let preview = std::fs::read(&source).ok().and_then(|bytes| {
+                        crate::image_loader::embedded_preview_fallback(
+                            &bytes,
+                            &source.to_string_lossy(),
+                        )
+                    });
+                    let preview_faces: Vec<_> = match &preview {
+                        Some(full) => {
+                            let (fw, fh) = (full.width() as f32, full.height() as f32);
+                            data.result
+                                .attributed_faces
+                                .iter()
+                                .map(|face| {
+                                    let fb = face_processing::FaceBox {
+                                        x: face.x * fw,
+                                        y: face.y * fh,
+                                        width: face.width * fw,
+                                        height: face.height * fh,
+                                    };
+                                    let metrics = |target: f32| {
+                                        face_crop_at_width(full, &fb, target).map(|crop| {
+                                            let pixels: Vec<f64> =
+                                                crop.pixels().map(|p| p[0] as f64).collect();
+                                            let mean =
+                                                pixels.iter().sum::<f64>() / pixels.len() as f64;
+                                            let contrast = pixels
+                                                .iter()
+                                                .map(|v| (v - mean).powi(2))
+                                                .sum::<f64>()
+                                                / pixels.len() as f64;
+                                            serde_json::json!({
+                                                "lap": calculate_laplacian_variance(&crop),
+                                                "contrast": contrast,
+                                                "crete": crete_blur(&crop),
+                                            })
+                                        })
+                                    };
+                                    serde_json::json!({
+                                        "w96": metrics(96.0),
+                                        "w192": metrics(192.0),
+                                        "native": metrics(fb.width),
+                                    })
+                                })
+                                .collect()
+                        }
+                        None => Vec::new(),
+                    };
+                    let gray = image.thumbnail(720, 720).to_luma8();
+                    let (tw, th) = gray.dimensions();
+                    let mut tiles = Vec::new();
+                    for row in 0..4 {
+                        for col in 0..4 {
+                            let tile = imageops::crop_imm(
+                                &gray,
+                                col * tw / 4,
+                                row * th / 4,
+                                tw / 4,
+                                th / 4,
+                            )
+                            .to_image();
+                            tiles.push(calculate_laplacian_variance(&tile));
+                        }
+                    }
+                    zone_metrics.insert(
+                        data.result.path.clone(),
+                        serde_json::json!({
+                            "analysedWidth": image.width(),
+                            "analysedHeight": image.height(),
+                            "faceSharpness": face_sharpness,
+                            "faceContrast": face_contrast,
+                            "tiles720": tiles,
+                            "faceNormalized": normalized,
+                            "faceCreteNative": crete_native,
+                            "previewSize": preview.as_ref().map(|p| [p.width(), p.height()]),
+                            "previewFaces": preview_faces,
+                        }),
+                    );
+                }
                 Err(_) => {
                     unprocessed.insert(data.result.path.clone());
                 }
@@ -1567,6 +1727,7 @@ mod tests {
                 "imageWidth": result.width,
                 "faces": result.attributed_faces.iter().map(|face| [face.x, face.y, face.width, face.height]).collect::<Vec<_>>(),
                 "group": group_of.get(&result.path),
+                "zone": zone_metrics.get(&result.path),
             });
             lines.push_str(&line.to_string());
             lines.push('\n');
@@ -1583,6 +1744,74 @@ mod tests {
         for failure in failed {
             println!("failed: {failure}");
         }
+    }
+
+    /// Crété et al. 2007 no-reference blur: share of the neighbour variation a
+    /// 9-tap re-blur removes; 0 = sharp, 1 = already blurred. Contrast invariant.
+    fn crete_blur(image: &GrayImage) -> Option<f64> {
+        let (w, h) = image.dimensions();
+        if w < 12 || h < 12 {
+            return None;
+        }
+        let px = |x: u32, y: u32| image.get_pixel(x, y)[0] as f64;
+        let mut worst: f64 = 0.0;
+        for vertical in [false, true] {
+            let blurred = |x: u32, y: u32| {
+                let mut sum = 0.0;
+                for k in -4i32..=4 {
+                    let (xx, yy) = if vertical {
+                        (x as i32, (y as i32 + k).clamp(0, h as i32 - 1))
+                    } else {
+                        ((x as i32 + k).clamp(0, w as i32 - 1), y as i32)
+                    };
+                    sum += px(xx as u32, yy as u32);
+                }
+                sum / 9.0
+            };
+            let (mut s_f, mut s_v) = (0.0, 0.0);
+            for y in 1..h {
+                for x in 1..w {
+                    let (ax, ay) = if vertical { (x, y - 1) } else { (x - 1, y) };
+                    let d_f = (px(x, y) - px(ax, ay)).abs();
+                    let d_b = (blurred(x, y) - blurred(ax, ay)).abs();
+                    s_f += d_f;
+                    s_v += (d_f - d_b).max(0.0);
+                }
+            }
+            if s_f > 0.0 {
+                worst = worst.max((s_f - s_v) / s_f);
+            }
+        }
+        Some(worst)
+    }
+
+    fn face_crop_at_width(
+        image: &DynamicImage,
+        face: &face_processing::FaceBox,
+        target_width: f32,
+    ) -> Option<GrayImage> {
+        let margin = 0.125;
+        let left = (face.x - face.width * margin).max(0.0).floor() as u32;
+        let top = (face.y - face.height * margin).max(0.0).floor() as u32;
+        let right = ((face.x + face.width * (1.0 + margin)).ceil() as u32).min(image.width());
+        let bottom = ((face.y + face.height * (1.0 + margin)).ceil() as u32).min(image.height());
+        if right < left + 8 || bottom < top + 8 {
+            return None;
+        }
+        let crop = image
+            .crop_imm(left, top, right - left, bottom - top)
+            .to_luma8();
+        let scale = target_width * (1.0 + 2.0 * margin) / crop.width() as f32;
+        let (nw, nh) = (
+            ((crop.width() as f32 * scale).round() as u32).max(1),
+            ((crop.height() as f32 * scale).round() as u32).max(1),
+        );
+        Some(imageops::resize(
+            &crop,
+            nw,
+            nh,
+            imageops::FilterType::Triangle,
+        ))
     }
 
     fn eye_settings(detect_closed_eyes: bool) -> CullingSettings {

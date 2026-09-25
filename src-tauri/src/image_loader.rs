@@ -302,7 +302,7 @@ fn largest_tiff_jpeg_preview(buf: &[u8]) -> Option<DynamicImage> {
     None
 }
 
-fn embedded_preview_fallback(bytes: &[u8], path: &str) -> Option<DynamicImage> {
+pub(crate) fn embedded_preview_fallback(bytes: &[u8], path: &str) -> Option<DynamicImage> {
     let img = match largest_tiff_jpeg_preview(bytes) {
         Some(img) => img,
         None => rawler::analyze::extract_preview_pixels(
