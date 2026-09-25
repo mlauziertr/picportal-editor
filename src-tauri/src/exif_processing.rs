@@ -223,6 +223,27 @@ pub(crate) fn load_sidecar_unlocked(sidecar_path: &Path) -> ImageMetadata {
     load_sidecar_unlocked_with_status(sidecar_path).0
 }
 
+/// Sidecar about to be rewritten by a batch update (caller holds the write lock). A missing file
+/// is a fresh sidecar; an unreadable or unparseable one is refused so that it is never replaced
+/// by default metadata. Nothing is written here (no auto-heal).
+pub(crate) fn load_sidecar_for_update(sidecar_path: &Path) -> Result<ImageMetadata, String> {
+    if !sidecar_path.exists() {
+        return Ok(ImageMetadata::default());
+    }
+    let content = fs::read_to_string(sidecar_path)
+        .map_err(|error| format!("SIDECAR_UNREADABLE: {error}"))?;
+    let mut meta = serde_json::from_str::<ImageMetadata>(&content)
+        .map_err(|error| format!("SIDECAR_INVALID: {error}"))?;
+    if let Some(ref mut exif_map) = meta.exif {
+        for val in exif_map.values_mut() {
+            if val.len() > 500 {
+                *val = truncate_large_exif(val);
+            }
+        }
+    }
+    Ok(meta)
+}
+
 pub(crate) fn load_sidecar_unlocked_with_status(sidecar_path: &Path) -> (ImageMetadata, bool) {
     if !sidecar_path.exists() {
         return (ImageMetadata::default(), true);

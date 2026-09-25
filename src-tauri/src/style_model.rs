@@ -576,7 +576,10 @@ pub async fn apply_style_to_paths(
             },
             |adjustments, proposal| {
                 let proposal = proposal.as_object().cloned().unwrap_or_default();
-                merge_style_proposal(adjustments, &proposal, &model_id, &applied_at, policy)
+                let outcome =
+                    merge_style_proposal(adjustments, &proposal, &model_id, &applied_at, policy);
+                let write = !outcome.skipped;
+                (outcome, write)
             },
         );
         paths.into_iter().zip(results).collect::<Vec<_>>()
@@ -643,11 +646,27 @@ mod tests {
 
     #[test]
     fn features_match_the_python_reference_on_fixtures() {
-        let expected = read_json(&fixtures().join("parity.expected.json"));
+        assert_features_match(&fixtures().join("parity.expected.json"), &fixtures());
+    }
+
+    /// Opt-in parity on a local corpus: `STYLE_PARITY_EXPECTED` names a JSON written by the
+    /// Python extractor (same format as parity.expected.json, `file` relative to the JSON's folder
+    /// or absolute). Nothing of the corpus is stored in the repository.
+    #[test]
+    fn features_match_the_python_reference_on_a_local_corpus() {
+        let Some(expected) = std::env::var_os("STYLE_PARITY_EXPECTED").map(PathBuf::from) else {
+            return;
+        };
+        let base = expected.parent().expect("parent").to_path_buf();
+        assert_features_match(&expected, &base);
+    }
+
+    fn assert_features_match(expected: &Path, base: &Path) {
+        let expected = read_json(expected);
         for entry in expected["images"].as_array().expect("images") {
             let name = entry["file"].as_str().expect("file");
             let tolerance = entry["tolerance"].as_f64().expect("tolerance");
-            let path = fixtures().join(name);
+            let path = base.join(name);
             let bytes = fs::read(&path).expect("fixture image");
             let features = features_for_source(&path, &bytes).expect("features");
             let reference: Vec<f64> = entry["features"]
@@ -814,5 +833,106 @@ mod tests {
             let wanted = expected[key].as_f64().expect(key);
             assert!((actual - wanted).abs() < 1e-6, "{key}: {actual} != {wanted}");
         }
+    }
+
+    fn style_batch_merge(
+        adjustments: &mut Value,
+        proposal: &Value,
+    ) -> (StyleMergeOutcome, bool) {
+        let proposal = proposal.as_object().cloned().unwrap_or_default();
+        let outcome =
+            merge_style_proposal(adjustments, &proposal, "m1", "t1", StyleMergePolicy::SkipEdited);
+        let write = !outcome.skipped;
+        (outcome, write)
+    }
+
+    const MANUAL_RATING_XMP: &str = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about="" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmp:Rating="5"/>
+ </rdf:RDF>
+</x:xmpmeta>
+"#;
+
+    #[test]
+    fn skipped_photo_leaves_sidecar_and_xmp_bytes_untouched() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let image = directory.path().join("photo.jpg");
+        let sidecar = directory.path().join("photo.jpg.rrdata");
+        let xmp = directory.path().join("photo.xmp");
+        let sidecar_bytes = br#"{"version":1,"rating":0,"adjustments":{"contrast":42}}"#;
+        fs::write(&sidecar, sidecar_bytes).expect("write sidecar");
+        fs::write(&xmp, MANUAL_RATING_XMP).expect("write XMP");
+
+        let (outcome, written) = crate::file_management::update_sidecar_adjustments(
+            &image,
+            &sidecar,
+            &Value::Object(sample_proposal(0.5, -30.0)),
+            style_batch_merge,
+            true,
+            true,
+        )
+        .expect("skipped, not failed");
+
+        assert!(outcome.skipped);
+        assert!(!written);
+        assert_eq!(fs::read(&sidecar).expect("sidecar"), sidecar_bytes);
+        assert_eq!(fs::read_to_string(&xmp).expect("XMP"), MANUAL_RATING_XMP);
+    }
+
+    #[test]
+    fn invalid_sidecar_is_refused_not_replaced() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let image = directory.path().join("photo.jpg");
+        let sidecar = directory.path().join("photo.jpg.rrdata");
+        let xmp = directory.path().join("photo.xmp");
+        let sidecar_bytes = b"{\"version\":1,\"rating\":4,\"adjustments\":{\"contrast\":";
+        fs::write(&sidecar, sidecar_bytes).expect("write truncated sidecar");
+        fs::write(&xmp, MANUAL_RATING_XMP).expect("write XMP");
+
+        let error = crate::file_management::update_sidecar_adjustments(
+            &image,
+            &sidecar,
+            &Value::Object(sample_proposal(0.5, -30.0)),
+            style_batch_merge,
+            true,
+            true,
+        )
+        .err()
+        .expect("invalid sidecar must fail");
+
+        assert!(error.starts_with("SIDECAR_INVALID"), "{error}");
+        assert_eq!(fs::read(&sidecar).expect("sidecar"), sidecar_bytes);
+        assert_eq!(fs::read_to_string(&xmp).expect("XMP"), MANUAL_RATING_XMP);
+    }
+
+    #[test]
+    fn styled_photo_keeps_the_xmp_rating() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let image = directory.path().join("photo.jpg");
+        let sidecar = directory.path().join("photo.jpg.rrdata");
+        let xmp = directory.path().join("photo.xmp");
+        fs::write(&sidecar, br#"{"version":1,"rating":0,"adjustments":{"clarity":7}}"#)
+            .expect("write sidecar");
+        fs::write(&xmp, MANUAL_RATING_XMP).expect("write XMP");
+
+        let (outcome, written) = crate::file_management::update_sidecar_adjustments(
+            &image,
+            &sidecar,
+            &Value::Object(sample_proposal(0.5, -30.0)),
+            style_batch_merge,
+            true,
+            true,
+        )
+        .expect("style applied");
+
+        assert!(!outcome.skipped);
+        assert!(written);
+        let saved: Value = serde_json::from_slice(&fs::read(&sidecar).expect("sidecar")).expect("JSON");
+        assert_eq!(saved["rating"], json!(5));
+        assert_eq!(saved["adjustments"]["clarity"], json!(7));
+        assert_eq!(saved["adjustments"]["exposure"], json!(0.5));
+        assert!(saved["adjustments"][STYLE_MARKER_KEY].is_object());
+        let xmp_content = fs::read_to_string(&xmp).expect("XMP");
+        assert!(xmp_content.contains(r#"xmp:Rating="5""#), "{xmp_content}");
     }
 }

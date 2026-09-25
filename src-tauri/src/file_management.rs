@@ -3061,10 +3061,48 @@ fn merge_auto_adjustments(adjustments: &mut Value, auto_adjustments: &Value) {
     }
 }
 
+/// Fold `proposal` into the sidecar of `source_path` under its write lock. `merge` returns its
+/// result and whether the sidecar must be written; when it declines (photo skipped), neither the
+/// sidecar nor the XMP is touched. An unreadable or unparseable sidecar is refused rather than
+/// replaced by default metadata. With XMP sync, the XMP rating and labels are read in first
+/// (as when the library loads the photo) so that writing back does not reset them.
+/// Returns the merge result and whether the sidecar was written.
+pub(crate) fn update_sidecar_adjustments<R>(
+    source_path: &Path,
+    sidecar_path: &Path,
+    proposal: &Value,
+    merge: impl FnOnce(&mut Value, &Value) -> (R, bool),
+    enable_xmp_sync: bool,
+    create_xmp_if_missing: bool,
+) -> std::result::Result<(R, bool), String> {
+    with_sidecar_write_lock(sidecar_path, || {
+        let mut metadata = crate::exif_processing::load_sidecar_for_update(sidecar_path)?;
+        if metadata.adjustments.is_null() {
+            metadata.adjustments = serde_json::json!({});
+        }
+        let (merged, write) = merge(&mut metadata.adjustments, proposal);
+        if !write {
+            return Ok((merged, false));
+        }
+        if enable_xmp_sync {
+            sync_metadata_from_xmp(source_path, &mut metadata);
+        }
+
+        let json_string = serde_json::to_string_pretty(&metadata).map_err(|error| error.to_string())?;
+        std::fs::write(sidecar_path, json_string).map_err(|error| error.to_string())?;
+
+        if enable_xmp_sync {
+            sync_metadata_to_xmp(source_path, &metadata, create_xmp_if_missing);
+        }
+        Ok((merged, true))
+    })
+}
+
 /// Shared path of the automatic and style adjustments: for each image, `compute` derives
 /// proposed adjustments from the source bytes (optionally returning the decoded image for the
-/// thumbnail), `merge` folds them into the sidecar under its write lock, then XMP is synced and
-/// the thumbnail regenerated. Callers must have queued `paths.len()` thumbnails.
+/// thumbnail), `merge` folds them into the sidecar (see `update_sidecar_adjustments`), then the
+/// thumbnail of every written sidecar is regenerated. Callers must have queued `paths.len()`
+/// thumbnails.
 pub(crate) fn update_adjustments_for_paths<R, C, M>(
     paths: &[String],
     app_handle: &AppHandle,
@@ -3075,7 +3113,7 @@ where
     R: Send,
     C: Fn(&Path, &[u8], &AppSettings) -> std::result::Result<(Option<DynamicImage>, Value), String>
         + Sync,
-    M: Fn(&mut Value, &Value) -> R + Sync,
+    M: Fn(&mut Value, &Value) -> (R, bool) + Sync,
 {
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
     let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(false);
@@ -3101,40 +3139,29 @@ where
     paths
         .par_iter()
         .map(|path| {
-            let outcome = (|| -> std::result::Result<(Option<DynamicImage>, R), String> {
+            let outcome = (|| -> std::result::Result<(Option<DynamicImage>, R, bool), String> {
                 let (source_path, sidecar_path) = parse_virtual_path(path);
                 let file_bytes = fs::read(&source_path).map_err(|e| e.to_string())?;
                 let (image, proposal) = compute(&source_path, &file_bytes, &settings)?;
-
-                let merged = with_sidecar_write_lock(&sidecar_path, || {
-                    let mut existing_metadata =
-                        crate::exif_processing::load_sidecar_unlocked(&sidecar_path);
-
-                    if existing_metadata.adjustments.is_null() {
-                        existing_metadata.adjustments = serde_json::json!({});
-                    }
-                    let merged = merge(&mut existing_metadata.adjustments, &proposal);
-
-                    let json_string = serde_json::to_string_pretty(&existing_metadata)
-                        .map_err(|error| error.to_string())?;
-                    std::fs::write(&sidecar_path, json_string)
-                        .map_err(|error| error.to_string())?;
-
-                    if enable_xmp_sync {
-                        sync_metadata_to_xmp(
-                            &source_path,
-                            &existing_metadata,
-                            create_xmp_if_missing,
-                        );
-                    }
-                    Ok(merged)
-                })?;
-                Ok((image, merged))
+                let (merged, written) = update_sidecar_adjustments(
+                    &source_path,
+                    &sidecar_path,
+                    &proposal,
+                    |adjustments, proposal| merge(adjustments, proposal),
+                    enable_xmp_sync,
+                    create_xmp_if_missing,
+                )?;
+                Ok((image, merged, written))
             })();
-            let (loaded_image, result) = match outcome {
-                Ok((image, merged)) => (image, Ok(merged)),
-                Err(error) => (None, Err(error)),
+            let (loaded_image, result, written) = match outcome {
+                Ok((image, merged, written)) => (image, Ok(merged), written),
+                Err(error) => (None, Err(error), true),
             };
+            if !written {
+                // Skipped photo: nothing changed on disk, its thumbnail is still current.
+                increment_thumbnail_progress(&state, app_handle);
+                return result;
+            }
 
             let thumbnail = generate_single_thumbnail_and_cache(
                 path,
@@ -3187,7 +3214,7 @@ pub async fn apply_auto_adjustments_to_paths(
                 let auto_adjustments_json = auto_results_to_json(&perform_auto_analysis(&image));
                 Ok((Some(image), auto_adjustments_json))
             },
-            merge_auto_adjustments,
+            |adjustments, proposal| (merge_auto_adjustments(adjustments, proposal), true),
         );
         for (path, result) in paths.iter().zip(results) {
             if let Err(e) = result {
