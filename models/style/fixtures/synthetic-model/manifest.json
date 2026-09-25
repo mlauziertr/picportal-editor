@@ -1,0 +1,147 @@
+{
+  "version": 1,
+  "modelId": "style-v1-mlp-5b2935b0e89b",
+  "featureVersion": "style-features-v1",
+  "featureCount": 55,
+  "featureNames": [
+    "mean_r",
+    "mean_g",
+    "mean_b",
+    "mean_y",
+    "std_y",
+    "y_p1",
+    "y_p5",
+    "y_p10",
+    "y_p25",
+    "y_p50",
+    "y_p75",
+    "y_p90",
+    "y_p95",
+    "y_p99",
+    "clip_high",
+    "clip_low",
+    "warmth",
+    "tint_axis",
+    "saturation",
+    "grid_y_00",
+    "grid_y_01",
+    "grid_y_02",
+    "grid_y_03",
+    "grid_y_10",
+    "grid_y_11",
+    "grid_y_12",
+    "grid_y_13",
+    "grid_y_20",
+    "grid_y_21",
+    "grid_y_22",
+    "grid_y_23",
+    "grid_y_30",
+    "grid_y_31",
+    "grid_y_32",
+    "grid_y_33",
+    "grid_warmth_00",
+    "grid_warmth_01",
+    "grid_warmth_02",
+    "grid_warmth_03",
+    "grid_warmth_10",
+    "grid_warmth_11",
+    "grid_warmth_12",
+    "grid_warmth_13",
+    "grid_warmth_20",
+    "grid_warmth_21",
+    "grid_warmth_22",
+    "grid_warmth_23",
+    "grid_warmth_30",
+    "grid_warmth_31",
+    "grid_warmth_32",
+    "grid_warmth_33",
+    "exif_present",
+    "log2_iso",
+    "log2_exposure_time",
+    "log2_focal_length"
+  ],
+  "outputKeys": [
+    "exposure",
+    "contrast",
+    "highlights",
+    "shadows",
+    "whites",
+    "blacks",
+    "temperature",
+    "tint",
+    "vibrance",
+    "saturation"
+  ],
+  "outputRanges": {
+    "exposure": [
+      -5.0,
+      5.0
+    ],
+    "contrast": [
+      -100.0,
+      100.0
+    ],
+    "highlights": [
+      -100.0,
+      100.0
+    ],
+    "shadows": [
+      -100.0,
+      100.0
+    ],
+    "whites": [
+      -100.0,
+      100.0
+    ],
+    "blacks": [
+      -100.0,
+      100.0
+    ],
+    "temperature": [
+      -100.0,
+      100.0
+    ],
+    "tint": [
+      -100.0,
+      100.0
+    ],
+    "vibrance": [
+      -100.0,
+      100.0
+    ],
+    "saturation": [
+      -100.0,
+      100.0
+    ]
+  },
+  "input": "features",
+  "output": "adjustments",
+  "kind": "mlp",
+  "fallback": false,
+  "trainingSamples": 115,
+  "minimumForLearnedModel": 50,
+  "corpusFingerprint": "76b5f5e86a1e068f177d4b54e5d036f5647623b56790e31021e64544ad7519ad",
+  "createdAt": "2026-09-25T02:59:15+00:00",
+  "seed": 0,
+  "onnx": {
+    "opset": 17,
+    "irVersion": 8
+  },
+  "trainer": {
+    "python": "3.14.7",
+    "numpy": "2.5.3",
+    "onnx": "1.23.0"
+  },
+  "evaluation": {
+    "relativeMae": 0.4583,
+    "beatsBaseline": true
+  },
+  "artifacts": [
+    {
+      "role": "regressor",
+      "filename": "style-model.onnx",
+      "sha256": "5b2935b0e89b502d11197dfcf923b2dba629c93fd318b57b917bb0e243de617b",
+      "bytes": 9570
+    }
+  ]
+}

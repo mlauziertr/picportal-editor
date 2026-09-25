@@ -2283,5 +2283,29 @@
         "vectorscope": "Vecteurscope"
       }
     }
+  },
+  "style": {
+    "apply": "Appliquer mon style",
+    "applyToSelection_one": "Appliquer mon style à {{count}} photo",
+    "applyToSelection_many": "Appliquer mon style à {{count}} photos",
+    "applyToSelection_other": "Appliquer mon style à {{count}} photos",
+    "applyTooltip": "Appliquer mon style (réglages de base proposés, modifiables)",
+    "noModel": "Aucun style entraîné",
+    "noModelHint": "Entraînez votre style à partir de photos que vous avez déjà retouchées. Il reste sur cet ordinateur.",
+    "trainCliHint": "Pour l’instant, l’entraînement se lance en ligne de commande : python3 -m scripts.style.train --corpus <dossier> (voir docs/style-model.md).",
+    "fallbackNotice": "Style approximatif : entraîné sur {{count}} photos (moins de {{recommended}}). Les propositions sont des moyennes par groupe de photos semblables.",
+    "batch": {
+      "done_one": "Mon style appliqué à {{count}} photo.",
+      "done_many": "Mon style appliqué à {{count}} photos.",
+      "done_other": "Mon style appliqué à {{count}} photos.",
+      "skipped": "{{count}} photos déjà retouchées ignorées.",
+      "failed": "{{count}} photos n’ont pas pu être traitées."
+    },
+    "errors": {
+      "modelOutdated": "Votre style a été entraîné avec une version antérieure. Réentraînez-le pour continuer.",
+      "modelDamaged": "Le fichier de votre style est endommagé. Réentraînez-le pour continuer.",
+      "generic": "Mon style n’a pas pu être appliqué. Vos réglages sont inchangés.",
+      "stale": "Mon style n’a pas été appliqué : la photo ou ses réglages ont changé pendant le calcul."
+    }
   }
 }

@@ -1,0 +1,174 @@
+{
+  "samples": 115,
+  "minimumForLearnedModel": 50,
+  "mode": "learned",
+  "candidates": [
+    {
+      "kind": "mlp",
+      "params": {
+        "hidden": 32,
+        "weightDecay": 0.01,
+        "epochs": 800
+      },
+      "cvRelativeMae": 0.4731
+    },
+    {
+      "kind": "mlp",
+      "params": {
+        "hidden": 16,
+        "weightDecay": 0.01,
+        "epochs": 800
+      },
+      "cvRelativeMae": 0.4735
+    },
+    {
+      "kind": "knn",
+      "params": {
+        "k": 3
+      },
+      "cvRelativeMae": 0.51
+    },
+    {
+      "kind": "knn",
+      "params": {
+        "k": 5
+      },
+      "cvRelativeMae": 0.5122
+    },
+    {
+      "kind": "ridge",
+      "params": {
+        "alpha": 10.0
+      },
+      "cvRelativeMae": 0.5148
+    },
+    {
+      "kind": "knn",
+      "params": {
+        "k": 8
+      },
+      "cvRelativeMae": 0.535
+    },
+    {
+      "kind": "ridge",
+      "params": {
+        "alpha": 1.0
+      },
+      "cvRelativeMae": 0.5562
+    },
+    {
+      "kind": "knn",
+      "params": {
+        "k": 12
+      },
+      "cvRelativeMae": 0.5631
+    },
+    {
+      "kind": "ridge",
+      "params": {
+        "alpha": 100.0
+      },
+      "cvRelativeMae": 0.5709
+    },
+    {
+      "kind": "mlp",
+      "params": {
+        "hidden": 16,
+        "weightDecay": 0.001,
+        "epochs": 800
+      },
+      "cvRelativeMae": 0.6066
+    },
+    {
+      "kind": "mlp",
+      "params": {
+        "hidden": 32,
+        "weightDecay": 0.001,
+        "epochs": 800
+      },
+      "cvRelativeMae": 0.611
+    },
+    {
+      "kind": "ridge",
+      "params": {
+        "alpha": 0.1
+      },
+      "cvRelativeMae": 0.6513
+    }
+  ],
+  "evaluation": {
+    "protocol": "holdout 23 images (seed 0); model chosen by 5-fold CV on the other 92",
+    "maeModel": {
+      "exposure": 0.2712,
+      "contrast": 4.289,
+      "highlights": 3.6264,
+      "shadows": 3.8674,
+      "whites": 2.4216,
+      "blacks": 3.6031,
+      "temperature": 10.4337,
+      "tint": 10.3624,
+      "vibrance": 2.5019,
+      "saturation": 2.8317
+    },
+    "maeBaselineMean": {
+      "exposure": 0.7181,
+      "contrast": 13.8332,
+      "highlights": 14.5326,
+      "shadows": 7.7103,
+      "whites": 6.3573,
+      "blacks": 6.6418,
+      "temperature": 21.2982,
+      "tint": 13.4329,
+      "vibrance": 6.1295,
+      "saturation": 5.1413
+    },
+    "relativeMae": 0.4583,
+    "keysBeatingBaseline": [
+      "exposure",
+      "contrast",
+      "highlights",
+      "shadows",
+      "whites",
+      "blacks",
+      "temperature",
+      "tint",
+      "vibrance",
+      "saturation"
+    ],
+    "beatsBaseline": true,
+    "presetRecovery": {
+      "accuracy": 1.0,
+      "images": 23,
+      "styleOnlyKeys": [
+        "contrast",
+        "highlights",
+        "shadows",
+        "whites",
+        "blacks",
+        "vibrance",
+        "saturation"
+      ]
+    }
+  },
+  "model": {
+    "kind": "mlp",
+    "params": {
+      "hidden": 32,
+      "weightDecay": 0.01,
+      "epochs": 800
+    }
+  },
+  "dataset": {
+    "featureVersion": "style-features-v1",
+    "imagesScanned": 120,
+    "samples": 115,
+    "bySource": {
+      "rrdata": 64,
+      "xmp": 51
+    },
+    "skipped": {
+      "no_edit": 5
+    },
+    "unreadable": []
+  }
+}

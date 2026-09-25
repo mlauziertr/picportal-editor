@@ -1,5 +1,5 @@
-import React, { useCallback } from 'react';
-import { RotateCcw, Copy, ClipboardPaste, PencilSparkles, ChartArea } from 'lucide-react';
+import React, { useCallback, useState } from 'react';
+import { RotateCcw, Copy, ClipboardPaste, PencilSparkles, ChartArea, Palette, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
@@ -34,7 +34,18 @@ export default function Controls() {
   const { showContextMenu } = useContextMenu();
   const { isResizingWaveform, onToggleWaveform, setActiveWaveformChannel, handleWaveformResize } =
     useWaveformControls();
-  const { setAdjustments, handleAutoAdjustments, handleLutSelect, setLutPreviewOverride } = useEditorActions();
+  const { setAdjustments, handleAutoAdjustments, handleApplyStyle, handleLutSelect, setLutPreviewOverride } =
+    useEditorActions();
+  const [isApplyingStyle, setIsApplyingStyle] = useState(false);
+
+  const onApplyStyle = async () => {
+    setIsApplyingStyle(true);
+    try {
+      await handleApplyStyle();
+    } finally {
+      setIsApplyingStyle(false);
+    }
+  };
 
   const { appSettings, theme } = useSettingsStore(
     useShallow((state) => ({
@@ -225,6 +236,15 @@ export default function Controls() {
             data-tooltip={t('editor.adjustments.tooltips.autoAdjust')}
           >
             <PencilSparkles size={18} />
+          </button>
+          <button
+            className="p-2 rounded-full hover:bg-surface disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            disabled={!selectedImage || isApplyingStyle}
+            onClick={onApplyStyle}
+            aria-label={t('style.apply')}
+            data-tooltip={t('style.applyTooltip')}
+          >
+            {isApplyingStyle ? <Loader2 size={18} className="animate-spin" /> : <Palette size={18} />}
           </button>
           <button
             className={clsx(
