@@ -3036,84 +3036,84 @@ pub async fn apply_auto_lens_correction_to_paths(
     Ok(())
 }
 
-#[tauri::command]
-pub async fn apply_auto_adjustments_to_paths(
-    paths: Vec<String>,
-    app_handle: AppHandle,
-) -> Result<(), String> {
-    let state = app_handle.state::<AppState>();
-    add_to_thumbnail_queue(&state, paths.len(), &app_handle);
-
-    tauri::async_runtime::spawn_blocking(move || {
-        let settings = load_settings(app_handle.clone()).unwrap_or_default();
-        let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(false);
-        let create_xmp_if_missing = settings.create_xmp_if_missing.unwrap_or(false);
-
-        let state = app_handle.state::<AppState>();
-        let thumb_cache_dir = match resolve_thumbnail_cache_dir(&app_handle) {
-            Ok(dir) => dir,
-            Err(e) => {
-                log::warn!("Unable to initialize thumbnail cache directory: {}", e);
-                for path in &paths {
-                    emit_thumbnail_cache_setup_error(&app_handle, path, &e);
+/// Merge the automatic adjustments into a sidecar's adjustments (sections are shown).
+fn merge_auto_adjustments(adjustments: &mut Value, auto_adjustments: &Value) {
+    if let (Some(existing_map), Some(auto_map)) =
+        (adjustments.as_object_mut(), auto_adjustments.as_object())
+    {
+        for (k, v) in auto_map {
+            if k == "sectionVisibility" {
+                if let Some(existing_vis_val) = existing_map.get_mut(k) {
+                    if let (Some(existing_vis), Some(auto_vis)) =
+                        (existing_vis_val.as_object_mut(), v.as_object())
+                    {
+                        for (vis_k, vis_v) in auto_vis {
+                            existing_vis.insert(vis_k.clone(), vis_v.clone());
+                        }
+                    }
+                } else {
+                    existing_map.insert(k.clone(), v.clone());
                 }
-                for _ in 0..paths.len() {
-                    increment_thumbnail_progress(&state, &app_handle);
-                }
-                return;
+            } else {
+                existing_map.insert(k.clone(), v.clone());
             }
-        };
+        }
+    }
+}
 
-        let gpu_context = gpu_processing::get_or_init_gpu_context(&state, &app_handle).ok();
+/// Shared path of the automatic and style adjustments: for each image, `compute` derives
+/// proposed adjustments from the source bytes (optionally returning the decoded image for the
+/// thumbnail), `merge` folds them into the sidecar under its write lock, then XMP is synced and
+/// the thumbnail regenerated. Callers must have queued `paths.len()` thumbnails.
+pub(crate) fn update_adjustments_for_paths<R, C, M>(
+    paths: &[String],
+    app_handle: &AppHandle,
+    compute: C,
+    merge: M,
+) -> Vec<std::result::Result<R, String>>
+where
+    R: Send,
+    C: Fn(&Path, &[u8], &AppSettings) -> std::result::Result<(Option<DynamicImage>, Value), String>
+        + Sync,
+    M: Fn(&mut Value, &Value) -> R + Sync,
+{
+    let settings = load_settings(app_handle.clone()).unwrap_or_default();
+    let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(false);
+    let create_xmp_if_missing = settings.create_xmp_if_missing.unwrap_or(false);
 
-        paths.par_iter().for_each(|path| {
-            let loaded_image: Option<DynamicImage> = (|| -> Result<DynamicImage, String> {
+    let state = app_handle.state::<AppState>();
+    let thumb_cache_dir = match resolve_thumbnail_cache_dir(app_handle) {
+        Ok(dir) => dir,
+        Err(e) => {
+            log::warn!("Unable to initialize thumbnail cache directory: {}", e);
+            for path in paths {
+                emit_thumbnail_cache_setup_error(app_handle, path, &e);
+            }
+            for _ in 0..paths.len() {
+                increment_thumbnail_progress(&state, app_handle);
+            }
+            return paths.iter().map(|_| Err(e.clone())).collect();
+        }
+    };
+
+    let gpu_context = gpu_processing::get_or_init_gpu_context(&state, app_handle).ok();
+
+    paths
+        .par_iter()
+        .map(|path| {
+            let outcome = (|| -> std::result::Result<(Option<DynamicImage>, R), String> {
                 let (source_path, sidecar_path) = parse_virtual_path(path);
-                let source_path_str = source_path.to_string_lossy().to_string();
-
                 let file_bytes = fs::read(&source_path).map_err(|e| e.to_string())?;
-                let image = image_loader::load_base_image_from_bytes(
-                    &file_bytes,
-                    &source_path_str,
-                    true,
-                    &settings,
-                    None,
-                )
-                .map_err(|e| e.to_string())?;
+                let (image, proposal) = compute(&source_path, &file_bytes, &settings)?;
 
-                let auto_results = perform_auto_analysis(&image);
-                let auto_adjustments_json = auto_results_to_json(&auto_results);
-
-                with_sidecar_write_lock(&sidecar_path, || {
+                let merged = with_sidecar_write_lock(&sidecar_path, || {
                     let mut existing_metadata =
                         crate::exif_processing::load_sidecar_unlocked(&sidecar_path);
 
                     if existing_metadata.adjustments.is_null() {
                         existing_metadata.adjustments = serde_json::json!({});
                     }
-
-                    if let (Some(existing_map), Some(auto_map)) = (
-                        existing_metadata.adjustments.as_object_mut(),
-                        auto_adjustments_json.as_object(),
-                    ) {
-                        for (k, v) in auto_map {
-                            if k == "sectionVisibility" {
-                                if let Some(existing_vis_val) = existing_map.get_mut(k) {
-                                    if let (Some(existing_vis), Some(auto_vis)) =
-                                        (existing_vis_val.as_object_mut(), v.as_object())
-                                    {
-                                        for (vis_k, vis_v) in auto_vis {
-                                            existing_vis.insert(vis_k.clone(), vis_v.clone());
-                                        }
-                                    }
-                                } else {
-                                    existing_map.insert(k.clone(), v.clone());
-                                }
-                            } else {
-                                existing_map.insert(k.clone(), v.clone());
-                            }
-                        }
-                    }
+                    let merged = merge(&mut existing_metadata.adjustments, &proposal);
 
                     let json_string = serde_json::to_string_pretty(&existing_metadata)
                         .map_err(|error| error.to_string())?;
@@ -3127,26 +3127,28 @@ pub async fn apply_auto_adjustments_to_paths(
                             create_xmp_if_missing,
                         );
                     }
-                    Ok(())
+                    Ok(merged)
                 })?;
-                Ok(image)
-            })()
-            .map_err(|e| eprintln!("Failed to apply auto adjustments to {}: {}", path, e))
-            .ok();
+                Ok((image, merged))
+            })();
+            let (loaded_image, result) = match outcome {
+                Ok((image, merged)) => (image, Ok(merged)),
+                Err(error) => (None, Err(error)),
+            };
 
-            let result = generate_single_thumbnail_and_cache(
+            let thumbnail = generate_single_thumbnail_and_cache(
                 path,
                 &thumb_cache_dir,
                 gpu_context.as_ref(),
                 loaded_image.as_ref(),
                 true,
-                &app_handle,
+                app_handle,
                 &settings,
             );
 
-            if let Some((small_path, medium_path, rating, is_edited)) = result {
+            if let Some((small_path, medium_path, rating, is_edited)) = thumbnail {
                 emit_thumbnail_generated(
-                    &app_handle,
+                    app_handle,
                     path,
                     &small_path,
                     &medium_path,
@@ -3155,8 +3157,43 @@ pub async fn apply_auto_adjustments_to_paths(
                 );
             }
 
-            increment_thumbnail_progress(&state, &app_handle);
-        });
+            increment_thumbnail_progress(&state, app_handle);
+            result
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub async fn apply_auto_adjustments_to_paths(
+    paths: Vec<String>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    let state = app_handle.state::<AppState>();
+    add_to_thumbnail_queue(&state, paths.len(), &app_handle);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let results = update_adjustments_for_paths(
+            &paths,
+            &app_handle,
+            |source_path, file_bytes, settings| {
+                let image = image_loader::load_base_image_from_bytes(
+                    file_bytes,
+                    &source_path.to_string_lossy(),
+                    true,
+                    settings,
+                    None,
+                )
+                .map_err(|e| e.to_string())?;
+                let auto_adjustments_json = auto_results_to_json(&perform_auto_analysis(&image));
+                Ok((Some(image), auto_adjustments_json))
+            },
+            merge_auto_adjustments,
+        );
+        for (path, result) in paths.iter().zip(results) {
+            if let Err(e) = result {
+                eprintln!("Failed to apply auto adjustments to {}: {}", path, e);
+            }
+        }
     });
 
     Ok(())

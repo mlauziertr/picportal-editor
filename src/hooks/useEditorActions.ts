@@ -2,6 +2,7 @@ import { useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import debounce from 'lodash.debounce';
 import { toast } from 'react-toastify';
+import { useTranslation } from 'react-i18next';
 import { useEditorStore } from '../store/useEditorStore';
 import { useLibraryStore } from '../store/useLibraryStore';
 import { useSettingsStore } from '../store/useSettingsStore';
@@ -17,6 +18,7 @@ import {
 import { calculateCenteredCrop } from '../utils/cropUtils';
 import { Invokes } from '../components/ui/AppProperties';
 import { globalImageCache } from '../utils/ImageLRUCache';
+import { StyleEditorProposal, styleErrorMessage, styleFallbackNotice } from '../utils/styleModel';
 
 export const debouncedSetHistory = debounce((newAdj: Adjustments) => {
   useEditorStore.getState().pushHistory(newAdj);
@@ -30,6 +32,7 @@ export const debouncedSave = debounce((path: string, adjustmentsToSave: Adjustme
 }, 300);
 
 export function useEditorActions() {
+  const { t } = useTranslation();
   const setEditor = useEditorStore((s) => s.setEditor);
 
   const setAdjustments = useCallback(
@@ -84,6 +87,25 @@ export function useEditorActions() {
       toast.error(`Failed to apply auto adjustments: ${err}`);
     }
   }, [setAdjustments]);
+
+  const handleApplyStyle = useCallback(async () => {
+    const { selectedImage, adjustments } = useEditorStore.getState();
+    if (!selectedImage?.isReady) return;
+    const path = selectedImage.path;
+    try {
+      const proposal: StyleEditorProposal = await invoke(Invokes.CalculateStyleAdjustments, {
+        path,
+        currentAdjustments: adjustments,
+      });
+      if (useEditorStore.getState().selectedImage?.path !== path) return;
+      setAdjustments((prev: Adjustments) => ({ ...prev, ...proposal.patch }));
+      const notice = styleFallbackNotice(t, proposal.model);
+      if (notice) toast.info(notice);
+    } catch (err) {
+      console.error('Failed to apply style:', err);
+      toast.error(styleErrorMessage(t, err));
+    }
+  }, [setAdjustments, t]);
 
   const toggleShowOriginal = useCallback(() => {
     setEditor((state) => {
@@ -405,6 +427,7 @@ export function useEditorActions() {
     setAdjustments,
     handleRotate,
     handleAutoAdjustments,
+    handleApplyStyle,
     handleLutSelect,
     setLutPreviewOverride,
     handleResetAdjustments,

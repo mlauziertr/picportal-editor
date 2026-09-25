@@ -59,6 +59,7 @@ import TaggingSubMenu from '../context/TaggingSubMenu';
 import { useEditorActions } from './useEditorActions';
 import { useLibraryActions } from './useLibraryActions';
 import { globalImageCache } from '../utils/ImageLRUCache';
+import { StyleApplySummary, styleBatchMessages, styleErrorMessage, styleFallbackNotice } from '../utils/styleModel';
 import { isVirtualCopyPath, splitVirtualCopyPath, stripVirtualCopySuffix } from '../utils/virtualCopyPath';
 
 export interface UseAppContextMenusProps {
@@ -79,6 +80,7 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
 
   const {
     handleAutoAdjustments,
+    handleApplyStyle,
     handleAutoLensCorrection,
     handleResetAdjustments,
     handleCopyAdjustments,
@@ -213,6 +215,12 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
               disabled: !selectedImage?.isReady,
             },
             {
+              label: t('style.apply'),
+              icon: Palette,
+              onClick: handleApplyStyle,
+              disabled: !selectedImage?.isReady,
+            },
+            {
               label: t('contextMenus.editor.autoLensCorrection'),
               icon: Aperture,
               onClick: () => handleAutoLensCorrection([selectedImage.path]),
@@ -333,6 +341,7 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
       handleCopyAdjustments,
       handlePasteAdjustments,
       handleAutoAdjustments,
+      handleApplyStyle,
       handleRate,
       handleSetColorLabel,
       handleTagsChanged,
@@ -462,31 +471,51 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
         }
       };
 
+      const reloadSelectionAdjustments = async () => {
+        if (selectedImage && finalSelection.includes(selectedImage.path)) {
+          const metadata: any = await invoke(Invokes.LoadMetadata, { path: selectedImage.path });
+          if (metadata.adjustments && !metadata.adjustments.is_null) {
+            const normalized = normalizeLoadedAdjustments(metadata.adjustments);
+            setEditor({ adjustments: normalized });
+            useEditorStore.getState().resetHistory(normalized);
+          }
+        }
+        if (libraryActivePath && finalSelection.includes(libraryActivePath)) {
+          const metadata: any = await invoke(Invokes.LoadMetadata, { path: libraryActivePath });
+          if (metadata.adjustments && !metadata.adjustments.is_null) {
+            const normalized = normalizeLoadedAdjustments(metadata.adjustments);
+            setLibrary({ libraryActiveAdjustments: normalized });
+          }
+        }
+      };
+
       const handleApplyAutoAdjustmentsToSelection = () => {
         if (finalSelection.length === 0) return;
         finalSelection.forEach((p) => globalImageCache.delete(p));
 
         invoke(Invokes.ApplyAutoAdjustmentsToPaths, { paths: finalSelection })
-          .then(async () => {
-            if (selectedImage && finalSelection.includes(selectedImage.path)) {
-              const metadata: any = await invoke(Invokes.LoadMetadata, { path: selectedImage.path });
-              if (metadata.adjustments && !metadata.adjustments.is_null) {
-                const normalized = normalizeLoadedAdjustments(metadata.adjustments);
-                setEditor({ adjustments: normalized });
-                useEditorStore.getState().resetHistory(normalized);
-              }
-            }
-            if (libraryActivePath && finalSelection.includes(libraryActivePath)) {
-              const metadata: any = await invoke(Invokes.LoadMetadata, { path: libraryActivePath });
-              if (metadata.adjustments && !metadata.adjustments.is_null) {
-                const normalized = normalizeLoadedAdjustments(metadata.adjustments);
-                setLibrary({ libraryActiveAdjustments: normalized });
-              }
-            }
-          })
+          .then(reloadSelectionAdjustments)
           .catch((err) => {
             console.error('Failed to apply auto adjustments to paths:', err);
             toast.error(t('contextMenus.toasts.failedApplyAuto', { err }));
+          });
+      };
+
+      const handleApplyStyleToSelection = () => {
+        if (finalSelection.length === 0) return;
+        finalSelection.forEach((p) => globalImageCache.delete(p));
+
+        invoke<StyleApplySummary>(Invokes.ApplyStyleToPaths, { paths: finalSelection, skipEdited: true })
+          .then(async (summary) => {
+            await reloadSelectionAdjustments();
+            const messages = styleBatchMessages(t, summary);
+            (summary.failed > 0 ? toast.warning : toast.success)(messages.join(' '));
+            const notice = styleFallbackNotice(t, summary.model);
+            if (notice) toast.info(notice);
+          })
+          .catch((err) => {
+            console.error('Failed to apply style to paths:', err);
+            toast.error(styleErrorMessage(t, err));
           });
       };
 
@@ -569,6 +598,12 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
           icon: Gauge,
           submenu: [
             { label: autoAdjustLabel, icon: PencilSparkles, onClick: handleApplyAutoAdjustmentsToSelection },
+            {
+              label: t('style.applyToSelection', { count: selectionCount }),
+              icon: Palette,
+              onClick: handleApplyStyleToSelection,
+              disabled: finalSelection.length === 0,
+            },
             {
               label: t('contextMenus.thumbnail.autoLensCorrection', { count: selectionCount }),
               icon: Aperture,

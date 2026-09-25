@@ -327,7 +327,7 @@ fn embedded_preview_fallback(bytes: &[u8], path: &str) -> Option<DynamicImage> {
     })
 }
 
-fn safe_embedded_preview_fallback(bytes: &[u8], path: &str) -> Option<DynamicImage> {
+pub(crate) fn safe_embedded_preview_fallback(bytes: &[u8], path: &str) -> Option<DynamicImage> {
     match panic::catch_unwind(panic::AssertUnwindSafe(|| {
         embedded_preview_fallback(bytes, path)
     })) {

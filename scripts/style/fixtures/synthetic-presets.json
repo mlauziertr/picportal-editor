@@ -1,0 +1,53 @@
+{
+  "description": "Known looks applied per scene type by scripts/style/synth.py; the model must recover them.",
+  "presets": {
+    "interior": {
+      "exposure": 0.2,
+      "contrast": 5,
+      "highlights": -25,
+      "shadows": 35,
+      "whites": 10,
+      "blacks": -10,
+      "temperature": -20,
+      "tint": -5,
+      "vibrance": 15,
+      "saturation": 0
+    },
+    "landscape": {
+      "exposure": 0.0,
+      "contrast": 25,
+      "highlights": -40,
+      "shadows": 30,
+      "whites": 15,
+      "blacks": -15,
+      "temperature": 5,
+      "tint": 0,
+      "vibrance": 30,
+      "saturation": 5
+    },
+    "night": {
+      "exposure": 0.6,
+      "contrast": 15,
+      "highlights": -60,
+      "shadows": 20,
+      "whites": -10,
+      "blacks": -25,
+      "temperature": -15,
+      "tint": 5,
+      "vibrance": 5,
+      "saturation": -10
+    },
+    "portrait": {
+      "exposure": 0.3,
+      "contrast": -10,
+      "highlights": -20,
+      "shadows": 15,
+      "whites": 5,
+      "blacks": -5,
+      "temperature": 12,
+      "tint": 3,
+      "vibrance": 10,
+      "saturation": -5
+    }
+  }
+}

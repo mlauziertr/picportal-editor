@@ -2166,5 +2166,26 @@
         "vectorscope": "Vectorscope"
       }
     }
+  },
+  "style": {
+    "apply": "Apply my style",
+    "applyToSelection_one": "Apply my style to {{count}} photo",
+    "applyToSelection_other": "Apply my style to {{count}} photos",
+    "applyTooltip": "Apply my style (suggested basic settings, editable)",
+    "noModel": "No trained style",
+    "noModelHint": "Train your style from photos you have already edited. It stays on this computer.",
+    "trainCliHint": "For now, training runs from the command line: python3 -m scripts.style.train --corpus <folder> (see docs/style-model.md).",
+    "fallbackNotice": "Approximate style: trained on {{count}} photos (fewer than {{recommended}}). Suggestions are averages over groups of similar photos.",
+    "batch": {
+      "done_one": "My style applied to {{count}} photo.",
+      "done_other": "My style applied to {{count}} photos.",
+      "skipped": "{{count}} already edited photos skipped.",
+      "failed": "{{count}} photos could not be processed."
+    },
+    "errors": {
+      "modelOutdated": "Your style was trained with an earlier version. Retrain it to continue.",
+      "modelDamaged": "Your style file is damaged. Retrain it to continue.",
+      "generic": "My style could not be applied. Your settings are unchanged."
+    }
   }
 }

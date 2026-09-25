@@ -41,6 +41,7 @@ mod panorama_utils;
 mod picportal;
 mod preset_converter;
 mod raw_processing;
+mod style_model;
 mod subject_inference;
 mod tagging;
 mod tagging_utils;
@@ -2216,6 +2217,8 @@ pub fn run() {
             file_management::reset_adjustments_for_paths,
             file_management::apply_auto_lens_correction_to_paths,
             file_management::apply_auto_adjustments_to_paths,
+            style_model::apply_style_to_paths,
+            style_model::calculate_style_adjustments,
             file_management::handle_import_presets_from_file,
             file_management::handle_import_legacy_presets_from_file,
             file_management::handle_import_presets_from_files,

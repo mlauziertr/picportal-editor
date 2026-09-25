@@ -45,3 +45,7 @@ models/culling/pose_landmarker_lite.task
 
 # bench/replay.js result dumps
 bench/out/
+# personal style model (scripts/style/train.py output)
+models/style/style-model.onnx
+models/style/manifest.json
+models/style/report.json
