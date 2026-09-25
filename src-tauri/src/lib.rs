@@ -2237,6 +2237,8 @@ pub fn run() {
             tagging::add_tag_for_paths,
             tagging::remove_tag_for_paths,
             culling::cull_images,
+            culling::cancel_culling,
+            culling::culling_capabilities,
             picportal::picportal_login,
             picportal::picportal_restore_session,
             picportal::picportal_logout,

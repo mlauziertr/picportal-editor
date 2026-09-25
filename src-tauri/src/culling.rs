@@ -5,7 +5,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::{PicPortalState, face_processing, image_loader, subject_inference};
@@ -109,10 +109,132 @@ pub struct CullingSuggestions {
 }
 
 #[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct CullingProgress {
     current: usize,
     total: usize,
+    /// Legacy English label, kept for compatibility; the UI translates `stage_code`.
     stage: String,
+    /// `preparing`, `analyzing`, `subject` or `grouping`.
+    stage_code: &'static str,
+}
+
+impl CullingProgress {
+    fn new(current: usize, total: usize, stage_code: &'static str) -> Self {
+        let stage = match stage_code {
+            "preparing" => "Preparing local analysis...",
+            "analyzing" => "Analyzing images locally...",
+            "subject" => "Reviewing local subject, pose and eye signals...",
+            _ => "Grouping similar images and assigning review buckets...",
+        };
+        Self {
+            current,
+            total,
+            stage: stage.to_owned(),
+            stage_code,
+        }
+    }
+}
+
+pub const CULLING_CANCELLED: &str = "CULLING_CANCELLED";
+pub const CULLING_ALREADY_RUNNING: &str = "CULLING_ALREADY_RUNNING";
+
+static CULLING_RUNNING: AtomicBool = AtomicBool::new(false);
+static CULLING_CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Single-run guard: only one analysis at a time, released even on early return.
+struct CullingRunGuard;
+
+impl CullingRunGuard {
+    fn acquire() -> Result<Self, String> {
+        CULLING_RUNNING
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| CULLING_ALREADY_RUNNING.to_owned())?;
+        CULLING_CANCEL_REQUESTED.store(false, Ordering::Release);
+        Ok(Self)
+    }
+
+    fn is_cancelled(&self) -> bool {
+        CULLING_CANCEL_REQUESTED.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for CullingRunGuard {
+    fn drop(&mut self) {
+        CULLING_CANCEL_REQUESTED.store(false, Ordering::Release);
+        CULLING_RUNNING.store(false, Ordering::Release);
+    }
+}
+
+/// Requests cancellation of the running analysis. The flag is checked between
+/// images; nothing is written by an analysis, so cancelling never loses data.
+/// Returns whether an analysis was running.
+#[tauri::command]
+pub fn cancel_culling() -> bool {
+    let running = CULLING_RUNNING.load(Ordering::Acquire);
+    if running {
+        CULLING_CANCEL_REQUESTED.store(true, Ordering::Release);
+    }
+    running
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CullingCapabilities {
+    /// Sharpness, exposure and similarity are pure Rust and always available.
+    pub sharpness: &'static str,
+    /// `ready` or `unavailable` (face and eye models).
+    pub faces: &'static str,
+    /// `ready` or `unavailable` (optional subject/pose worker).
+    pub subject: &'static str,
+    /// First reason code explaining an unavailable capability, faces first.
+    pub reason_code: Option<String>,
+    pub faces_reason_code: Option<String>,
+    pub subject_reason_code: Option<String>,
+    /// True when an analysis started before (e.g. before a webview reload) is still running.
+    pub running: bool,
+}
+
+fn reason_code(error: &str) -> String {
+    error.split(':').next().unwrap_or(error).trim().to_owned()
+}
+
+/// Pre-flight check shown before launching the analysis (spec MAX-19 §1.9).
+#[tauri::command]
+pub async fn culling_capabilities(
+    app_handle: AppHandle,
+    face_state: State<'_, PicPortalState>,
+) -> Result<CullingCapabilities, String> {
+    let faces_result = match face_state.face_runtime.lock() {
+        Ok(mut guard) => face_processing::ensure_runtime(&mut guard, &app_handle).map(|_| ()),
+        Err(_) => Err("FACE_RUNTIME_LOCK_POISONED".to_owned()),
+    };
+    let subject_app = app_handle.clone();
+    let subject_result =
+        tauri::async_runtime::spawn_blocking(move || subject_inference::capability(&subject_app))
+            .await
+            .unwrap_or_else(|_| Err("LOCAL_CULLING_WORKER_START_FAILED".to_owned()));
+    let faces_reason_code = faces_result.err().map(|error| reason_code(&error));
+    let subject_reason_code = subject_result.err().map(|error| reason_code(&error));
+    Ok(CullingCapabilities {
+        sharpness: "ready",
+        faces: if faces_reason_code.is_none() {
+            "ready"
+        } else {
+            "unavailable"
+        },
+        subject: if subject_reason_code.is_none() {
+            "ready"
+        } else {
+            "unavailable"
+        },
+        reason_code: faces_reason_code
+            .clone()
+            .or_else(|| subject_reason_code.clone()),
+        faces_reason_code,
+        subject_reason_code,
+        running: CULLING_RUNNING.load(Ordering::Acquire),
+    })
 }
 
 struct ImageAnalysisData {
@@ -803,10 +925,20 @@ pub async fn cull_images(
     if paths.is_empty() {
         return Ok(CullingSuggestions::default());
     }
+    let run = CullingRunGuard::acquire()?;
     let app_settings = load_settings(app_handle.clone()).unwrap_or_default();
     let total_count = paths.len();
     let completed_count = Arc::new(AtomicUsize::new(0));
     let _ = app_handle.emit("culling-start", total_count);
+    let _ = app_handle.emit(
+        "culling-progress",
+        CullingProgress::new(0, total_count, "preparing"),
+    );
+    let cancelled = |app_handle: &AppHandle| -> Result<CullingSuggestions, String> {
+        log::info!("Assisted culling cancelled by the user; nothing was written");
+        let _ = app_handle.emit("culling-cancelled", ());
+        Err(CULLING_CANCELLED.to_owned())
+    };
     let hasher = HasherConfig::new()
         .hash_alg(HashAlg::DoubleGradient)
         .hash_size(16, 16)
@@ -814,18 +946,23 @@ pub async fn cull_images(
     let analysis_results: Vec<Result<ImageAnalysisData, (String, String)>> = paths
         .par_iter()
         .map(|path| {
+            if run.is_cancelled() {
+                return Err((path.to_owned(), CULLING_CANCELLED.to_owned()));
+            }
+            let result = analyze_image(path, &hasher, &app_settings)
+                .map_err(|error| (path.to_owned(), error));
+            // Count after the work so the bar reflects finished images, not started ones.
             let completed = completed_count.fetch_add(1, Ordering::Relaxed) + 1;
             let _ = app_handle.emit(
                 "culling-progress",
-                CullingProgress {
-                    current: completed,
-                    total: total_count,
-                    stage: "Analyzing images locally...".to_owned(),
-                },
+                CullingProgress::new(completed, total_count, "analyzing"),
             );
-            analyze_image(path, &hasher, &app_settings).map_err(|error| (path.to_owned(), error))
+            result
         })
         .collect();
+    if run.is_cancelled() {
+        return cancelled(&app_handle);
+    }
     let mut successful = Vec::new();
     let mut failed_paths = Vec::new();
     for result in analysis_results {
@@ -865,6 +1002,9 @@ pub async fn cull_images(
         }
     }
 
+    // Photos that could not be re-read for the eye/subject pass are listed as failed
+    // and never receive an automatic rating or label (ported from PR #2, 205c84e4).
+    let mut unprocessed_paths: HashSet<String> = HashSet::new();
     let needs_face_runtime =
         (settings.detect_subject || settings.detect_closed_eyes) && !successful.is_empty();
     let mut runtime_guard = if needs_face_runtime {
@@ -894,13 +1034,13 @@ pub async fn cull_images(
     if settings.detect_subject || settings.detect_closed_eyes {
         let _ = app_handle.emit(
             "culling-progress",
-            CullingProgress {
-                current: 0,
-                total: total_count,
-                stage: "Reviewing local subject, pose and eye signals...".to_owned(),
-            },
+            CullingProgress::new(0, total_count, "subject"),
         );
+        let subject_total = successful.len();
         for (index, data) in successful.iter_mut().enumerate() {
+            if run.is_cancelled() {
+                return cancelled(&app_handle);
+            }
             match load_culling_image(&data.result.path, &app_settings) {
                 Ok(image) => {
                     let face_runtime = runtime_guard.as_mut().and_then(|guard| guard.as_mut());
@@ -914,6 +1054,7 @@ pub async fn cull_images(
                 }
                 Err(error) => {
                     failed_paths.push(data.result.path.clone());
+                    unprocessed_paths.insert(data.result.path.clone());
                     data.result.subject_status = if settings.detect_subject {
                         "unknown"
                     } else {
@@ -933,41 +1074,48 @@ pub async fn cull_images(
             }
             let _ = app_handle.emit(
                 "culling-progress",
-                CullingProgress {
-                    current: index + 1,
-                    total: total_count,
-                    stage: "Reviewing local subject, pose and eye signals...".to_owned(),
-                },
+                CullingProgress::new(index + 1, subject_total, "subject"),
             );
         }
+    }
+    if run.is_cancelled() {
+        return cancelled(&app_handle);
     }
 
     let _ = app_handle.emit(
         "culling-progress",
-        CullingProgress {
-            current: total_count,
-            total: total_count,
-            stage: "Grouping similar images and assigning review buckets...".to_owned(),
-        },
+        CullingProgress::new(total_count, total_count, "grouping"),
     );
-    let mut suggestions = CullingSuggestions {
-        failed_paths,
-        eye_analysis_status: eye_status,
-        subject_analysis_status: subject_status,
-        ..Default::default()
-    };
+    let mut suggestions = build_suggestions(&mut successful, &settings, &unprocessed_paths);
+    suggestions.failed_paths = failed_paths;
+    suggestions.eye_analysis_status = eye_status;
+    suggestions.subject_analysis_status = subject_status;
+    let _ = app_handle.emit("culling-complete", &suggestions);
+    Ok(suggestions)
+}
+
+/// Groups similar photos, picks the selection and assigns review buckets and
+/// proposals. Pure: shared by `cull_images` and the corpus measurement harness.
+fn build_suggestions(
+    successful: &mut [ImageAnalysisData],
+    settings: &CullingSettings,
+    unprocessed_paths: &HashSet<String>,
+) -> CullingSuggestions {
+    let mut suggestions = CullingSuggestions::default();
     let mut duplicate_paths = HashSet::new();
     let mut similar_group_indices = Vec::new();
     if settings.detect_duplicates {
         for mut group_indices in connected_components(successful.len(), |left, right| {
-            successful[left].hash.dist(&successful[right].hash) <= similarity_threshold()
+            !unprocessed_paths.contains(&successful[left].result.path)
+                && !unprocessed_paths.contains(&successful[right].result.path)
+                && successful[left].hash.dist(&successful[right].hash) <= similarity_threshold()
         }) {
             if group_indices.len() > 1 {
                 group_indices.sort_by(|left, right| {
                     compare_group_candidates(
                         &successful[*left].result,
                         &successful[*right].result,
-                        &settings,
+                        settings,
                     )
                 });
                 for index in group_indices.iter().skip(1) {
@@ -982,11 +1130,12 @@ pub async fn cull_images(
         .iter()
         .enumerate()
         .filter(|(_, data)| {
-            is_selection_candidate(
-                &data.result,
-                &settings,
-                duplicate_paths.contains(&data.result.path),
-            )
+            !unprocessed_paths.contains(&data.result.path)
+                && is_selection_candidate(
+                    &data.result,
+                    settings,
+                    duplicate_paths.contains(&data.result.path),
+                )
         })
         .map(|(index, _)| index)
         .collect();
@@ -994,7 +1143,7 @@ pub async fn cull_images(
         compare_group_candidates(
             &successful[*left].result,
             &successful[*right].result,
-            &settings,
+            settings,
         )
     });
     let selected_count = selected_limit(ranked_clean_indices.len(), &settings.selection_amount);
@@ -1014,16 +1163,23 @@ pub async fn cull_images(
         HashSet::new()
     };
 
-    for data in &mut successful {
+    for data in successful.iter_mut() {
+        if unprocessed_paths.contains(&data.result.path) {
+            data.result.reasons = vec!["unprocessed".to_owned()];
+            data.result.category = "unrated".to_owned();
+            data.result.suggested_rating = 0;
+            suggestions.unrated_images.push(data.result.clone());
+            continue;
+        }
         let is_duplicate = duplicate_paths.contains(&data.result.path);
         let category = culling_category(
             &data.result,
-            &settings,
+            settings,
             is_duplicate,
             selected_paths.contains(&data.result.path),
             highlight_paths.contains(&data.result.path),
         );
-        let mut reasons = detector_reasons(&data.result, &settings, is_duplicate);
+        let mut reasons = detector_reasons(&data.result, settings, is_duplicate);
         if reasons.is_empty() {
             reasons.push(category.to_owned());
         }
@@ -1082,13 +1238,48 @@ pub async fn cull_images(
     suggestions
         .blurry_images
         .sort_by(|left, right| left.sharpness_metric.total_cmp(&right.sharpness_metric));
-    let _ = app_handle.emit("culling-complete", &suggestions);
-    Ok(suggestions)
+    suggestions
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_guard_is_exclusive_and_cancellation_is_scoped_to_the_run() {
+        // Global state: keep every assertion about it in this single test.
+        assert!(
+            !cancel_culling(),
+            "no run: cancel reports nothing to cancel"
+        );
+        let run = CullingRunGuard::acquire().expect("first run starts");
+        assert!(!run.is_cancelled());
+        assert_eq!(
+            CullingRunGuard::acquire().err().as_deref(),
+            Some(CULLING_ALREADY_RUNNING)
+        );
+        assert!(cancel_culling(), "running: cancel is accepted");
+        assert!(run.is_cancelled());
+        drop(run);
+        let next = CullingRunGuard::acquire().expect("guard released on drop");
+        assert!(
+            !next.is_cancelled(),
+            "a new run never inherits a stale cancel"
+        );
+        drop(next);
+    }
+
+    #[test]
+    fn progress_carries_a_translatable_stage_code() {
+        let progress = serde_json::to_value(CullingProgress::new(3, 10, "analyzing")).unwrap();
+        assert_eq!(progress["stageCode"], "analyzing");
+        assert_eq!(progress["stage"], "Analyzing images locally...");
+        assert_eq!(progress["current"], 3);
+        assert_eq!(
+            reason_code("LOCAL_CULLING_ARTIFACT_MISSING: dino.onnx"),
+            "LOCAL_CULLING_ARTIFACT_MISSING"
+        );
+    }
 
     fn analysis_result(path: &str, quality_score: f64) -> ImageAnalysisResult {
         ImageAnalysisResult {
@@ -1112,6 +1303,152 @@ mod tests {
             subject_method: "not-requested".to_owned(),
             subject_boxes: Vec::new(),
             attributed_faces: Vec::new(),
+        }
+    }
+
+    fn analysis_data(path: &str, quality_score: f64, hash_byte: u8) -> ImageAnalysisData {
+        ImageAnalysisData {
+            hash: image_hasher::ImageHash::from_bytes(&[hash_byte; 32]).expect("hash"),
+            result: analysis_result(path, quality_score),
+        }
+    }
+
+    #[test]
+    fn unprocessed_photos_get_no_proposal_and_stay_out_of_groups() {
+        // Identical hashes: without the guard, the three photos form one similar group.
+        let mut data = vec![
+            analysis_data("a.jpg", 0.9, 7),
+            analysis_data("b.jpg", 0.8, 7),
+            analysis_data("c.jpg", 0.7, 7),
+        ];
+        let unprocessed: HashSet<String> = ["a.jpg".to_owned()].into_iter().collect();
+        let settings = CullingSettings::default();
+        let suggestions = build_suggestions(&mut data, &settings, &unprocessed);
+
+        let a = suggestions
+            .results
+            .iter()
+            .find(|r| r.path == "a.jpg")
+            .unwrap();
+        assert_eq!(a.category, "unrated");
+        assert_eq!(a.reasons, vec!["unprocessed".to_owned()]);
+        assert!(!suggestions.star_assignments.contains_key("a.jpg"));
+        assert!(!suggestions.color_assignments.contains_key("a.jpg"));
+        assert_eq!(suggestions.similar_groups.len(), 1);
+        let group = &suggestions.similar_groups[0];
+        assert_eq!(group.representative.path, "b.jpg");
+        assert_eq!(group.duplicates.len(), 1);
+        assert_eq!(group.duplicates[0].path, "c.jpg");
+        assert!(suggestions.star_assignments.contains_key("b.jpg"));
+    }
+
+    /// Corpus measurement harness (not a unit test). Runs the production local
+    /// pipeline (analysis, YuNet/eyes, grouping, buckets) without the UI:
+    /// PICPORTAL_CULLING_CORPUS=<dir> PICPORTAL_CULLING_REPORT=<file.jsonl>
+    /// cargo test --lib culling::tests::corpus_measurement -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn corpus_measurement() {
+        let corpus = std::path::PathBuf::from(
+            std::env::var("PICPORTAL_CULLING_CORPUS").expect("PICPORTAL_CULLING_CORPUS"),
+        );
+        let report = std::env::var("PICPORTAL_CULLING_REPORT").expect("PICPORTAL_CULLING_REPORT");
+        let mut paths: Vec<String> = std::fs::read_dir(&corpus)
+            .expect("corpus dir")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| crate::formats::is_supported_image_file(path))
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+        paths.sort();
+        let app_settings = crate::app_settings::AppSettings::default();
+        let settings = CullingSettings {
+            detect_subject: false,
+            detect_closed_eyes: std::env::var("PICPORTAL_CULLING_EYES")
+                .map_or(true, |value| value != "0"),
+            ..Default::default()
+        };
+        let hasher = HasherConfig::new()
+            .hash_alg(HashAlg::DoubleGradient)
+            .hash_size(16, 16)
+            .to_hasher();
+        let started = std::time::Instant::now();
+        let analysed: Vec<_> = paths
+            .par_iter()
+            .map(|path| analyze_image(path, &hasher, &app_settings))
+            .collect();
+        let analysis_seconds = started.elapsed().as_secs_f64();
+        let mut failed = Vec::new();
+        let mut successful = Vec::new();
+        for (path, result) in paths.iter().zip(analysed) {
+            match result {
+                Ok(data) => successful.push(data),
+                Err(error) => failed.push(format!("{path}: {error}")),
+            }
+        }
+        let face_directory =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../models/face");
+        let mut face_runtime = face_processing::FaceRuntime::load(&face_directory).ok();
+        println!("face runtime available: {}", face_runtime.is_some());
+        let mut unprocessed = HashSet::new();
+        let started = std::time::Instant::now();
+        let mut worker = None;
+        for data in successful.iter_mut() {
+            match load_culling_image(&data.result.path, &app_settings) {
+                Ok(image) => apply_assisted_signals(
+                    &mut data.result,
+                    &image,
+                    &settings,
+                    &mut worker,
+                    face_runtime.as_mut(),
+                ),
+                Err(_) => {
+                    unprocessed.insert(data.result.path.clone());
+                }
+            }
+        }
+        let eye_seconds = started.elapsed().as_secs_f64();
+        let suggestions = build_suggestions(&mut successful, &settings, &unprocessed);
+        let mut group_of = HashMap::new();
+        for (index, group) in suggestions.similar_groups.iter().enumerate() {
+            group_of.insert(group.representative.path.clone(), index);
+            for duplicate in &group.duplicates {
+                group_of.insert(duplicate.path.clone(), index);
+            }
+        }
+        let mut lines = String::new();
+        for result in &suggestions.results {
+            let line = serde_json::json!({
+                "path": result.path,
+                "category": result.category,
+                "reasons": result.reasons,
+                "suggestedRating": result.suggested_rating,
+                "sharpness": result.sharpness_metric,
+                "quality": result.quality_score,
+                "blurry": is_blurry(result, &settings),
+                "eyeState": result.eye_state,
+                "eyeConfidence": result.eye_confidence,
+                "eyeMethod": result.eye_method,
+                "faceCount": result.face_count,
+                "faceWidthsPx": result.attributed_faces.iter().map(|face| (face.width * result.width as f32).round()).collect::<Vec<_>>(),
+                "faceEyes": result.attributed_faces.iter().map(|face| face.eye_state.clone()).collect::<Vec<_>>(),
+                "imageWidth": result.width,
+                "faces": result.attributed_faces.iter().map(|face| [face.x, face.y, face.width, face.height]).collect::<Vec<_>>(),
+                "group": group_of.get(&result.path),
+            });
+            lines.push_str(&line.to_string());
+            lines.push('\n');
+        }
+        std::fs::write(&report, lines).expect("write report");
+        println!(
+            "images={} ok={} failed={} unprocessed={} groups={} analysis_s={analysis_seconds:.1} eyes_s={eye_seconds:.1}",
+            paths.len(),
+            suggestions.results.len(),
+            failed.len(),
+            unprocessed.len(),
+            suggestions.similar_groups.len()
+        );
+        for failure in failed {
+            println!("failed: {failure}");
         }
     }
 
