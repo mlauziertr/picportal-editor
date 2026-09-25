@@ -20,7 +20,10 @@ Hors v1 : courbes, HSL, étalonnage, masques, preset.
 
 ## Corpus
 
-Un dossier (ou plusieurs, `--corpus` répétable), parcouru récursivement. Une photo compte si :
+Un dossier (ou plusieurs, `--corpus` répétable), parcouru récursivement. Chaque fichier n'est
+compté qu'une fois par chemin canonique (racines recouvrantes `parent` + `parent/sub`, racine
+répétée, liens symboliques) avant l'extraction, donc avant le tirage du jeu mis de côté ; le
+résumé indique `duplicatePathsIgnored`. Une photo compte si :
 
 1. son sidecar `<photo>.<ext>.rrdata` a au moins un des 10 réglages différent de 0 ; sinon
 2. son XMP `<photo>.xmp` contient des réglages de développement Lightroom (`crs:`).
@@ -72,6 +75,7 @@ par `ort` 2.0.0-rc.10).
 - MAE par réglage du modèle et de la **baseline « réglages moyens »** (moyenne du corpus
   d'entraînement), sur le jeu mis de côté.
 - `relativeMae` = moyenne sur les réglages de MAE modèle / MAE baseline ; < 1 bat la baseline.
+  Les réglages constants dans le corpus (MAE baseline nulle) sont exclus de cette moyenne.
 - Corpus synthétique uniquement : `presetRecovery`, part des photos dont la prédiction (réglages
   purement stylistiques) est la plus proche du preset qui l'a produite.
 
@@ -110,8 +114,17 @@ Le modèle est rechargé automatiquement quand `manifest.json` change.
 - **Bibliothèque** : entrée « Appliquer mon style à N photos » sous l'ajustement auto.
   Commande `apply_style_to_paths(paths, skipEdited = true)`, qui passe par le même chemin que
   `apply_auto_adjustments_to_paths` (verrou de sidecar, synchronisation XMP, vignettes), mis en
-  commun dans `update_adjustments_for_paths`. Les photos ayant un réglage de base **manuel**
-  sont ignorées et comptées.
+  commun dans `update_adjustments_for_paths` / `update_sidecar_adjustments`. Les photos ayant un
+  réglage de base **manuel** sont ignorées et comptées : ni `.rrdata`, ni XMP, ni vignette ne sont
+  réécrits. Un sidecar illisible ou invalide est refusé (`SIDECAR_INVALID`, photo comptée en
+  échec) au lieu d'être remplacé par des métadonnées par défaut. Avec la synchronisation XMP, la
+  note et les libellés du XMP sont relus avant réécriture (une note Lightroom n'est pas remise
+  à 0).
+- **Réponses asynchrones** : la proposition de l'éditeur n'est appliquée que si la même photo
+  est toujours ouverte avec la même révision de réglages (objet `adjustments` du store) ; sinon
+  elle est abandonnée (`style.errors.stale`). Après un lot, l'éditeur et l'aperçu de la
+  bibliothèque ne rechargent le sidecar que s'ils montrent encore la photo et la révision
+  capturées au lancement (`reloadActivePhotos`, `src/utils/styleModel.ts`).
 - **Provenance** : `adjustments.styleProvenance = { modelId, appliedAt, keys, values, previous }`.
   Un réglage est « au style » s'il vaut 0 ou exactement la valeur écrite par le style ; sinon il
   est manuel. `previous` garde les valeurs d'avant la première application (base d'un futur
@@ -141,11 +154,33 @@ aucune image téléchargée), les « prend » avec une erreur d'exposition (±1,
 (`scripts/style/fixtures/synthetic-presets.json`) plus la correction de ces erreurs et un bruit
 « humain ». Moitié `.rrdata`, moitié XMP Lightroom, 5 % non retouchées.
 
+## Validation sur corpus réel (MAX-45)
+
+Corpus Nikon de 4 379 NEF + XMP Lightroom (une seule séance, lecture seule, rien copié dans le
+dépôt), entraînement 4 threads, graine 0 :
+
+- lecture : 4 378 / 4 379 NEF (99,98 %) ; 1 échec (aucun aperçu JPEG intégré décodable) ;
+  1 170 JPEG exportés sans sidecar ignorés ; 0 chemin dupliqué ;
+- jeu mis de côté aléatoire (875 photos) : kNN k = 3, `relativeMae` 0,569 ; bat la baseline sur
+  les 6 réglages variables (exposition MAE 0,13 contre 0,43, température 4,8 contre 11,7) ;
+  `whites`, `blacks`, `vibrance`, `saturation` sont constants dans ce corpus ;
+- **ce chiffre est optimiste** : les rafales (images consécutives quasi identiques, mêmes
+  réglages synchronisés) se retrouvent des deux côtés d'un tirage aléatoire. Avec un jeu mis de
+  côté par blocs de 25 / 100 images consécutives, le meilleur candidat (MLP 32) obtient 0,72 /
+  0,79, et 0,82 sur les 20 % chronologiquement derniers ; le kNN k = 3 retenu tombe à 0,76 /
+  0,86 / 0,93. La sélection par validation croisée aléatoire favorise donc à tort les kNN à
+  petit k sur un corpus en rafales.
+
 ## Limites connues
 
+- Sélection et évaluation par tirage aléatoire : optimistes sur un corpus en rafales (voir
+  ci-dessus). À faire : validation groupée par séquence de prise de vue (date EXIF), non
+  implémentée en v1.
+
 - Le style appris est relatif à la source vue : l'aperçu JPEG intégré au RAW (rendu boîtier), pas
-  le développement RAW de l'éditeur. Si le rendu de base diffère fortement, l'exposition proposée
-  peut être biaisée ; à mesurer sur le corpus réel.
+  le développement RAW de l'éditeur. Sur le corpus NEF réel, l'écart aux réglages Lightroom est
+  mesuré (ci-dessus), mais pas le rendu visuel de ces réglages Lightroom dans le moteur de
+  l'éditeur, qui peut différer (validation visuelle non faite).
 - EXIF des RAW : lu dans les conteneurs TIFF (NEF, ARW, CR2, DNG…). CR3, RAF, ORF, RW2 : EXIF
   absent pour les caractéristiques (drapeau à 0), aperçu trouvé par balayage des flux JPEG côté
   Python et par `rawler` côté Rust — parité non vérifiée sur ces formats.

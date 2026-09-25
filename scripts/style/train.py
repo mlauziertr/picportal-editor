@@ -105,7 +105,11 @@ def preset_recovery(predictions: np.ndarray, truth_path: Path | None, ids: list[
     return {"accuracy": round(hits / total, 4) if total else None, "images": total, "styleOnlyKeys": style_keys}
 
 
-def evaluate(dataset: dict, seed: int, truth_path: Path | None) -> tuple[Model, dict]:
+def evaluate(
+    dataset: dict, seed: int, truth_path: Path | None, holdout: dict | None = None
+) -> tuple[Model, dict]:
+    """`holdout`, if given, receives the evaluated ids, targets, model and baseline predictions
+    (clamped), for inspection; they are not written to the artifacts."""
     features, targets, ids = dataset["features"], dataset["targets"], dataset["ids"]
     count = len(features)
     if count < 2:
@@ -144,6 +148,8 @@ def evaluate(dataset: dict, seed: int, truth_path: Path | None) -> tuple[Model, 
             "beatsBaseline": bool(relative_score(model_mae, baseline_mae) < 1.0),
         }
     )
+    if holdout is not None:
+        holdout.update(ids=eval_ids, targets=targets, model=clamp(predictions), baseline=clamp(baseline))
     recovery = preset_recovery(predictions, truth_path, eval_ids)
     if recovery is not None:
         report["evaluation"]["presetRecovery"] = recovery
